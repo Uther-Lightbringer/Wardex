@@ -146,6 +146,13 @@ function onRefreshOrStop(): void {
               </span>
               <span
                 v-if="chat.sessionId"
+                class="chat__seg-toggle"
+                :style="{ fontSize: prefs.fs(11) + 'px' }"
+                @click="chat.setAllSegsOpen(!chat.segCollapseOpen)"
+                >{{ chat.segCollapseOpen ? '⊟ 全部折叠' : '⊞ 全部展开' }}</span
+              >
+              <span
+                v-if="chat.sessionId"
                 class="chat__agent-chip"
                 :style="{ fontSize: prefs.fs(12) + 'px' }"
                 @click="openAgentMenu"
@@ -317,6 +324,18 @@ function onRefreshOrStop(): void {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat__seg-toggle {
+  flex: none;
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.chat__seg-toggle:hover {
+  color: var(--war-gold);
 }
 
 .chat__agent-chip {

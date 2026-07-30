@@ -5,8 +5,18 @@
 // Buttons come from the ACP options[] (generic approve/reject names are
 // localized; AskUserQuestion texts stay verbatim); >3 options lay out in a
 // two-column grid. No options → 允许 / 拒绝 fallback.
+//
+// AskUserQuestion mode (kimi q{n}_* wire format, parsed into
+// chat.permission.questions by acp/types.rs): EVERY question group the wire
+// carries renders with its own option buttons, so nothing is dropped
+// client-side. Two protocol-level narrowings apply (both mirror kimi's own
+// adapter): the ACP response carries exactly one optionId, so answering any
+// group resolves the request with that single selection — even for
+// multi_select questions; and kimi 0.29.x degrades multi-question calls to
+// the first question agent-side, so today only one group ever arrives.
 import { computed } from 'vue';
 import { useChatStore } from '../../stores/chat';
+import type { QuestionGroup } from '../../stores/chat';
 import WarDialog from '../war/WarDialog.vue';
 import WarButton from '../war/WarButton.vue';
 
@@ -19,9 +29,14 @@ const open = computed({
   },
 });
 
+const questions = computed<QuestionGroup[]>(() => chat.permission?.questions ?? []);
+const questionMode = computed(() => questions.value.length > 0);
+
 const title = computed(() => {
   const tc = chat.permission?.params.toolCall;
-  return (tc?.title || tc?.kind || 'Agent 请求执行工具') as string;
+  const t = (tc?.title || tc?.kind || 'Agent 请求执行工具') as string;
+  // The kimi adapter names the toolCall "AskUserQuestion" — localize.
+  return questionMode.value && t === 'AskUserQuestion' ? 'Agent 询问' : t;
 });
 
 /** Whitespace-collapse + 160-char middle elide (head 78 … tail 78). */
@@ -86,18 +101,52 @@ const options = computed<OptionView[]>(() => {
 
 const grid = computed(() => options.value.length > 3);
 
+/** Question mode always uses the wide dialog (stacked groups + scroll). */
+const dialogWidth = computed(() => (questionMode.value || grid.value ? 640 : 560));
+
 function answer(o: OptionView): void {
   void chat.answerPermission(o.id, o.cancel === true);
+}
+
+/** Question option / Skip click: the optionId round-trips verbatim. */
+function answerQuestion(optionId: string): void {
+  void chat.answerPermission(optionId, false);
 }
 </script>
 
 <template>
-  <WarDialog v-model:open="open" title-text="工具权限请求" no-auto-close :dialog-width="grid ? 640 : 560">
+  <WarDialog v-model:open="open" title-text="工具权限请求" no-auto-close :dialog-width="dialogWidth">
     <template #plate>
       <div class="perm__title">{{ title }}</div>
-      <div v-if="detail" class="perm__detail">{{ detail }}</div>
+      <div v-if="!questionMode && detail" class="perm__detail">{{ detail }}</div>
     </template>
-    <div class="perm__buttons" :class="{ grid }">
+    <div v-if="questionMode" class="perm__questions">
+      <div v-for="(q, qi) in questions" :key="q.index" class="perm__question">
+        <div v-if="questions.length > 1" class="perm__qhead">问题 {{ qi + 1 }} / {{ questions.length }}</div>
+        <div class="perm__qtext">{{ q.text || '（无问题文本）' }}</div>
+        <div v-if="q.multi_select" class="perm__qhint">
+          （该问题允许多选；ACP 通道每次仅回传一个选项）
+        </div>
+        <div class="perm__buttons" :class="{ grid: q.options.length > 3 }">
+          <WarButton
+            v-for="(o, i) in q.options"
+            :key="i"
+            skin="dialog"
+            :width="q.options.length > 3 ? 168 : 190"
+            :text="o.label"
+            @activated="answerQuestion(o.option_id)"
+          />
+          <WarButton
+            v-if="q.skip_id"
+            skin="dialog"
+            :width="q.options.length > 3 ? 168 : 190"
+            text="跳过"
+            @activated="answerQuestion(q.skip_id)"
+          />
+        </div>
+      </div>
+    </div>
+    <div v-else class="perm__buttons" :class="{ grid }">
       <WarButton
         v-for="(o, i) in options"
         :key="i"
@@ -143,5 +192,45 @@ function answer(o: OptionView): void {
   display: grid;
   grid-template-columns: 1fr 1fr;
   justify-items: center;
+}
+
+.perm__questions {
+  width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.perm__question {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.perm__qhead {
+  color: var(--war-text-faint);
+  font-family: SimSun, serif;
+  font-size: 11px;
+  align-self: flex-start;
+}
+
+.perm__qtext {
+  color: var(--war-text);
+  font-family: SimSun, serif;
+  font-size: 13px;
+  font-weight: bold;
+  overflow-wrap: break-word;
+  align-self: flex-start;
+}
+
+.perm__qhint {
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  font-size: 11px;
+  align-self: flex-start;
 }
 </style>

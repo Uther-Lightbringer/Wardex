@@ -69,6 +69,21 @@ export interface Subagent {
   finishedAt: number;
 }
 
+export interface QuestionOption {
+  option_id: string;
+  label: string;
+}
+
+/** One AskUserQuestion question, grouped from the q{n}_* option namespace
+ * (parsed in Rust acp/types.rs; empty array for regular approvals). */
+export interface QuestionGroup {
+  index: number;
+  text: string;
+  multi_select: boolean;
+  options: QuestionOption[];
+  skip_id: string;
+}
+
 export interface PermissionRequest {
   sessionId: string;
   requestId: number;
@@ -81,6 +96,8 @@ export interface PermissionRequest {
     };
     options?: { optionId?: string; id?: string; name?: string; kind?: string }[];
   };
+  /** AskUserQuestion groups (kimi q{n}_* wire format); absent/empty = plain approval. */
+  questions?: QuestionGroup[];
 }
 
 export interface SessionMeta {
@@ -143,6 +160,11 @@ export const useChatStore = defineStore('chat', {
     turnSeq: 0,
     /** Bumped to request a scroll-to-end (send / session switch). */
     scrollSeq: 0,
+    /** Collapse/expand-all command for thinking/tool blocks (一.10): bubbles
+     * keep segOpen component-local; they watch segCollapseSeq and apply
+     * segCollapseOpen to every thinking/tool segment. */
+    segCollapseSeq: 0,
+    segCollapseOpen: false,
     /** Bumped by the 刷新工作区 action-bay button (files/git panels). */
     workspaceRefreshSeq: 0,
     /** Pending attachment paths (attachment bar floats above the composer). */
@@ -310,6 +332,12 @@ export const useChatStore = defineStore('chat', {
     registerStreamTarget(rowId: string, kind: string, el: HTMLElement | null): void {
       if (el) this.streamTarget = { rowId, kind, el };
       else if (this.streamTarget?.rowId === rowId) this.streamTarget = null;
+    },
+
+    /** 一.10: collapse/expand every thinking/tool block in all bubbles. */
+    setAllSegsOpen(open: boolean): void {
+      this.segCollapseOpen = open;
+      this.segCollapseSeq += 1;
     },
 
     // ---- session lifecycle ----

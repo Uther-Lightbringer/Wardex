@@ -13,7 +13,7 @@
 // segment list is append-only so indexes are stable, and since incremental
 // appends never recreate this component, blocks the user opened mid-stream
 // stay open (ChatBubble.qml:113-123 parity).
-import { computed, onBeforeUnmount, onMounted, onUpdated, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, onUpdated, reactive, ref, watch } from 'vue';
 import { fileSrc, openPath } from '../../lib/tauri';
 import { renderMarkdown } from '../../lib/markdown';
 import { copyText } from '../../lib/clipboard';
@@ -77,6 +77,34 @@ function toggleSeg(i: number): void {
   segOpen[i] = !segOpen[i];
 }
 
+function collapseAllSegs(): void {
+  for (const k of Object.keys(segOpen)) segOpen[Number(k)] = false;
+}
+
+// Auto-collapse on turn end (一.4): blocks the user opened mid-stream snap
+// shut once the row reaches a final status. Historical rows load with a
+// final status and segOpen empty — already collapsed, the watcher never
+// fires for them.
+const FINAL_STATUSES = new Set(['done', 'error', 'interrupted']);
+watch(
+  () => props.row.status,
+  (now, was) => {
+    if (FINAL_STATUSES.has(now) && !FINAL_STATUSES.has(was ?? '')) collapseAllSegs();
+  },
+);
+
+// Global collapse/expand-all signal (一.10): the chat store owns a versioned
+// command; every mounted bubble applies it to its thinking/tool blocks.
+watch(
+  () => chat.segCollapseSeq,
+  () => {
+    const open = chat.segCollapseOpen;
+    segs.value.forEach((s, i) => {
+      if (s.kind === 'thinking' || s.kind === 'tool') segOpen[i] = open;
+    });
+  },
+);
+
 function toolName(s: ChatSegment): string {
   return String(s.name || s.title || s.kind || 'tool');
 }
@@ -91,6 +119,10 @@ function toolPayload(s: ChatSegment): string {
 }
 
 // ---- markdown: rendered once per finished segment, memoized by content ----
+// Per-bubble markdown switch (一.9): rendered by default; 原文 shows the raw
+// text. Component-local on purpose.
+const mdEnabled = ref(true);
+
 const mdCache = new Map<string, string>();
 function markdownOf(text: string): string {
   let html = mdCache.get(text);
@@ -139,6 +171,18 @@ onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer);
 });
 
+// ---- long user message fold (四.8) ----
+// Pasted logs etc.: over ~15 lines or ~800 chars the bubble clamps to the
+// first lines with a 展开全部 toggle. User bubbles only; component-local.
+const USER_FOLD_LINES = 15;
+const USER_FOLD_CHARS = 800;
+const userExpanded = ref(false);
+const userLong = computed(() => {
+  if (!isUser.value) return false;
+  const t = displayBody.value;
+  return t.length > USER_FOLD_CHARS || t.split('\n').length > USER_FOLD_LINES;
+});
+
 // ---- attachments ----
 const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
 function isImagePath(p: string): boolean {
@@ -184,6 +228,13 @@ function fileName(p: string): string {
             >{{ statusLabel }}</span
           >
           <span
+            v-if="!isUser && !streaming"
+            class="bubble-head__md"
+            :style="{ fontSize: fs(11) + 'px' }"
+            @click="mdEnabled = !mdEnabled"
+            >{{ mdEnabled ? '原文' : '渲染' }}</span
+          >
+          <span
             class="bubble-head__copy"
             :class="{ copied }"
             :style="{ fontSize: fs(11) + 'px' }"
@@ -215,9 +266,9 @@ function fileName(p: string): string {
                  targets its text node directly (no stray sibling nodes). -->
             <div v-else-if="s.kind === 'text'" class="seg-text">
               <span
-                v-if="streaming"
+                v-if="streaming || !mdEnabled"
                 class="seg-text__plain"
-                :data-live-seg="i === segs.length - 1 ? '' : undefined"
+                :data-live-seg="streaming && i === segs.length - 1 ? '' : undefined"
                 >{{ s.text }}</span
               >
               <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
@@ -236,7 +287,25 @@ function fileName(p: string): string {
 
         <!-- fallback: user rows and the pending placeholder have no segments -->
         <div v-else-if="displayBody" class="seg-text">
-          <span class="seg-text__plain" :class="{ 'err-text': isError }">{{ displayBody }}</span>
+          <div
+            v-if="!isUser && mdEnabled"
+            class="seg-text__md md-body"
+            v-html="markdownOf(displayBody)"
+          ></div>
+          <span
+            v-else
+            class="seg-text__plain"
+            :class="{ 'err-text': isError, 'user-clamped': userLong && !userExpanded }"
+            >{{ displayBody }}</span
+          >
+          <div
+            v-if="userLong"
+            class="user-fold"
+            :style="{ fontSize: fs(11) + 'px' }"
+            @click="userExpanded = !userExpanded"
+          >
+            {{ userExpanded ? '▲ 收起' : '▼ 展开全部' }}
+          </div>
         </div>
 
         <!-- user attachments -->
@@ -394,6 +463,14 @@ function fileName(p: string): string {
   margin-left: auto;
 }
 
+.bubble-head__md {
+  color: #a0a8b8;
+}
+
+.bubble-head__md:hover {
+  color: var(--war-gold-bright);
+}
+
 .bubble-head.user .bubble-head__copy {
   margin-left: 0;
   margin-right: auto;
@@ -416,6 +493,26 @@ function fileName(p: string): string {
 
 .seg-text__plain.err-text {
   color: var(--war-error);
+}
+
+/* 四.8: collapsed long user message — clamp to the first lines (pre-wrap
+   newlines are preserved inside the line-clamp box). */
+.seg-text__plain.user-clamped {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  overflow: hidden;
+}
+
+.user-fold {
+  color: var(--war-gold);
+  margin-top: 4px;
+  user-select: none;
+  width: fit-content;
+}
+
+.user-fold:hover {
+  color: var(--war-gold-bright);
 }
 
 .seg-text__md {
@@ -514,8 +611,11 @@ function fileName(p: string): string {
 </style>
 
 <style>
-/* markdown body (unscoped: v-html content). Kept compact — body text styling
-   only, no layout interference with the bubble frame. */
+/* markdown body (unscoped: v-html content). WC3 gold tone (四.7): headings
+   and emphasis in gold, code blocks dark with a thin brass border, quotes /
+   links / list markers follow the warTheme palette. Kept compact — body
+   text styling only, no layout interference with the bubble frame. Shared
+   with FilePreviewDialog's preview pane (same .md-body class). */
 .md-body > :first-child {
   margin-top: 0;
 }
@@ -526,9 +626,17 @@ function fileName(p: string): string {
   margin: 6px 0;
   line-height: 1.5;
 }
+.md-body strong,
+.md-body b {
+  color: var(--war-gold-bright);
+}
+.md-body em,
+.md-body i {
+  color: var(--war-gold);
+}
 .md-body pre {
-  background: #00000060;
-  border: 1px solid #2a3344;
+  background: #00000070;
+  border: 1px solid var(--war-gold-input);
   border-radius: 2px;
   padding: 6px 8px;
   overflow-x: auto;
@@ -538,18 +646,23 @@ function fileName(p: string): string {
 .md-body code {
   font-family: Consolas, monospace;
   background: #00000050;
+  color: var(--war-gold-bright);
   padding: 0 3px;
   border-radius: 2px;
   font-size: 0.92em;
 }
 .md-body pre code {
   background: none;
+  color: var(--war-text);
   padding: 0;
 }
 .md-body ul,
 .md-body ol {
   margin: 6px 0;
   padding-left: 22px;
+}
+.md-body li::marker {
+  color: var(--war-gold-dim);
 }
 .md-body h1,
 .md-body h2,
@@ -558,6 +671,10 @@ function fileName(p: string): string {
   margin: 10px 0 6px;
   color: var(--war-gold);
   font-family: SimSun, serif;
+  font-weight: bold;
+  text-shadow:
+    -1px 0 var(--war-outline-brown), 1px 0 var(--war-outline-brown),
+    0 -1px var(--war-outline-brown), 0 1px var(--war-outline-brown);
 }
 .md-body h1 { font-size: 1.25em; }
 .md-body h2 { font-size: 1.15em; }
@@ -565,11 +682,15 @@ function fileName(p: string): string {
 .md-body blockquote {
   margin: 6px 0;
   padding-left: 10px;
-  border-left: 3px solid #4a4232;
+  border-left: 3px solid var(--war-gold-dim);
   color: var(--war-text-muted);
 }
 .md-body a {
-  color: var(--war-user-blue);
+  color: var(--war-gold-bright);
+  text-decoration: underline;
+}
+.md-body a:hover {
+  color: var(--war-gold);
 }
 .md-body table {
   border-collapse: collapse;
@@ -579,6 +700,9 @@ function fileName(p: string): string {
 .md-body td {
   border: 1px solid #2a3344;
   padding: 3px 8px;
+}
+.md-body th {
+  color: var(--war-gold);
 }
 .md-body hr {
   border: none;

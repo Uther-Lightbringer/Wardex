@@ -131,6 +131,153 @@ pub fn json_int(v: &Value) -> Option<i64> {
     v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))
 }
 
+// ---- AskUserQuestion permission requests (kimi acp adapter wire format) ----
+//
+// kimi's ACP adapter bridges the AskUserQuestion tool through
+// session/request_permission (ACP has no dedicated question method), tagging
+// option ids with a `q{n}_*` namespace so the round-trip is unambiguous:
+//   q{questionIndex}_opt_{optionIndex}  (kind allow_once, name = option label)
+//   q{questionIndex}_skip               (kind reject_once, name "Skip")
+// The question text rides in toolCall.content blocks; a future adapter may
+// also carry the full question array in toolCall.rawInput.questions (with
+// multi_select flags). This parser groups everything the wire carries so the
+// dialog can render EVERY question — nothing is dropped client-side.
+//
+// Verified against kimi 0.29.1: that version's adapter itself degrades a
+// multi-question call to the first question before anything reaches the
+// wire, so today only q0 groups ever arrive; the parser is the forward-
+// compatible half of the fix.
+//
+// Answer narrowing (kept verbatim from the adapter's contract): the ACP
+// response carries exactly ONE optionId, so each request is answered with a
+// single selection — even for multi_select questions (the adapter narrows
+// them the same way). claude-code-acp disallows AskUserQuestion entirely
+// and codex-acp never emits this namespace, so non-matching options leave
+// the regular permission flow untouched.
+
+use serde::Serialize;
+
+/// One selectable answer of an AskUserQuestion question.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct QuestionOption {
+    pub option_id: String,
+    pub label: String,
+}
+
+/// One question of an AskUserQuestion permission request, grouped from the
+/// `q{n}_*` option namespace.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct QuestionGroup {
+    /// Question index from the option-id namespace (0-based).
+    pub index: usize,
+    /// Question text (content block / rawInput; may be empty).
+    pub text: String,
+    /// rawInput.questions[i].multi_select|multiSelect; default single-select.
+    pub multi_select: bool,
+    pub options: Vec<QuestionOption>,
+    /// optionId of the group's Skip entry ("" when the agent offers none).
+    pub skip_id: String,
+}
+
+/// Parse one `q{n}_opt_{i}` / `q{n}_skip` option id → (question, option?).
+fn parse_question_option_id(id: &str) -> Option<(usize, Option<usize>)> {
+    let rest = id.strip_prefix('q')?;
+    let (q, rest) = rest.split_once('_')?;
+    let question: usize = q.parse().ok()?;
+    if rest == "skip" {
+        return Some((question, None));
+    }
+    let opt = rest.strip_prefix("opt_")?.parse().ok()?;
+    Some((question, Some(opt)))
+}
+
+/// Group a request_permission params' options by question. Empty when no
+/// option id matches the namespace (regular approvals: allow_once etc.).
+pub fn parse_question_request(params: &Value) -> Vec<QuestionGroup> {
+    let Some(options) = params.get("options").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut groups: Vec<QuestionGroup> = Vec::new();
+    for opt in options {
+        let id = opt.get("optionId").and_then(Value::as_str).unwrap_or_default();
+        let Some((qi, oi)) = parse_question_option_id(id) else {
+            continue;
+        };
+        if groups.iter().all(|g| g.index != qi) {
+            groups.push(QuestionGroup {
+                index: qi,
+                ..Default::default()
+            });
+        }
+        let group = groups.iter_mut().find(|g| g.index == qi).expect("just pushed");
+        match oi {
+            Some(_) => group.options.push(QuestionOption {
+                option_id: id.to_string(),
+                label: opt
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            }),
+            None => group.skip_id = id.to_string(),
+        }
+    }
+    if groups.is_empty() {
+        return groups;
+    }
+    groups.sort_by_key(|g| g.index);
+
+    // Question texts + multi_select: rawInput.questions wins (it is the
+    // tool's original payload); content blocks are the kimi fallback (one
+    // text block per question, or a single block for a single question).
+    let tool = params.get("toolCall").cloned().unwrap_or(Value::Null);
+    let raw_questions = tool
+        .get("rawInput")
+        .and_then(|r| r.get("questions"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let content_texts: Vec<String> = tool
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .map(|b| {
+                    b.get("content")
+                        .and_then(|c| c.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .filter(|t| !t.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let group_count = groups.len();
+    for (pos, group) in groups.iter_mut().enumerate() {
+        if let Some(rq) = raw_questions.get(group.index).or_else(|| raw_questions.get(pos)) {
+            if group.text.is_empty() {
+                group.text = rq
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            group.multi_select = rq.get("multi_select").and_then(Value::as_bool).unwrap_or(false)
+                || rq.get("multiSelect").and_then(Value::as_bool).unwrap_or(false);
+        }
+        if group.text.is_empty() {
+            group.text = if group_count == 1 {
+                content_texts.join("\n")
+            } else {
+                content_texts.get(pos).cloned().unwrap_or_default()
+            };
+        }
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +361,115 @@ mod tests {
         assert_eq!(json_int(&json!(3.0)), Some(3));
         assert_eq!(json_int(&json!("3")), None);
         assert_eq!(json_int(&Value::Null), None);
+    }
+
+    /// Captured verbatim from kimi 0.29.1 (`kimi acp`, AskUserQuestion with
+    /// two questions — the adapter itself degrades to the first; the client
+    /// only ever sees q0 today).
+    #[test]
+    fn parse_question_request_kimi_single_question_wire() {
+        let params = json!({
+            "sessionId": "s",
+            "options": [
+                { "optionId": "q0_opt_0", "name": "Red", "kind": "allow_once" },
+                { "optionId": "q0_opt_1", "name": "Blue", "kind": "allow_once" },
+                { "optionId": "q0_skip", "name": "Skip", "kind": "reject_once" }
+            ],
+            "toolCall": {
+                "toolCallId": "0:tool_1",
+                "title": "AskUserQuestion",
+                "content": [{ "type": "content", "content": { "type": "text", "text": "Pick a color" } }]
+            }
+        });
+        let groups = parse_question_request(&params);
+        assert_eq!(groups.len(), 1);
+        let g = &groups[0];
+        assert_eq!(g.index, 0);
+        assert_eq!(g.text, "Pick a color");
+        assert!(!g.multi_select);
+        assert_eq!(g.skip_id, "q0_skip");
+        assert_eq!(
+            g.options,
+            vec![
+                QuestionOption { option_id: "q0_opt_0".into(), label: "Red".into() },
+                QuestionOption { option_id: "q0_opt_1".into(), label: "Blue".into() },
+            ]
+        );
+    }
+
+    /// Forward-compatible shape: several question groups in ONE request
+    /// (the kimi adapter's documented no-wire-change multi-question path).
+    /// Every group must survive — the rendering layer drops nothing.
+    #[test]
+    fn parse_question_request_groups_multiple_questions() {
+        let params = json!({
+            "options": [
+                { "optionId": "q0_opt_0", "name": "Red" },
+                { "optionId": "q0_skip", "name": "Skip" },
+                { "optionId": "q1_opt_0", "name": "Big" },
+                { "optionId": "q1_opt_1", "name": "Small" },
+                { "optionId": "q1_skip", "name": "Skip" }
+            ],
+            "toolCall": {
+                "title": "AskUserQuestion",
+                "content": [
+                    { "content": { "text": "Pick a color" } },
+                    { "content": { "text": "Pick a size" } }
+                ],
+                "rawInput": {
+                    "questions": [
+                        { "question": "Pick a color", "multi_select": false },
+                        { "question": "Pick a size", "multi_select": true }
+                    ]
+                }
+            }
+        });
+        let groups = parse_question_request(&params);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].text, "Pick a color");
+        assert!(!groups[0].multi_select);
+        assert_eq!(groups[0].skip_id, "q0_skip");
+        assert_eq!(groups[1].text, "Pick a size");
+        assert!(groups[1].multi_select, "multi_select from rawInput");
+        assert_eq!(groups[1].options.len(), 2);
+        assert_eq!(groups[1].skip_id, "q1_skip");
+    }
+
+    #[test]
+    fn parse_question_request_ignores_regular_approvals() {
+        // Standard approval options never match the q{n}_* namespace.
+        let params = json!({
+            "options": [
+                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "reject", "name": "Reject", "kind": "reject_once" }
+            ],
+            "toolCall": { "title": "Bash", "kind": "execute" }
+        });
+        assert!(parse_question_request(&params).is_empty());
+        assert!(parse_question_request(&json!({})).is_empty());
+        // Malformed q-ids are skipped, valid siblings still group.
+        let params = json!({
+            "options": [
+                { "optionId": "q_opt_0", "name": "bad" },
+                { "optionId": "q0_opt_x", "name": "bad" },
+                { "optionId": "q0_opt_2", "name": "ok" }
+            ]
+        });
+        let groups = parse_question_request(&params);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].options.len(), 1);
+        assert_eq!(groups[0].options[0].label, "ok");
+        assert!(groups[0].skip_id.is_empty());
+    }
+
+    #[test]
+    fn parse_question_option_id_shapes() {
+        assert_eq!(parse_question_option_id("q0_opt_0"), Some((0, Some(0))));
+        assert_eq!(parse_question_option_id("q12_opt_3"), Some((12, Some(3))));
+        assert_eq!(parse_question_option_id("q2_skip"), Some((2, None)));
+        assert_eq!(parse_question_option_id("allow"), None);
+        assert_eq!(parse_question_option_id("q0"), None);
+        assert_eq!(parse_question_option_id("q0_opt_"), None);
+        assert_eq!(parse_question_option_id("q0_skip_1"), None);
     }
 }

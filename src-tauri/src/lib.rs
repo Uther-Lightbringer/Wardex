@@ -11,7 +11,7 @@
 //     acp://chunk      {sessionId, kind: "text"|"thinking", text}  (50ms 合并)
 //     acp://tool       {sessionId, tool}                           (upsert 归一化)
 //     acp://turn       {sessionId, status, stopReason}
-//     acp://permission {sessionId, requestId, params}
+//     acp://permission {sessionId, requestId, params, questions}
 //     acp://permissionCleared {sessionId}
 //     acp://subagent   {sessionId, subagents[]}
 //     chat://messageAppended {sessionId, row}   (user 行 + assistant 占位行)
@@ -519,6 +519,41 @@ async fn git_log(dir: String) -> Result<Value, String> {
     Ok(serde_json::to_value(commits).unwrap_or(json!([])))
 }
 
+/// Working-tree change list for the panel's 更改 view (inspect/git.rs).
+#[tauri::command]
+async fn git_status(dir: String) -> Result<Value, String> {
+    let result =
+        tauri::async_runtime::spawn_blocking(move || inspect::git::git_status(&dir))
+            .await
+            .map_err(err)?;
+    let entries = result.map_err(err)?;
+    Ok(serde_json::to_value(entries).unwrap_or(json!([])))
+}
+
+/// Diff of one file (mode: worktree | staged | untracked), R4-capped.
+#[tauri::command]
+async fn git_diff_file(dir: String, path: String, mode: String) -> Result<Value, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        inspect::git::git_diff_file_mode(&dir, &path, &mode)
+    })
+    .await
+    .map_err(err)?;
+    let diff = result.map_err(err)?;
+    Ok(serde_json::to_value(diff).unwrap_or(json!({})))
+}
+
+/// Diff of one commit vs its parent, R4-capped.
+#[tauri::command]
+async fn git_diff_commit(dir: String, hash: String) -> Result<Value, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        inspect::git::git_diff_commit(&dir, &hash)
+    })
+    .await
+    .map_err(err)?;
+    let diff = result.map_err(err)?;
+    Ok(serde_json::to_value(diff).unwrap_or(json!({})))
+}
+
 /// One directory level of the workspace tree (inspect/files.rs; lazy expand).
 #[tauri::command]
 async fn list_workspace_dir(root: String, rel: String) -> Result<Value, String> {
@@ -816,6 +851,9 @@ pub fn run() {
             workspace_files,
             git_branch,
             git_log,
+            git_status,
+            git_diff_file,
+            git_diff_commit,
             list_workspace_dir,
             save_clipboard_image,
             // todos / prompts / prefs

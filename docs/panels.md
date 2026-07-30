@@ -46,7 +46,7 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 | 面板 id | 标题 | 来源功能（旧版参照） | refreshOn |
 |---|---|---|---|
 | `agent` | 会话信息 | agent 切换器（ChatPage.qml 右栏） | sessionSwitch |
-| `git` | 版本控制 | 分支徽标 + 只读提交历史（回复完成时刷新） | turnEnd, sessionSwitch, expand, manual |
+| `git` | 版本控制 | 分支徽标 + 只读提交历史 + 工作区更改列表 + diff 查看（`git_status`/`git_diff_file`/`git_diff_commit`，单 diff 64KB 截断） | turnEnd, sessionSwitch, expand, manual |
 | `files` | 工作区文件 | 文件树（点击预览/右键系统打开） | sessionSwitch, expand, manual |
 
 `agent` 面板固定置顶且不可折叠（或始终 open），其余按注册表机制。git 对比、数据库等为后续批次，按 §4 指南加入。

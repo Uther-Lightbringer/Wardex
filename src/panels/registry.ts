@@ -36,7 +36,7 @@ export const panelRegistry: PanelDef[] = [
     title: '版本控制',
     component: () => import('./GitPanel.vue'),
     defaultOpen: true,
-    defaultHeight: 220,
+    defaultHeight: 260, // roomier default for the diff view (drag-resize persists)
     order: 20,
     refreshOn: ['turnEnd', 'sessionSwitch', 'expand', 'manual'],
   },

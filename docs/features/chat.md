@@ -242,6 +242,7 @@
   - `reject always` / `always reject` → `总是拒绝`
   - 其余保留原文（AskUserQuestion 的真实选项文本必须原样显示）；无 name 时按 kind 兜底：`allow_once/allow_always/reject_once/reject_always` → 四态文案，再兜底 `选项`。
 - **布局**：>3 个选项时两列网格（AskUserQuestion 多选项场景），≤3 单列；按钮按可用高度自适应。
+- **AskUserQuestion 分组模式**：kimi acp 适配器把 AskUserQuestion 桥接进 `request_permission`，option id 带 `q{n}_opt_{i}` / `q{n}_skip` 命名空间（acp-protocol.md §5.1）。Rust 侧（`acp/types.rs::parse_question_request`）解析成问题分组随 `acp://permission` 的 `questions` 字段下发；非空时对话框切换为分组渲染：每个问题独立一节（问题文本 + 选项按钮 + `跳过`），多问题标注 `问题 i/n`，`multi_select` 问题附提示。应答仍回传单个 optionId（ACP 一次响应只能带一个选项，与 kimi 适配器的窄化语义一致；`multi_select` 同样按单选应答）。注意：kimi 0.29.x 适配器自身会把多问题请求降级为第一问（agent 侧丢，线上抓包实证），客户端解析/渲染是前向兼容的那一半。
 - **无 options 兜底**：显示 `允许`（回传 `"allow"`）/ `拒绝`（回传空 + `cancelled=true`）两钮。
 - 回应后清除请求状态；后台会话的权限请求不抢焦点（`src/ChatController.cpp:396-402`）。回合结束/进程切换时未决请求自动清除（拒绝语义）。
 

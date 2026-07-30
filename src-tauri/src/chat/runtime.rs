@@ -837,9 +837,19 @@ impl Actor {
             AcpEvent::ToolCallUpdate { update } => self.on_tool(update).await,
             AcpEvent::PermissionRequested { request_id, params } => {
                 self.perm_request_id = Some(request_id);
+                // AskUserQuestion requests carry q{n}_*-namespaced options;
+                // the parsed question groups ride alongside the verbatim
+                // params so the dialog can render EVERY question (nothing
+                // dropped client-side; see acp/types.rs).
+                let questions = crate::acp::types::parse_question_request(&params);
                 self.emit(
                     "acp://permission",
-                    json!({ "sessionId": self.session_id, "requestId": request_id, "params": params }),
+                    json!({
+                        "sessionId": self.session_id,
+                        "requestId": request_id,
+                        "params": params,
+                        "questions": questions,
+                    }),
                 );
                 self.emit_status(None);
             }

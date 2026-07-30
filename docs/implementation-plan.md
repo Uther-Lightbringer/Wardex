@@ -91,6 +91,7 @@
   - 阶段 1c（acp）：cargo 新增 `log`（协议层日志门面：坏 JSON 丢弃、stderr 透传、session/load 回退；具体 logger 实现随阶段 1.5 日志基建接入）。
   - 阶段 1d（chat + 接线）：cargo 新增 `fern`（log 门面的具体 logger：写 logs/wardex-<date>.log + stderr，启动分阶段计时；panic hook 写 crashes/crash-*.txt，无新依赖）。无其他新增；chat 层集成测试复用 `MockTransport` 与 dev-only `tempfile`。
   - 阶段 3a（聊天页）：npm 新增 `markdown-it` + dev `@types/markdown-it`；cargo/npm 新增 `tauri-plugin-dialog` / `@tauri-apps/plugin-dialog`（附件与头像的系统文件对话框）。
+  - 面板扩展（git diff / AskUserQuestion 分组）：**无新增依赖**。git diff 沿用 git CLI 子进程（与 `git_log` 同模式，4s 超时），未引入 git2。
 
 ## 实施进度快照（2026-07-29）
 

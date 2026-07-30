@@ -323,6 +323,29 @@ agent 请求用户批准一次工具调用。params 原样转发给 UI（含 `to
 chat 层为 UI 会给 params 补一个 `_uiTitle` 字段（toolCall.title → kind → "工具调用"）
 （`ChatController.cpp:385-403`）。
 
+#### AskUserQuestion 的 `q{n}_*` 命名空间（kimi acp 适配器）
+
+kimi 的 ACP 适配器把 AskUserQuestion 工具桥接进 `request_permission`（ACP 没有专用
+question 方法），optionId 带命名空间以便回传不歧义（kimi 0.29.1 抓包实证）：
+
+```jsonc
+// options: 每个真实选项一项 + 一项 Skip
+{ "optionId": "q0_opt_0", "name": "Red",  "kind": "allow_once"  }
+{ "optionId": "q0_skip",  "name": "Skip", "kind": "reject_once" }
+// toolCall.title 固定 "AskUserQuestion"，问题文本在 toolCall.content[].content.text
+```
+
+- 命名规则：`q{问题序号}_opt_{选项序号}` / `q{问题序号}_skip`；问题文本也可能经
+  `toolCall.rawInput.questions[]` 携带（含 `multi_select`/`multiSelect` 标志）。
+- Rust 侧 `acp/types.rs::parse_question_request` 把 options 按问题分组，随
+  `acp://permission` 事件的 `questions` 字段下发给前端分组渲染；不匹配命名空间的
+  option（普通批准流）分组为空，行为不变。
+- **应答窄化**：ACP 一次响应只带一个 optionId，所以每问按单选应答——与 kimi 适配器
+  自身的窄化一致（`multi_select` 问题同样按单选）。
+- **已知 agent 侧限制**：kimi 0.29.x 的适配器对一次多问题调用只发第一问（其余在
+  agent 侧丢弃，不上线）；claude-code-acp 直接禁用 AskUserQuestion；codex-acp 不发
+  此命名空间。客户端的解析/分组渲染是前向兼容：线上一出现多组即全部可展示。
+
 ### 5.2 `fs/read_text_file`
 
 params：`{ "sessionId", "path", "line"?, "limit"?, ... }`。
