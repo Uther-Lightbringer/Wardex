@@ -97,6 +97,30 @@ fn legacy_messages_load() {
 }
 
 #[test]
+fn set_session_project_binds_and_preserves_updated_at() {
+    let (_tmp, paths) = temp_paths();
+    plant_session(&paths);
+    let mut store = SessionStore::load(paths.clone());
+
+    // Binding to a missing dir is refused.
+    let missing = _tmp.path().join("no-such-dir").to_string_lossy().into_owned();
+    assert!(store.set_session_project(SESSION_ID, &missing).is_err());
+
+    // Bind to a real dir: meta + index row updated, updatedAt untouched.
+    let proj = tempfile::tempdir().unwrap();
+    let proj_str = proj.path().to_string_lossy().into_owned();
+    let want = wardex_lib::store::canonical_dir(&proj_str);
+    assert!(store.set_session_project(SESSION_ID, &proj_str).unwrap());
+
+    let raw: serde_json::Value =
+        serde_json::from_slice(&fs::read(paths.session_meta_path(SESSION_ID)).unwrap()).unwrap();
+    assert_eq!(raw["projectDir"], serde_json::json!(want));
+    assert_eq!(raw["workDir"], serde_json::json!(want));
+    assert_eq!(raw["updatedAt"], serde_json::json!(1753690000000i64), "bind must not bump updatedAt");
+    assert_eq!(store.list()[0].project_dir, want);
+}
+
+#[test]
 fn legacy_agent_file_backfills_cli_path_and_default() {
     let (_tmp, paths) = temp_paths();
     fs::create_dir_all(paths.agents_dir()).unwrap();

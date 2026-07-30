@@ -5,11 +5,19 @@
 import { computed } from 'vue';
 import { useChatStore } from '../stores/chat';
 import { usePrefsStore } from '../stores/prefs';
+import { useUiStore } from '../stores/ui';
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
+const ui = useUiStore();
 
 const meta = computed(() => chat.meta);
+
+// Option B entry: let a project-less session bind a project dir afterwards.
+function bindProject(): void {
+  ui.folderDialogPurpose = 'bind';
+  ui.folderDialogOpen = true;
+}
 
 const agentLine = computed(() => {
   if (!meta.value) return '';
@@ -33,6 +41,14 @@ const statsLine = computed(() => {
       <div class="ainfo__sep"></div>
       <div class="ainfo__label" :style="{ fontSize: prefs.fs(11) + 'px' }">工作目录</div>
       <div class="ainfo__path" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ meta.workDir || meta.projectDir }}</div>
+      <div
+        v-if="!meta.projectDir"
+        class="ainfo__bind"
+        :style="{ fontSize: prefs.fs(11) + 'px' }"
+        @click="bindProject"
+      >
+        关联项目目录…
+      </div>
     </template>
     <div v-else class="ainfo__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">（无会话）</div>
     <div v-if="chat.status.lastError" class="ainfo__error" :style="{ fontSize: prefs.fs(11) + 'px' }">
@@ -83,6 +99,15 @@ const statsLine = computed(() => {
   color: var(--war-text-faint);
   text-align: center;
   padding: 8px 0;
+}
+
+.ainfo__bind {
+  color: var(--war-gold);
+  user-select: none;
+}
+
+.ainfo__bind:hover {
+  color: var(--war-gold-bright);
 }
 
 .ainfo__error {

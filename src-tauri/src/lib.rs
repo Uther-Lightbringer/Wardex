@@ -152,6 +152,12 @@ fn rename_session(state: State<'_, AppState>, session_id: String, title: String)
 }
 
 #[tauri::command]
+fn set_session_project(state: State<'_, AppState>, session_id: String, project_dir: String) -> Result<bool, String> {
+    let mut stores = lock(&state.stores);
+    stores.sessions.set_session_project(&session_id, &project_dir).map_err(err)
+}
+
+#[tauri::command]
 fn set_session_pinned(
     state: State<'_, AppState>,
     session_id: String,
@@ -766,6 +772,7 @@ pub fn run() {
             delete_session,
             set_active_session,
             rename_session,
+            set_session_project,
             set_session_pinned,
             send_prompt,
             cancel,

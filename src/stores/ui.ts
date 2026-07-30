@@ -11,6 +11,9 @@ export const useUiStore = defineStore('ui', {
     busy: false,
     bannerText: '',
     folderDialogOpen: false,
+    /** Why the folder dialog is open: 'open' = open project as new session
+     * (default), 'bind' = bind the current session to a project dir. */
+    folderDialogPurpose: 'open' as 'open' | 'bind',
     /** Window-size driven UI scale for the main menu (docs/ui-design.md §5.1) */
     uiScale: 1,
   }),

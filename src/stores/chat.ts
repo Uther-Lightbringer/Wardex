@@ -324,6 +324,30 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    /** Bind/rebind the current session to a project directory (option B):
+     * meta.projectDir/workDir updated Rust-side; recents touched; panels
+     * refresh via workspaceRefreshSeq (git/files watch it). */
+    async bindProject(dir: string): Promise<boolean> {
+      if (!this.sessionId || !isTauri) return false;
+      try {
+        const ok = await cmd<boolean>('set_session_project', {
+          sessionId: this.sessionId,
+          projectDir: dir,
+        });
+        if (!ok) return false;
+        await cmd('open_project', { dir }).catch(() => {});
+        this.projectDir = dir;
+        await this.refreshMeta();
+        this.workspaceRefreshSeq++;
+        const sessions = useSessionsStore();
+        await sessions.refresh(dir);
+        return true;
+      } catch (e) {
+        this.status.lastError = String(e);
+        return false;
+      }
+    },
+
     /** Pull the full message model (open / switch / self-heal). */
     async loadMessages(): Promise<void> {
       if (!this.sessionId) {

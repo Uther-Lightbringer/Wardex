@@ -578,6 +578,30 @@ impl SessionStore {
         Ok(true)
     }
 
+    /// Bind/rebind a session to a project directory (option B): projectDir and
+    /// workDir both become the canonical project path, the same shape as
+    /// sessions created via open_project. No updatedAt bump, no resort (§3.1).
+    pub fn set_session_project(&mut self, session_id: &str, project_dir: &str) -> Result<bool, SessionsError> {
+        if session_id.is_empty() || project_dir.trim().is_empty() {
+            return Ok(false);
+        }
+        let clean = canonical_dir(project_dir);
+        if clean.is_empty() || !std::path::Path::new(&clean).is_dir() {
+            return Err(SessionsError::ProjectDirMissing(project_dir.to_string()));
+        }
+        let Some(meta) = self.meta_mut(session_id) else {
+            return Ok(false);
+        };
+        meta.project_dir = clean.clone();
+        meta.work_dir = clean.clone();
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
+        if let Some(row) = self.index.iter_mut().find(|r| r.id == session_id) {
+            row.project_dir = clean;
+        }
+        Ok(true)
+    }
+
     /// Agent switch (§3.1): updates agentId/agentName/provider only.
     pub fn set_session_agent_id(
         &mut self,

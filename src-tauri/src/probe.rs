@@ -675,7 +675,31 @@ fn parse_initialize_response(line: &str, display: &str) -> Option<String> {
 pub(crate) fn find_executable(name: &str) -> Option<String> {
     let path = std::env::var("PATH").unwrap_or_default();
     let dirs: Vec<String> = path.split(';').filter(|s| !s.is_empty()).map(str::to_string).collect();
-    which_on_path(&dirs, name).map(|p| p.to_string_lossy().into_owned())
+    // Spawn resolution must only return files Windows can actually execute
+    // (QStandardPaths::findExecutable semantics): an extensionless npm shim
+    // script (e.g. `claude-code-acp` next to `claude-code-acp.cmd`) is NOT
+    // executable — CreateProcess fails with os error 193. So unlike
+    // which_on_path (existence probing for CliProbe), skip the bare name
+    // unless it already carries an extension.
+    let has_ext = Path::new(name).extension().is_some();
+    let candidates: Vec<String> = if has_ext {
+        vec![name.to_string()]
+    } else {
+        vec![
+            format!("{name}.exe"),
+            format!("{name}.cmd"),
+            format!("{name}.bat"),
+        ]
+    };
+    for dir in &dirs {
+        for candidate in &candidates {
+            let path = Path::new(dir).join(candidate);
+            if std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false) {
+                return Some(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn truncate_200(s: &str) -> String {

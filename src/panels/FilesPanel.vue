@@ -42,12 +42,20 @@ async function loadLevel(rel: string): Promise<DirEntry[]> {
   }
 }
 
-/** Re-read the root; all expansion state collapses (§6.4). */
+/** Re-read the root, preserving expansion state best-effort: previously
+ * expanded dirs that still exist are re-expanded in place (turnEnd
+ * auto-refresh would otherwise collapse the tree after every reply). */
 async function reload(): Promise<void> {
-  rows.value = [];
-  loaded.clear();
-  if (!root.value) return;
+  if (!root.value) {
+    rows.value = [];
+    loaded.clear();
+    return;
+  }
+  const expandedDirs = [...loaded]
+    .filter((r) => r !== '')
+    .sort((a, b) => a.split('/').length - b.split('/').length); // parents first
   const entries = await loadLevel('');
+  loaded.clear();
   loaded.add('');
   rows.value = entries.map((e) => ({
     rel: e.name,
@@ -57,6 +65,10 @@ async function reload(): Promise<void> {
     expanded: false,
     hasKids: true, // unknown until expanded — show the arrow
   }));
+  for (const rel of expandedDirs) {
+    const idx = rows.value.findIndex((r) => r.rel === rel && r.dir && !r.expanded);
+    if (idx >= 0) await toggleDir(rows.value[idx], idx);
+  }
 }
 
 async function toggleDir(row: TreeRow, index: number): Promise<void> {
@@ -120,7 +132,13 @@ function onMenuSelect(): void {
 
 onMounted(reload);
 watch(() => chat.sessionId, reload); // sessionSwitch
+watch(() => chat.turnSeq, reload); // turnEnd — the agent may have written files
 watch(() => chat.workspaceRefreshSeq, reload); // 刷新工作区 button
+
+// Empty-state copy: guide project-less sessions toward opening a project.
+const emptyText = computed(() =>
+  chat.meta?.projectDir ? '暂无产出文件' : '（未关联项目——从主菜单打开项目后，此处显示项目文件）',
+);
 </script>
 
 <template>
@@ -130,7 +148,7 @@ watch(() => chat.workspaceRefreshSeq, reload); // 刷新工作区 button
     </div>
     <div class="tree__list">
       <div v-if="rows.length === 0" class="tree__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">
-        暂无产出文件
+        {{ emptyText }}
       </div>
       <div
         v-for="(row, i) in rows"

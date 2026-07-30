@@ -27,6 +27,12 @@ const error = ref('');
 
 const workDir = computed(() => chat.meta?.workDir || chat.meta?.projectDir || chat.projectDir);
 
+// Empty-state copy: guide project-less sessions toward opening a project
+// (docs/features/chat.md §6 decision: A — guide text instead of a bare label).
+const noRepoText = computed(() =>
+  chat.meta?.projectDir ? '（非 Git 目录）' : '（非 Git 目录——从主菜单打开项目后可用）',
+);
+
 async function refresh(): Promise<void> {
   const dir = workDir.value;
   if (!dir) {
@@ -88,7 +94,7 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
         </div>
       </div>
     </template>
-    <div v-else class="gitp__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">（非 Git 目录）</div>
+    <div v-else class="gitp__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">{{ noRepoText }}</div>
   </div>
 </template>
 

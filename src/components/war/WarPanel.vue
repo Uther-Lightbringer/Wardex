@@ -29,7 +29,9 @@ const emit = defineEmits<{
 
 // Lazy mount: the component code is only imported after the first expand;
 // collapsing unmounts it again (zero requests / timers while collapsed).
-const everOpened = ref(props.open);
+// everOpened starts false so the immediate watcher also mounts panels that
+// START open — initializing it from props.open would skip the mount for them.
+const everOpened = ref(false);
 const asyncComp = ref<ReturnType<typeof defineAsyncComponent> | null>(null);
 watch(
   () => props.open,

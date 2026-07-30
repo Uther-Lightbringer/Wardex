@@ -41,6 +41,15 @@ function onResize(): void {
 }
 
 function onFolderChosen(path: string): void {
+  const purpose = ui.folderDialogPurpose;
+  ui.folderDialogPurpose = 'open'; // reset for the next opener
+  if (purpose === 'bind') {
+    // Bind the current chat session to this project dir (docs: B option).
+    void chat.bindProject(path).then((ok) => {
+      if (!ok) ui.showBanner(chat.status.lastError || '无法关联该目录');
+    });
+    return;
+  }
   // Open project → create its chat session, then drop into the chat page
   // (startProjectSession; a refused create only shows the banner).
   void projects.open(path);
