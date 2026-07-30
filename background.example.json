@@ -1,0 +1,5 @@
+{
+  "_comment": "Copy to background.json next to wardex.exe. type: image | model (video removed — no FFmpeg).",
+  "type": "image",
+  "source": "qrc:/qt/qml/WarDex/assets/background/LodolonFall.jpg"
+}

@@ -1,0 +1,21 @@
+{
+    "agentId": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "agentName": "Kimi 主 Agent",
+    "baseUrl": "",
+    "cliPath": "C:\\Users\\me\\AppData\\Roaming\\npm\\kimi.cmd",
+    "createdAt": 1753600000000,
+    "id": "3f2c9a1e-7b4d-4e8f-9c0a-1d2e3f4a5b6c",
+    "messageCount": 3,
+    "model": "kimi-for-coding",
+    "projectDir": "C:/workspace/WarDex",
+    "provider": "kimi",
+    "status": "active",
+    "summary": "我先读一下文件。问题在 Repeater 每次 flush 全量重建。…",
+    "title": "看下这张图里的布局问题",
+    "unknownFutureField": {
+        "keep": true,
+        "nested": [1, 2, 3]
+    },
+    "updatedAt": 1753690000000.5,
+    "workDir": "C:/workspace/WarDex"
+}

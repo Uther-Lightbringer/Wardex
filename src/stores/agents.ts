@@ -1,0 +1,221 @@
+// Agent configuration store (agents/index.json + agents/<id>.json, spec §7-§9)
+// plus the provider registry view and the CLI probe cache. The Rust stores
+// are authoritative; every mutation is a Tauri command followed by a re-pull.
+//
+// Kept separate from stores/sessions.ts (which holds the rail's lightweight
+// AgentInfo list for the chat page) because the config page needs the FULL
+// record — apiKey, mcpServers, extraArgs — that the rail never touches.
+
+import { defineStore } from 'pinia';
+import { cmd, isTauri } from '../lib/tauri';
+
+/** Full agent record (store/agents.rs Agent, camelCase). */
+export interface AgentRecord {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  cliPath: string;
+  /** PLAINTEXT from the backend — display surfaces must maskKey() it. */
+  apiKey: string;
+  extraArgs: string;
+  /** Raw JSON array TEXT; parsed only when a session starts. */
+  mcpServers: string;
+  avatarPath: string;
+  enabled: boolean;
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Save patch; absent key = field untouched (Rust Option semantics). */
+export type AgentPatch = Partial<
+  Pick<
+    AgentRecord,
+    | 'name'
+    | 'provider'
+    | 'model'
+    | 'baseUrl'
+    | 'cliPath'
+    | 'apiKey'
+    | 'extraArgs'
+    | 'mcpServers'
+    | 'avatarPath'
+    | 'enabled'
+  >
+>;
+
+/** Provider registry view (provider_specs command; SpecView in Rust). */
+export interface SpecView {
+  id: string;
+  displayName: string;
+  defaultCommand: string;
+  acpArgs: string;
+  installHint: string;
+  baseUrlHint: string;
+  chatCapable: boolean;
+}
+
+/** CLI probe outcome (probe_cli command; ProbeResult in Rust). */
+export interface ProbeResult {
+  providerId: string;
+  found: boolean;
+  path: string;
+  version: string;
+  error: string;
+  message: string;
+}
+
+/** maskKey (agents.rs): ≤8 chars fully masked, else left(3)+"****"+right(4). */
+export function maskKey(key: string): string {
+  if (!key) return '';
+  const chars = [...key];
+  if (chars.length <= 8) return '********';
+  return chars.slice(0, 3).join('') + '****' + chars.slice(-4).join('');
+}
+
+/**
+ * isBareCliPath (spec §9.2): empty, or the provider's defaultCommand with an
+ * optional .exe/.cmd suffix. Bare paths are (re)probed automatically; the
+ * custom provider never probes (no canonical CLI).
+ */
+export function isBareCliPath(spec: SpecView | undefined, cliPath: string): boolean {
+  if (!spec || spec.id === 'custom') return false;
+  const p = cliPath.trim().toLowerCase();
+  if (!p) return true;
+  const base = spec.defaultCommand.toLowerCase();
+  return p === base || p === base + '.exe' || p === base + '.cmd';
+}
+
+export const useAgentsStore = defineStore('agents', {
+  state: () => ({
+    agents: [] as AgentRecord[],
+    defaultAgentId: '',
+    specs: [] as SpecView[],
+    /** Probe results by provider id — switching agent/provider re-displays
+     * the cached line instantly (spec §9.2). */
+    probeCache: {} as Record<string, ProbeResult>,
+    probing: {} as Record<string, boolean>,
+    lastError: '',
+    loaded: false,
+  }),
+  getters: {
+    specOf(): (id: string) => SpecView | undefined {
+      return (id: string) => this.specs.find((s) => s.id === id.trim().toLowerCase());
+    },
+    byId(): (id: string) => AgentRecord | undefined {
+      return (id: string) => this.agents.find((a) => a.id === id);
+    },
+    /** canUseForChat: enabled + a registered chat-capable provider. */
+    usable(): (a: AgentRecord) => boolean {
+      return (a: AgentRecord) => {
+        const spec = this.specOf(a.provider);
+        return a.enabled && !!spec && spec.chatCapable;
+      };
+    },
+  },
+  actions: {
+    async refresh(): Promise<void> {
+      if (!isTauri) return;
+      try {
+        const v = await cmd<{ agents?: AgentRecord[]; defaultAgentId?: string }>('list_agents');
+        this.agents = v.agents ?? [];
+        this.defaultAgentId = v.defaultAgentId ?? '';
+        this.loaded = true;
+      } catch (e) {
+        console.warn('[agents] list_agents failed', e);
+      }
+    },
+
+    async loadSpecs(): Promise<void> {
+      if (!isTauri) return;
+      try {
+        this.specs = await cmd<SpecView[]>('provider_specs', undefined, []);
+      } catch (e) {
+        console.warn('[agents] provider_specs failed', e);
+      }
+    },
+
+    /** 新建 Agent (§7): provider kimi / model moonshot-v1-auto / cliPath ""
+     * (empty → auto-probe). Returns the new id. */
+    async create(name: string): Promise<string> {
+      const id = await cmd<string>('create_agent', { name });
+      await this.refresh();
+      return id;
+    },
+
+    /** saveCurrent: patch write-through. The apiKey guard lives in Rust
+     * (empty/still-masked keeps the old value). */
+    async save(id: string, patch: AgentPatch): Promise<boolean> {
+      try {
+        this.lastError = '';
+        await cmd('save_agent', { agentId: id, patch });
+        await this.refresh();
+        return true;
+      } catch (e) {
+        this.lastError = String(e);
+        return false;
+      }
+    },
+
+    /** 删除 Agent (§9.3): no confirmation; when the default goes away the
+     * backend hands the flag to the first remaining agent. */
+    async remove(id: string): Promise<boolean> {
+      try {
+        this.lastError = '';
+        await cmd('delete_agent', { agentId: id });
+        await this.refresh();
+        return true;
+      } catch (e) {
+        this.lastError = String(e);
+        return false;
+      }
+    },
+
+    async setDefault(id: string): Promise<boolean> {
+      try {
+        this.lastError = '';
+        await cmd('set_default_agent', { agentId: id });
+        await this.refresh();
+        return true;
+      } catch (e) {
+        this.lastError = String(e);
+        return false;
+      }
+    },
+
+    /** probe_cli: async scan, cached per provider. The caller checks
+     * result.providerId against its CURRENT draft provider before applying
+     * anything (stale-provider guard, spec §9.2). */
+    async probe(providerId: string, preferredPath: string): Promise<ProbeResult | null> {
+      const key = providerId.trim().toLowerCase();
+      if (this.probing[key]) return null;
+      this.probing = { ...this.probing, [key]: true };
+      try {
+        const r = await cmd<ProbeResult>('probe_cli', {
+          providerId: key,
+          preferredPath: preferredPath ?? '',
+        });
+        this.probeCache = { ...this.probeCache, [key]: r };
+        return r;
+      } catch (e) {
+        console.warn('[agents] probe_cli failed', e);
+        return null;
+      } finally {
+        this.probing = { ...this.probing, [key]: false };
+      }
+    },
+
+    /** testAgent (§9.3): single-flight in Rust; null = a test is already
+     * running (this click was ignored). Success = ACP initialize handshake. */
+    async test(id: string): Promise<string | null> {
+      try {
+        this.lastError = '';
+        return await cmd<string | null>('test_agent', { agentId: id });
+      } catch (e) {
+        return String(e);
+      }
+    },
+  },
+});

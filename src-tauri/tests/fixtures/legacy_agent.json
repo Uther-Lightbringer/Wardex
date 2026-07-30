@@ -1,0 +1,15 @@
+{
+    "apiKey": "sk-legacykey1234567890",
+    "avatarPath": "",
+    "baseUrl": "",
+    "createdAt": 1753500000000,
+    "enabled": true,
+    "extraArgs": "",
+    "id": "8a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "isDefault": false,
+    "mcpServers": "",
+    "model": "kimi-for-coding",
+    "name": "Kimi 主 Agent",
+    "provider": "kimi",
+    "updatedAt": 1753600000000
+}

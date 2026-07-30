@@ -1,0 +1,123 @@
+/* WarDex WC3 theme: palette variables, fonts, cursor, shared utilities.
+ * All values copied from docs/ui-design.md (which copied them from the old
+ * QML sources). Qt #AARRGGBB values are already converted to CSS #RRGGBBAA
+ * in the doc — the CSS column is what appears here. */
+
+:root {
+  /* Core colors (high frequency) */
+  --war-gold: #f2cf6b;            /* primary gold: button text, titles, highlights */
+  --war-gold-bright: #ffe9a0;     /* bright gold: hover/focus text */
+  --war-gold-dim: #c9a227;        /* dim gold: focused input border, selected card border */
+  --war-gold-input: #8a6f24;      /* brass: inline edit border, list selection border */
+  --war-text: #e8ecf4;            /* main body text (near white) */
+  --war-text-dim: #cfd6e4;        /* secondary: panel titles (Georgia), dropdown/menu items */
+  --war-text-muted: #8a93a5;      /* muted: timestamps, placeholders, details */
+  --war-text-faint: #5a6272;      /* faintest: empty-state hints, disabled menu items */
+  --war-glass: #0b0d12a6;         /* unified translucent glass under every iron frame */
+  --war-glass-border: #00000044;  /* glass edge (FrameImage.recessBorder) */
+  --war-error: #d08070;           /* error text / error state */
+  --war-interrupted: #a09070;     /* interrupted state */
+  --war-user-blue: #7eb6ff;       /* user-side name / user identity blue */
+  --war-outline-brown: #241500;   /* gold text outline color */
+  --war-outline-dark: #1a1000;    /* WarDialog title outline color */
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #05080a; /* window base color (ApplicationWindow.color) */
+  color: var(--war-text);
+  font-family: SimSun, serif;
+  user-select: none;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- Custom cursor (docs/ui-design.md §6) ----
+ * cursor.png hot spot (5, 0) — the pointer tip. The fallback keyword after
+ * the coordinates is mandatory or the whole declaration is invalid.
+ * The whole app (including dialogs and masks) uses cursor.png; there is no
+ * separate hand art. cursor_green.png is the interactive/resize variant. */
+html,
+body,
+* {
+  cursor: url('/assets/ui/misc/cursor.png') 5 0, auto;
+}
+
+.war-cursor-green,
+.war-resize-handle {
+  cursor: url('/assets/ui/misc/cursor_green.png') 5 0, row-resize;
+}
+
+/* ---- Font roles (docs/ui-design.md §1.3) ---- */
+.war-font-body {
+  font-family: SimSun, serif;
+}
+
+.war-font-title {
+  font-family: Georgia, serif;
+  letter-spacing: 2px;
+}
+
+/* Qt Text.Outline equivalents: four-directional 1px text shadows */
+.war-outline-black {
+  text-shadow: -1px 0 #000, 1px 0 #000, 0 -1px #000, 0 1px #000;
+}
+
+.war-outline-gold {
+  text-shadow:
+    -1px 0 var(--war-outline-brown), 1px 0 var(--war-outline-brown),
+    0 -1px var(--war-outline-brown), 0 1px var(--war-outline-brown);
+}
+
+/* ---- Blue glow selection bar (docs/ui-design.md §9) ----
+ * GlueScreen-Button-KeyboardHighlight.png stretched over a hovered/selected
+ * row. screen blending gives the additive glow on dark backgrounds. */
+.war-highlight {
+  position: absolute;
+  inset: 0 8px; /* dropdown rows shrink 8px left/right */
+  background: url('/assets/wc3_extracted/ui/GlueScreen-Button-KeyboardHighlight.png') 0 0 / 100% 100% no-repeat;
+  mix-blend-mode: screen;
+  pointer-events: none;
+}
+
+/* Inline edit input (rename / new-folder rows) */
+.war-inline-input {
+  background: #10141f;
+  border: 1px solid var(--war-gold-input);
+  color: var(--war-gold);
+  font-family: SimSun, serif;
+  outline: none;
+  padding: 0 6px;
+  box-sizing: border-box;
+}
+
+/* Read-only / plain text input field on dark glass */
+.war-input {
+  background: #15192299;
+  border: 1px solid #2a3344;
+  color: var(--war-text);
+  font-family: SimSun, serif;
+  outline: none;
+  padding: 0 8px;
+  box-sizing: border-box;
+}
+
+.war-input:focus {
+  border-color: var(--war-gold-input);
+}
+
+.war-input::placeholder {
+  color: var(--war-text-faint);
+}
+
+img {
+  -webkit-user-drag: none;
+}

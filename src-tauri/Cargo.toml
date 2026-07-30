@@ -1,0 +1,45 @@
+[package]
+name = "wardex-tauri"
+version = "0.1.0"
+description = "WarDex - WC3 style AI coding assistant GUI (Tauri rewrite)"
+edition = "2021"
+
+[lib]
+name = "wardex_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+# Native file open dialog for the composer's attachment picker (📎).
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+base64 = "0.22"
+dirs = "6"
+encoding_rs = "0.8"
+# PNG/JPEG codec only: clipboard paste downscale chain (media) and the 128px
+# avatar crop (prefs). No other image formats are needed.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# HKCU\Environment user-PATH merge for CLI probing (probe.rs); the GUI
+# process PATH often lags the user shell.
+winreg = "0.56"
+# QProcess::splitCommand equivalent for agent extraArgs (provider.rs).
+shell-words = "1"
+# Logging facade for the ACP layer (bad-JSON drops, stderr drain, session/load
+# fallback); the concrete logger lands with the phase 1.5 logging infra.
+log = "0.4"
+# File + stderr logger behind the log facade (phase 1d observability:
+# logs/wardex-<date>.log with phased startup marks).
+fern = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
