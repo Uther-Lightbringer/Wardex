@@ -362,7 +362,8 @@ async function loadInstallHelp(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 测试连接 (§9.3): success = ACP initialize handshake, single-flight
+// 测试连接 (§9.3): success = ACP initialize handshake + 一次真实模型调用
+// (session/new + 一词 prompt)，single-flight
 // ---------------------------------------------------------------------------
 
 const testing = ref(false);

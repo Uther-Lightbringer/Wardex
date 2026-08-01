@@ -253,15 +253,26 @@ URL；否则返回空串，调用方回退到内置头像。id 为空时解析�
    消息跳过（`AgentStore.cpp:349-362`）。
 6. 收到 `id == 1` 的响应：
    - 含 `error` → 失败：`"失败 (<program>): initialize 被拒绝 — <error.message 截 200 字>"`；
-   - 否则成功：读 `result.agentInfo.{name, version}`，组成
-     `"成功: ACP 握手完成 — <name> <version>"`（name/version 为空则省略对应部分）
-     （`AgentStore.cpp:363-382`）。
-7. **成功判据是完成 ACP initialize 握手**，不是"进程能启动"。
-8. 兜底分支（全部汇入统一的 `finish` 出口，保证只结束一次，`AgentStore.cpp:307-320`）：
+   - 否则握手通过：读 `result.agentInfo.{name, version}`（name/version 为空则省略
+     对应部分），进入第 7 步的真实模型调用（`AgentStore.cpp:363-382`）。
+7. **阶段 2：真实模型调用**（90 秒看门狗）。握手通过不代表模型可用——
+   Base URL / API Key / 网络代理的问题只有真的发一次 prompt 才能暴露：
+   - 发送 `session/new`（id=2，params: cwd=当前目录、mcpServers=[]）；被拒 →
+     `"失败 (<program>): 创建会话被拒绝 — <error.message 截 200 字>"`；
+   - 成功后发送 `session/prompt`（id=3，单个 text block `"ping"`）；
+   - prompt 响应含 `error` → `"失败 (<program>): 模型调用失败 — <error.message 截 200 字>"`；
+   - 收到 prompt 的 result，或 prompt 后任何 `session/update` 的
+     `agent_message_chunk` / `agent_thought_chunk` →
+     `"成功: ACP 握手 + 模型调用通过 — <name> <version>"`；
+   - 进程中途退出 → `"失败 (<program>): 进程在模型调用完成前退出 (code N)"`；
+   - 90 秒无任何响应 → `"失败 (<program>): 已连接但模型 90 秒内无响应 — 请检查 Base URL / API Key / 网络代理"`。
+8. **成功判据是握手 + 一次真实模型调用都完成**，不是"进程能启动"。
+9. 兜底分支（全部汇入统一的 `finish` 出口，保证只结束一次，`AgentStore.cpp:307-320`）：
    - 进程在握手前退出 → `"失败 (<program>): 进程在握手前退出 (code N) — <stderr 截 200 字>"`；
    - spawn 失败 → `"无法启动 «<program>»: <errorString>"`；
-   - **15000ms 看门狗超时** → `"失败 (<program>): ACP initialize 握手超时 — 请检查 cli 路径、参数与登录态"`。
-9. finish 时 kill 并清理测试进程。
+   - **15000ms 握手看门狗超时** → `"失败 (<program>): ACP initialize 握手超时 — 请检查 cli 路径、参数与登录态"`。
+10. finish 时 kill 并清理测试进程（stdin 全程保持打开：agent 在 stdin EOF
+    时会退出，提前断开会让阶段 2 无法运行）。
 
 ---
 

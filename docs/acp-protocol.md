@@ -527,6 +527,21 @@ ACP 客户端直接相关的契约，保证两边接口对齐。
 重启走 `session/load` 恢复原会话；即便回退成 `session/new` 丢了上下文，尾部片段也能
 锚定模型。不满足条件 → 标记"（已中断）"并关闭回合。
 
+### 9.3.1 回合停滞看门狗（stall watchdog）
+
+常量 `K_TURN_STALL_SECS = 120`（`chat/runtime.rs`）。
+
+模型端点挂死（TLS 重置、代理断流）时，CLI 内部重试全部失败后**不会**
+回任何 ACP 帧——`session/prompt` 永远等不到响应，气泡会一直停在
+"生成中…"。看门狗在回合进行中（`busy`）且超过 120 秒无任何 ACP
+活动时触发：
+
+- 挂起条件：等待用户回答权限/提问（`perm_request_id` 非空）、限流重试
+  倒计时中（最长 300 秒）——这两种"合法的安静"不会误判；
+- 触发动作：丢弃 client（kill_on_drop 杀掉 CLI），气泡写入
+  `"回合失败：超过 120 秒没有收到模型端点的任何数据（连接已重置）。请检查网络/代理、Base URL 与 API Key 后重试"`，
+  回合按 `stallTimeout` 关闭；已有部分输出则保留并标记"（已中断）"。
+
 ### 9.4 进程并发上限
 
 参照：`ChatController.cpp:293-317`；常量 `kMaxParallelAcp = 3`（`ChatController.h:50`）。

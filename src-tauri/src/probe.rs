@@ -7,8 +7,9 @@
 //   - probe: a binary still alive after 4s is ACCEPTED with an empty version
 //     ("exists and runs, just has no --version or waits on stdin") — never
 //     report that as a failure.
-//   - testAgent: success means the initialize handshake completed, not that
-//     the process spawned.
+//   - testAgent: success means the initialize handshake AND a real one-word
+//     model call (session/new + session/prompt) both completed — handshake
+//     alone proves nothing about Base URL / API Key / network reachability.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,10 @@ use crate::store::paths::{clean_path_forward, is_absolute_windows};
 pub const VERSION_TIMEOUT: Duration = Duration::from_secs(4);
 /// testAgent handshake watchdog (AgentStore.cpp:408).
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// testAgent phase 2 watchdog: session/new + one-word prompt. Generous
+/// because a cold model endpoint can be slow, but bounded so a dead
+/// endpoint (TLS resets, silent drops) reports instead of hanging.
+pub const MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Config-page help dialog constants (CliProbe.cpp:22-38).
 pub const INSTALL_HELP_URL: &str = "https://www.kimi.com/code";
@@ -537,12 +542,12 @@ impl AgentTester {
             Err(e) => return format!("无法启动 «{display}»: {e}"),
         };
 
-        // Success = a real ACP `initialize` response, not "it spawned".
-        if let Some(mut stdin) = child.stdin.take() {
-            let mut payload = serde_json::to_vec(&initialize_request()).unwrap_or_default();
-            payload.push(b'\n');
-            let _ = stdin.write_all(&payload).await;
-            let _ = stdin.flush().await;
+        // stdin is held for the WHOLE conversation: many agents exit on
+        // stdin EOF, which would kill the phase-2 model call before it
+        // starts.
+        let mut stdin = child.stdin.take();
+        if let Some(s) = stdin.as_mut() {
+            let _ = send_frame(s, &initialize_request()).await;
         }
 
         let stderr_task = child.stderr.take().map(|mut err| {
@@ -556,9 +561,11 @@ impl AgentTester {
         let Some(stdout) = child.stdout.take() else {
             return format!("失败 ({display}): 无法读取子进程输出");
         };
+        let mut lines = BufReader::new(stdout).lines();
 
+        // Phase 1: success requires a real ACP `initialize` response, not
+        // "it spawned".
         let handshake = async {
-            let mut lines = BufReader::new(stdout).lines();
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
@@ -583,23 +590,29 @@ impl AgentTester {
                             msg.push_str(" — ");
                             msg.push_str(&truncate_200(stderr_text));
                         }
-                        return msg;
+                        return Err(msg);
                     }
                     Err(e) => {
-                        return format!("失败 ({display}): 读取输出失败 — {e}");
+                        return Err(format!("失败 ({display}): 读取输出失败 — {e}"));
                     }
                 }
             }
         };
 
-        match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
-            Ok(msg) => msg,
+        let agent_info = match tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await {
+            Ok(Ok(info)) => info,
+            Ok(Err(msg)) => return msg,
             Err(_) => {
                 // kill_on_drop reaps the child when the cancelled future and
                 // `child` drop here.
-                format!("失败 ({display}): ACP initialize 握手超时 — 请检查 cli 路径、参数与登录态")
+                return format!(
+                    "失败 ({display}): ACP initialize 握手超时 — 请检查 cli 路径、参数与登录态"
+                );
             }
-        }
+        };
+
+        // Phase 2: prove the configured model is actually callable.
+        model_call(&mut child, &mut stdin, &mut lines, &display, &agent_info).await
     }
 }
 
@@ -622,7 +635,8 @@ fn initialize_request() -> Value {
 
 /// One stdout line -> Some(verdict) iff it is our initialize response
 /// (JSON object with id == 1); noise and foreign messages return None.
-fn parse_initialize_response(line: &str, display: &str) -> Option<String> {
+/// Ok(agentInfo) = handshake passed, Err(msg) = user-facing failure.
+fn parse_initialize_response(line: &str, display: &str) -> Option<Result<String, String>> {
     let line = line.trim();
     if line.is_empty() {
         return None;
@@ -636,17 +650,8 @@ fn parse_initialize_response(line: &str, display: &str) -> Option<String> {
     if msg.get("id").and_then(Value::as_i64) != Some(1) {
         return None; // not our initialize response
     }
-    if let Some(error) = msg.get("error") {
-        let e = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let detail = if e.is_empty() {
-            "未知错误".to_string()
-        } else {
-            truncate_200(e)
-        };
-        return Some(format!("失败 ({display}): initialize 被拒绝 — {detail}"));
+    if let Some(detail) = error_detail(&msg) {
+        return Some(Err(format!("失败 ({display}): initialize 被拒绝 — {detail}")));
     }
     let info = msg
         .get("result")
@@ -658,16 +663,150 @@ fn parse_initialize_response(line: &str, display: &str) -> Option<String> {
         .get("version")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let mut msg_out = "成功: ACP 握手完成".to_string();
-    if !name.is_empty() {
-        msg_out.push_str(" — ");
-        msg_out.push_str(name);
-        if !version.is_empty() {
-            msg_out.push(' ');
-            msg_out.push_str(version);
+    let mut agent_info = name.to_string();
+    if !version.is_empty() {
+        if !agent_info.is_empty() {
+            agent_info.push(' ');
         }
+        agent_info.push_str(version);
     }
-    Some(msg_out)
+    Some(Ok(agent_info))
+}
+
+/// Write one JSON-RPC frame; false = the child's stdin is gone.
+async fn send_frame(stdin: &mut tokio::process::ChildStdin, v: &Value) -> bool {
+    let mut payload = serde_json::to_vec(v).unwrap_or_default();
+    payload.push(b'\n');
+    stdin.write_all(&payload).await.is_ok() && stdin.flush().await.is_ok()
+}
+
+/// Some(message) iff the frame carries a JSON-RPC `error` member.
+fn error_detail(msg: &Value) -> Option<String> {
+    let e = msg.get("error")?;
+    let m = e.get("message").and_then(Value::as_str).unwrap_or_default();
+    Some(if m.is_empty() {
+        "未知错误".to_string()
+    } else {
+        truncate_200(m)
+    })
+}
+
+/// testAgent phase 2: prove the configured model is actually callable —
+/// session/new, then a one-word prompt. Success = the agent streams any
+/// message/thought chunk back or answers the prompt at all. Handshake-only
+/// health said nothing about Base URL / API Key / network reachability;
+/// those failures surface HERE.
+async fn model_call(
+    child: &mut tokio::process::Child,
+    stdin: &mut Option<tokio::process::ChildStdin>,
+    lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    display: &str,
+    agent_info: &str,
+) -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let suffix = if agent_info.is_empty() {
+        String::new()
+    } else {
+        format!(" — {agent_info}")
+    };
+
+    let phase = async {
+        let new_session = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/new",
+            "params": { "cwd": cwd, "mcpServers": [] },
+        });
+        let Some(s) = stdin.as_mut() else {
+            return format!("失败 ({display}): 无法写入子进程输入");
+        };
+        if !send_frame(s, &new_session).await {
+            return format!("失败 ({display}): 无法写入子进程输入");
+        }
+        let mut prompted = false;
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
+                        continue; // banner/log noise on stdout
+                    };
+                    if !msg.is_object() {
+                        continue;
+                    }
+                    match msg.get("id").and_then(Value::as_i64) {
+                        Some(2) => {
+                            if let Some(detail) = error_detail(&msg) {
+                                return format!("失败 ({display}): 创建会话被拒绝 — {detail}");
+                            }
+                            let sid = msg
+                                .get("result")
+                                .and_then(|r| r.get("sessionId"))
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            let prompt = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 3,
+                                "method": "session/prompt",
+                                "params": {
+                                    "sessionId": sid,
+                                    "prompt": [{ "type": "text", "text": "ping" }],
+                                },
+                            });
+                            let Some(s) = stdin.as_mut() else {
+                                return format!("失败 ({display}): 无法写入子进程输入");
+                            };
+                            if !send_frame(s, &prompt).await {
+                                return format!("失败 ({display}): 无法写入子进程输入");
+                            }
+                            prompted = true;
+                        }
+                        Some(3) => {
+                            if let Some(detail) = error_detail(&msg) {
+                                return format!("失败 ({display}): 模型调用失败 — {detail}");
+                            }
+                            return format!("成功: ACP 握手 + 模型调用通过{suffix}");
+                        }
+                        _ => {
+                            // Streaming activity after the prompt also proves
+                            // the model is alive — no need to wait for the
+                            // final prompt response.
+                            if prompted
+                                && msg.get("method").and_then(Value::as_str)
+                                    == Some("session/update")
+                            {
+                                let kind = msg
+                                    .get("params")
+                                    .and_then(|p| p.get("update"))
+                                    .and_then(|u| u.get("sessionUpdate"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                if matches!(kind, "agent_message_chunk" | "agent_thought_chunk") {
+                                    return format!("成功: ACP 握手 + 模型调用通过{suffix}");
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {
+                    let code = child.wait().await.ok().and_then(|s| s.code());
+                    let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+                    return format!("失败 ({display}): 进程在模型调用完成前退出 (code {code_str})");
+                }
+                Err(e) => return format!("失败 ({display}): 读取输出失败 — {e}"),
+            }
+        }
+    };
+
+    match tokio::time::timeout(MODEL_CALL_TIMEOUT, phase).await {
+        Ok(msg) => msg,
+        Err(_) => format!(
+            "失败 ({display}): 已连接但模型 {} 秒内无响应 — 请检查 Base URL / API Key / 网络代理",
+            MODEL_CALL_TIMEOUT.as_secs()
+        ),
+    }
 }
 
 /// QStandardPaths::findExecutable equivalent: system PATH only, suffixes
@@ -959,12 +1098,43 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let (store, id) = store_with_agent(
             &tmp,
-            "@echo warming up\n@set /p req=\n@echo {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"fake-agent\",\"version\":\"9.9\"},\"capabilities\":{}}}\n",
+            concat!(
+                "@echo warming up\n",
+                "@set /p req1=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"fake-agent\",\"version\":\"9.9\"},\"capabilities\":{}}}\n",
+                "@set /p req2=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"s1\"}}\n",
+                "@set /p req3=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"s1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"pong\"}}}}\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"stopReason\":\"end_turn\"}}\n",
+            ),
         );
         let tester = AgentTester::new();
         let msg = tester.test_agent(&store, &id).await.expect("not busy");
-        assert_eq!(msg, "成功: ACP 握手完成 — fake-agent 9.9");
+        assert_eq!(msg, "成功: ACP 握手 + 模型调用通过 — fake-agent 9.9");
         assert!(!tester.testing(), "flight guard released");
+    }
+
+    #[tokio::test]
+    async fn test_agent_model_call_rejected() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (store, id) = store_with_agent(
+            &tmp,
+            concat!(
+                "@set /p req1=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"fake-agent\",\"version\":\"9.9\"},\"capabilities\":{}}}\n",
+                "@set /p req2=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"s1\"}}\n",
+                "@set /p req3=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":3,\"error\":{\"code\":-32000,\"message\":\"HTTP 401 invalid api key\"}}\n",
+            ),
+        );
+        let tester = AgentTester::new();
+        let msg = tester.test_agent(&store, &id).await.expect("not busy");
+        assert!(
+            msg.contains("模型调用失败 — HTTP 401 invalid api key"),
+            "{msg}"
+        );
     }
 
     #[tokio::test]

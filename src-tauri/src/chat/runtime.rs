@@ -52,6 +52,13 @@ pub const K_FLUSH_MS: u64 = 50;
 /// Backlog above 64KB stretches the coalescing interval to 250ms.
 pub const K_FLUSH_LONG_MS: u64 = 250;
 pub const K_FLUSH_LONG_THRESHOLD: usize = 64 * 1024;
+/// Stall watchdog: a busy turn with zero ACP activity for this long is
+/// declared dead. Covers the hang where the CLI's internal HTTP retries all
+/// fail silently and session/prompt is never answered — without this the
+/// bubble sits on "生成中…" forever. Must exceed the CLI's own retry span
+/// (observed ~90s for 3 attempts) and is suspended during permission
+/// prompts and rate-limit countdowns.
+pub const K_TURN_STALL_SECS: u64 = 120;
 
 const PLACEHOLDER: &str = "…";
 const INTERRUPTED_MARK: &str = "（已中断）";
@@ -177,6 +184,72 @@ pub fn subagent_summary(raw: &str) -> Option<String> {
     None
 }
 
+/// rawOutput normalization: kimi sends a plain string, claude-code-acp sends
+/// an array of text blocks ([{"type":"text","text":"…"}]). Concatenate block
+/// texts so downstream parsers see one string either way.
+pub fn tool_raw_text(tool: &Map<String, Value>) -> String {
+    match tool.get("rawOutput") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Provider-dispatched outcome summary. kimi uses subagent_summary
+/// (swarm outcome counts / actual_subagent_type line). claude-code-acp Task
+/// output is "<report>\nagentId: xxx (for resuming…)\n<usage>…": the report
+/// body (elided) when non-empty, otherwise the usage duration as a bare
+/// fallback (a subagent that produced no text still gets a useful summary).
+pub fn subagent_summary_for(provider: &str, raw: &str) -> Option<String> {
+    if provider == "claude" {
+        let report = raw.split("agentId:").next().unwrap_or_default().trim();
+        if !report.is_empty() {
+            return Some(elide(report, 80));
+        }
+        const KEY: &str = "duration_ms:";
+        if let Some(p) = raw.find(KEY) {
+            let num: String = raw[p + KEY.len()..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(ms) = num.parse::<u64>() {
+                return Some(format!("耗时 {:.1}s", ms as f64 / 1000.0));
+            }
+        }
+        return None;
+    }
+    subagent_summary(raw)
+}
+
+/// Agent id(s) per provider: kimi `agent_id: agent-0` lines, claude
+/// `agentId: a807b73` (hex token, trailing remark dropped).
+pub fn subagent_agent_ids_for(provider: &str, raw: &str) -> Vec<String> {
+    if provider == "claude" {
+        const KEY: &str = "agentId:";
+        let mut ids = Vec::new();
+        for line in raw.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix(KEY) {
+                let id: String = rest
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
+                if !id.is_empty() && ids.iter().all(|x: &String| x != &id) {
+                    ids.push(id);
+                }
+            }
+        }
+        return ids;
+    }
+    subagent_agent_ids(raw)
+}
+
 /// CLI-side agent id(s) from the Agent tool's rawOutput — the `agent_id:`
 /// line(s) (e.g. "agent-0"). This is the directory name of the sub-agent's
 /// on-disk wire transcript (~/.kimi-code/.../agents/<agentId>/wire.jsonl),
@@ -265,6 +338,9 @@ fn elide(s: &str, n: usize) -> String {
 
 pub trait EventSink: Send + Sync {
     fn emit(&self, event: &str, payload: Value);
+    /// Desktop notification for the human (sub-agent completion etc.).
+    /// Default no-op: tests and non-desktop sinks ignore it.
+    fn notify(&self, _title: &str, _body: &str) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -389,6 +465,8 @@ struct QueuedItem {
     text: String,
     images: Vec<String>,
     display: Vec<String>,
+    /// Row marker ("reminder"); empty for user-typed messages.
+    kind: String,
 }
 
 #[derive(Debug)]
@@ -401,6 +479,8 @@ pub enum RuntimeCmd {
         text: String,
         images: Vec<String>,
         display: Vec<String>,
+        /// Row marker for non-interactive sends ("reminder"; empty = normal).
+        kind: String,
         ack: Option<tokio::sync::oneshot::Sender<SendOutcome>>,
     },
     Cancel,
@@ -492,6 +572,9 @@ pub(crate) struct Actor {
     turn_gen: u64,
     guide_gen: u64,
     last_error: String,
+    /// Last time any ACP data arrived (event or recv). Drives the stall
+    /// watchdog; reset on every handle_event / handle_recv.
+    last_activity: std::time::Instant,
 }
 
 /// Spawn the per-session actor task; returns the command sender.
@@ -552,6 +635,7 @@ pub(crate) fn spawn_actor(
         turn_gen: 0,
         guide_gen: 0,
         last_error: String::new(),
+        last_activity: std::time::Instant::now(),
     };
     tokio::spawn(async move { actor.run().await });
     // 启动即 reload 一次提醒：重启恢复时过期的提醒会立即触发。
@@ -567,9 +651,33 @@ async fn recv_step(client: &mut Option<Box<dyn ClientDriver>>) -> Result<bool, A
     }
 }
 
+/// Stall-watchdog arm for the select!: fires K_TURN_STALL_SECS after the last
+/// ACP activity, but only while a turn is genuinely waiting on the agent —
+/// suspended when no turn is busy, when the client is gone, while a
+/// permission question awaits the USER (agent is legitimately silent), and
+/// during rate-limit retry countdowns (up to K_RATE_LIMIT_MAX_DELAY_SEC).
+async fn stall_deadline(
+    busy: bool,
+    has_client: bool,
+    perm_pending: bool,
+    retry_active: bool,
+    last: std::time::Instant,
+) {
+    if busy && has_client && !perm_pending && !retry_active {
+        let deadline = tokio::time::Instant::from_std(last)
+            + std::time::Duration::from_secs(K_TURN_STALL_SECS);
+        tokio::time::sleep_until(deadline).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 impl Actor {
     async fn run(&mut self) {
         loop {
+            // Precomputed outside the select!: recv_step holds &mut
+            // self.client, so the watchdog arm may not touch that field.
+            let has_client = self.client.is_some();
             tokio::select! {
                 biased;
                 cmd = self.cmd_rx.recv() => {
@@ -588,13 +696,54 @@ impl Actor {
                 r = recv_step(&mut self.client) => {
                     self.handle_recv(r);
                 }
+                () = stall_deadline(self.busy, has_client, self.perm_request_id.is_some(), self.retry_active, self.last_activity) => {
+                    self.on_turn_stall().await;
+                }
             }
         }
+    }
+
+    // ---- stall watchdog ----
+
+    /// The agent went silent mid-turn (hung model endpoint, dead network,
+    /// CLI frozen in internal retries): kill the CLI (kill_on_drop) and
+    /// surface the failure IN THE BUBBLE — previously this left "生成中…"
+    /// spinning forever with the reason only visible in the log.
+    async fn on_turn_stall(&mut self) {
+        if !self.busy {
+            return; // turn finished between the deadline and this poll
+        }
+        log::warn!(
+            "chat[{}] turn stalled: no ACP activity for {K_TURN_STALL_SECS}s, killing CLI",
+            self.session_id
+        );
+        self.cancel_retry(false);
+        self.client = None;
+        self.acp_ready = false;
+        self.snap().acp_running = false;
+        let msg = format!(
+            "回合失败：超过 {K_TURN_STALL_SECS} 秒没有收到模型端点的任何数据（连接已重置）。请检查网络/代理、Base URL 与 API Key 后重试"
+        );
+        self.set_error(msg.clone());
+        self.flush_stream_buffers();
+        if self.assistant_buf.trim().is_empty() {
+            self.update_last_assistant(&msg, "error");
+            self.emit_turn("error", "stallTimeout", None);
+        } else {
+            // Keep the partial reply; just close it as interrupted.
+            self.mark_interrupted();
+            self.emit_turn("interrupted", "stallTimeout", None);
+        }
+        self.assistant_buf.clear();
+        self.thinking_buf.clear();
+        self.finish_reply();
+        self.emit_status(None);
     }
 
     // ---- recv lifecycle ----
 
     fn handle_recv(&mut self, r: Result<bool, AcpError>) {
+        self.last_activity = std::time::Instant::now();
         match r {
             Ok(true) => {}
             Ok(false) => {
@@ -630,8 +779,9 @@ impl Actor {
                 text,
                 images,
                 display,
+                kind,
                 ack,
-            } => self.on_send_prompt(text, images, display, ack).await,
+            } => self.on_send_prompt(text, images, display, kind, ack).await,
             RuntimeCmd::Cancel => self.on_cancel().await,
             RuntimeCmd::RetryCancel => self.cancel_retry(true),
             RuntimeCmd::GuideAt(index) => self.on_guide_at(index).await,
@@ -709,6 +859,7 @@ impl Actor {
         text: String,
         images: Vec<String>,
         display: Vec<String>,
+        kind: String,
         ack: Option<tokio::sync::oneshot::Sender<SendOutcome>>,
     ) {
         let trimmed = text.trim().to_string();
@@ -733,7 +884,7 @@ impl Actor {
                 }
                 return;
             }
-            self.queue.push_back(QueuedItem { text: trimmed, images, display });
+            self.queue.push_back(QueuedItem { text: trimmed, images, display, kind });
             self.set_error(String::new());
             self.sync_snap();
             self.emit_status(None);
@@ -743,7 +894,7 @@ impl Actor {
             return;
         }
         self.set_error(String::new());
-        self.start_send(trimmed, images, display).await;
+        self.start_send(trimmed, images, display, &kind).await;
         if let Some(ack) = ack {
             let _ = ack.send(SendOutcome::Started);
         }
@@ -803,7 +954,7 @@ impl Actor {
             self.cancel_retry(true);
         }
         if !self.busy {
-            self.start_send(item.text, item.images, item.display).await;
+            self.start_send(item.text, item.images, item.display, &item.kind).await;
             return;
         }
         self.pending_guide = Some(item);
@@ -831,7 +982,7 @@ impl Actor {
         };
         if !self.busy {
             self.pending_guide = None;
-            self.start_send(guide.text, guide.images, guide.display).await;
+            self.start_send(guide.text, guide.images, guide.display, &guide.kind).await;
         } else {
             // Old turn still alive inside AcpClient — kill it, or its
             // remaining chunks would stream into the guide's new bubble and
@@ -843,7 +994,7 @@ impl Actor {
             self.set_busy(false);
             self.pending_guide = None;
             self.user_stop = false;
-            self.start_send(guide.text, guide.images, guide.display).await;
+            self.start_send(guide.text, guide.images, guide.display, &guide.kind).await;
         }
     }
 
@@ -973,6 +1124,7 @@ impl Actor {
     // ---- ACP events ----
 
     async fn handle_event(&mut self, ev: AcpEvent) {
+        self.last_activity = std::time::Instant::now();
         match ev {
             AcpEvent::Started { session_id } => {
                 self.acp_ready = true;
@@ -1228,7 +1380,7 @@ impl Actor {
     // ---- turn lifecycle ----
 
     /// startSend (ChatController.cpp:1006-1068) — order is a hard contract.
-    async fn start_send(&mut self, text: String, images: Vec<String>, display: Vec<String>) {
+    async fn start_send(&mut self, text: String, images: Vec<String>, display: Vec<String>, kind: &str) {
         let provider = self.agent.provider.trim().to_lowercase();
         // 首条用户消息：发给 agent 的文本前注入提醒工具引导语（只进
         // prompt，不进显示的用户行；pending_prompt 路径复用同一文本）。
@@ -1254,6 +1406,7 @@ impl Actor {
                 &provider,
                 "done",
                 &display,
+                kind,
             ) {
                 log::warn!("chat[{}] append user row failed: {e}", self.session_id);
             }
@@ -1265,6 +1418,7 @@ impl Actor {
                 &provider,
                 "pending",
                 &[],
+                "",
             ) {
                 log::warn!("chat[{}] append assistant row failed: {e}", self.session_id);
             }
@@ -1354,6 +1508,7 @@ impl Actor {
                         text: guide.text,
                         images: guide.images,
                         display: guide.display,
+                        kind: guide.kind,
                         ack: None,
                     })
                     .await;
@@ -1371,6 +1526,7 @@ impl Actor {
                             text: next.text,
                             images: next.images,
                             display: next.display,
+                            kind: next.kind,
                             ack: None,
                         })
                         .await;
@@ -1781,6 +1937,7 @@ impl Actor {
                         text: format!("⏰ 提醒时间到：{}", r.content),
                         images: Vec::new(),
                         display: Vec::new(),
+                        kind: "reminder".to_string(),
                         ack: None,
                     })
                     .await;
@@ -1879,25 +2036,56 @@ impl Actor {
         let done = entry.status == "completed" || entry.status == "failed";
         if done && entry.finished_at == 0 {
             entry.finished_at = now_ms();
-            if let Some(raw) = tool.get("rawOutput").and_then(Value::as_str) {
-                if let Some(summary) = subagent_summary(raw) {
+            let raw = tool_raw_text(tool);
+            if !raw.is_empty() {
+                let provider = self.agent.provider.trim().to_lowercase();
+                if let Some(summary) = subagent_summary_for(&provider, &raw) {
                     entry.summary = summary;
                 }
-                entry.agent_ids = subagent_agent_ids(raw);
+                entry.agent_ids = subagent_agent_ids_for(&provider, &raw);
                 // Final report for the detail dialog (already ≤64KB upstream).
                 entry.output = if raw.len() > 64 * 1024 {
                     let cut: String = raw.chars().take(64 * 1024).collect();
                     format!("{cut}\n…（已截断）")
                 } else {
-                    raw.to_string()
+                    raw
                 };
             }
+        }
+        if done {
+            self.notify_subagent_done(&entry);
         }
         match idx {
             Some(i) => self.subagents[i] = entry,
             None => self.subagents.push(entry),
         }
         self.emit_subagents();
+    }
+
+    /// Desktop notification for the human when a sub-agent settles. The
+    /// agent-side channel is unaffected — this is purely UI-side. The only
+    /// false positive filtered here is a background-mode launch ack: the CLI
+    /// returns a `task_id:` immediately (start, not completion), so those
+    /// entries don't notify. Summary formats differ per provider (kimi has
+    /// `actual_subagent_type:`/swarm `outcome=`, Claude has neither), so an
+    /// empty summary still notifies with the bare status.
+    fn notify_subagent_done(&self, entry: &SubagentEntry) {
+        let status = match entry.status.as_str() {
+            "completed" => "完成",
+            "failed" => "失败",
+            "interrupted" => "被中断",
+            _ => return,
+        };
+        if entry.output.contains("task_id:") {
+            return;
+        }
+        let body = if entry.summary.is_empty() {
+            status.to_string()
+        } else {
+            format!("{status} · {}", entry.summary)
+        };
+        self.sink
+            .notify(&format!("子 Agent「{}」{status}", entry.title), &body);
     }
 
     /// finishSubagents (ChatController.cpp:630-646): at turn end, anything
@@ -2145,6 +2333,7 @@ fn row_json(session_id: &str, row: &MessageRow) -> Value {
             "toolCalls": row.tool_calls,
             "segments": row.segments,
             "attachments": row.attachments,
+            "kind": row.kind,
         }
     })
 }
@@ -2240,6 +2429,51 @@ mod tests {
         assert_eq!(subagent_summary(single).as_deref(), Some("explore"));
         assert!(subagent_summary("").is_none());
         assert!(subagent_summary("nothing here").is_none());
+    }
+
+    #[test]
+    fn tool_raw_text_normalizes_string_and_block_array() {
+        let s = json!({ "rawOutput": "plain" });
+        assert_eq!(tool_raw_text(s.as_object().unwrap()), "plain");
+        // claude-code-acp shape: array of text blocks.
+        let a = json!({ "rawOutput": [
+            { "type": "text", "text": "报告" },
+            { "type": "text", "text": "agentId: a1 (for resuming)" },
+        ]});
+        assert_eq!(tool_raw_text(a.as_object().unwrap()), "报告\nagentId: a1 (for resuming)");
+        let none = json!({});
+        assert_eq!(tool_raw_text(none.as_object().unwrap()), "");
+    }
+
+    #[test]
+    fn claude_summary_report_then_duration_fallback() {
+        let with_report = "架构要点如下……\nagentId: a807b73 (for resuming)\n<usage>duration_ms: 1640</usage>";
+        assert_eq!(
+            subagent_summary_for("claude", with_report).as_deref(),
+            Some("架构要点如下……")
+        );
+        // Empty report (subagent produced nothing) → duration fallback.
+        let empty = "\n\n\nagentId: afbc298 (for resuming)\n<usage>total_tokens: 13236\nduration_ms: 1882</usage>";
+        assert_eq!(
+            subagent_summary_for("claude", empty).as_deref(),
+            Some("耗时 1.9s")
+        );
+        assert!(subagent_summary_for("claude", "").is_none());
+        // kimi path unchanged.
+        let kimi = "agent_id: x\nactual_subagent_type: explore";
+        assert_eq!(subagent_summary_for("kimi", kimi).as_deref(), Some("explore"));
+        assert!(subagent_summary_for("kimi", empty).is_none());
+    }
+
+    #[test]
+    fn claude_agent_ids_hex_token() {
+        let raw = "报告\nagentId: a807b73 (for resuming to continue this agent's work if needed)";
+        assert_eq!(subagent_agent_ids_for("claude", raw), vec!["a807b73"]);
+        let kimi = "agent_id: agent-0\nagent_id: agent-1";
+        assert_eq!(
+            subagent_agent_ids_for("kimi", kimi),
+            vec!["agent-0", "agent-1"]
+        );
     }
 
     #[test]
