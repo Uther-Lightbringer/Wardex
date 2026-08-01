@@ -185,6 +185,10 @@ impl StdioTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // GUI app spawning a console child (cmd.exe /c shims, node, …) would
+        // otherwise pop a visible console window per spawn.
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         if !config.cwd.is_empty() {
             cmd.current_dir(&config.cwd);
         }

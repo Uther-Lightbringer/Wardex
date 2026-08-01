@@ -49,13 +49,24 @@ pub fn parse_log_line(line: &str) -> Option<GitCommit> {
 /// Spawn `git -C <dir> <args>` with the hard 4s ceiling; stdout on success,
 /// first stderr line otherwise.
 fn run_git(dir: &str, args: &[&str]) -> Result<String, String> {
-    let child = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    #[allow(unused_mut)]
+    let mut cmd = {
+        let mut c = Command::new("git");
+        c.arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        c
+    };
+    // GUI app: git spawns must not flash a console window (git panel polls).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let child = cmd
         .spawn()
         .map_err(|e| format!("无法启动 git: {e}"))?;
 

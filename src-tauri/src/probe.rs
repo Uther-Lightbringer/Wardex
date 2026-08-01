@@ -343,6 +343,9 @@ async fn check_version(path: &Path) -> Result<Option<String>, ProbeError> {
         // kill_on_drop replaces the old kill+waitForFinished(300) cleanup:
         // a timed-out child is reaped when the future is dropped.
         .kill_on_drop(true);
+    // GUI app: never pop a console window for the version probe.
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     if let Some(dir) = path.parent() {
         let system_path = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", format!("{};{}", native_separators(&dir.to_string_lossy()), system_path));
@@ -531,6 +534,9 @@ impl AgentTester {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
+        // GUI app: never pop a console window for the test-connection run.
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         for (key, value) in env {
             if let Some(v) = value {
                 cmd.env(key, v);
