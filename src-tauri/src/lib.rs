@@ -33,6 +33,7 @@ pub mod models;
 pub mod probe;
 pub mod provider;
 pub mod store;
+pub mod usage_backfill;
 
 use std::sync::{Arc, Mutex};
 
@@ -105,6 +106,23 @@ impl EventSink for TauriSink {
     fn emit(&self, event: &str, payload: Value) {
         if let Err(e) = self.0.emit(event, payload) {
             log::warn!("emit {event} failed: {e}");
+        }
+    }
+
+    /// Desktop notification, only while the main window is unfocused — when
+    /// the user is watching the app the SubagentPanel already shows it.
+    fn notify(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
+        let focused = self
+            .0
+            .get_webview_window("main")
+            .and_then(|w| w.is_focused().ok())
+            .unwrap_or(true);
+        if focused {
+            return;
+        }
+        if let Err(e) = self.0.notification().builder().title(title).body(body).show() {
+            log::warn!("notify failed: {e}");
         }
     }
 }
@@ -851,6 +869,12 @@ fn usage_report(state: State<'_, AppState>) -> Value {
 }
 
 #[tauri::command]
+fn usage_backfill(state: State<'_, AppState>) -> Value {
+    let mut stores = lock(&state.stores);
+    serde_json::to_value(usage_backfill::backfill(&mut stores)).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
 fn get_prefs(state: State<'_, AppState>) -> Value {
     let stores = lock(&state.stores);
     json!({
@@ -1023,6 +1047,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let t = std::time::Instant::now();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app.handle().clone()));
@@ -1116,6 +1141,7 @@ pub fn run() {
             prompt_add,
             prompt_remove,
             usage_report,
+            usage_backfill,
             get_prefs,
             background_config,
             set_user_name,

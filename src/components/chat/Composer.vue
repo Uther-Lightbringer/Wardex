@@ -698,9 +698,15 @@ function onExpandConfirm(v: string): void {
   color: var(--war-gold);
   user-select: none;
   line-height: 1;
-  padding: 2px 4px;
+  padding: 4px 6px; /* generous invisible hit area in the corner */
   background: #10141fcc; /* keep the glyph readable over typed text */
   border-radius: 3px;
+  opacity: 0; /* reveal only when the cursor reaches the corner itself */
+  transition: opacity 0.15s ease;
+}
+
+.composer__expand:hover {
+  opacity: 1;
 }
 
 .composer__expand:hover {

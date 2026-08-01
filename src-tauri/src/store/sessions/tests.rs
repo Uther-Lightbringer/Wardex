@@ -70,7 +70,7 @@ fn append_line_has_no_segments_key_rewrite_has_it() {
     let (_tmp, paths) = temp_paths();
     let (mut store, id) = make_store_with_session(&paths);
     store
-        .append_message(&id, "user", "你好世界", "kimi", "done", &[])
+        .append_message(&id, "user", "你好世界", "kimi", "done", &[], "")
         .unwrap();
     let text =
         String::from_utf8(std::fs::read(paths.session_messages_path(&id)).unwrap()).unwrap();
@@ -79,7 +79,7 @@ fn append_line_has_no_segments_key_rewrite_has_it() {
 
     // Assistant placeholder + streaming (memory only) + flush → rewrite with segments.
     store
-        .append_message(&id, "assistant", "…", "kimi", "pending", &[])
+        .append_message(&id, "assistant", "…", "kimi", "pending", &[], "")
         .unwrap();
     let before_flush =
         String::from_utf8(std::fs::read(paths.session_messages_path(&id)).unwrap()).unwrap();
@@ -159,7 +159,7 @@ fn title_hint_and_summary_rules() {
     let (mut store, id) = make_store_with_session(&paths);
     let long_user = "这是一条足够长的用户消息用来触发二十四字符标题截断的规则验证一下";
     store
-        .append_message(&id, "user", long_user, "kimi", "done", &[])
+        .append_message(&id, "user", long_user, "kimi", "done", &[], "")
         .unwrap();
     let meta = store.meta_for(&id).unwrap();
     assert_eq!(meta.title.chars().count(), 25, "left(24) + ellipsis");
@@ -169,7 +169,7 @@ fn title_hint_and_summary_rules() {
 
     let long_summary: String = "摘".repeat(100);
     store
-        .append_message(&id, "assistant", &long_summary, "kimi", "done", &[])
+        .append_message(&id, "assistant", &long_summary, "kimi", "done", &[], "")
         .unwrap();
     let meta = store.meta_for(&id).unwrap();
     assert_eq!(meta.summary.chars().count(), 81, "left(80) + ellipsis");
@@ -186,7 +186,7 @@ fn discard_empty_sessions_keeps_unreadable_meta() {
     let (_, used_id) = {
         let agent = AgentSnapshot::default();
         let id = store.create_session(&agent, "").unwrap();
-        store.append_message(&id, "user", "hi", "", "done", &[]).unwrap();
+        store.append_message(&id, "user", "hi", "", "done", &[], "").unwrap();
         ((), id)
     };
     store.release_session(&used_id);
@@ -203,6 +203,27 @@ fn discard_empty_sessions_keeps_unreadable_meta() {
 }
 
 #[test]
+fn message_kind_roundtrip_and_legacy_default() {
+    let (_tmp, paths) = temp_paths();
+    let (mut store, id) = make_store_with_session(&paths);
+    store
+        .append_message(&id, "user", "⏰ 提醒时间到：喝水", "kimi", "done", &[], "reminder")
+        .unwrap();
+    store.append_message(&id, "user", "hi", "kimi", "done", &[], "").unwrap();
+    // 标记行落盘带 kind 键；普通行不写该键（旧格式不变）。
+    let raw = std::fs::read_to_string(paths.session_messages_path(&id)).unwrap();
+    let mut lines = raw.lines();
+    assert!(lines.next().unwrap().contains("\"kind\":\"reminder\""));
+    assert!(!lines.next().unwrap().contains("\"kind\""));
+    // 重载后标记保留；无 kind 键的旧行默认空串。
+    store.release_session(&id);
+    assert!(store.ensure_open(&id));
+    let msgs = store.messages(&id).unwrap();
+    assert_eq!(msgs[0].kind, "reminder");
+    assert_eq!(msgs[1].kind, "");
+}
+
+#[test]
 fn lru_evicts_oldest_beyond_five() {
     let (_tmp, paths) = temp_paths();
     let mut store = SessionStore::load(paths.clone());
@@ -210,7 +231,7 @@ fn lru_evicts_oldest_beyond_five() {
     let mut ids = Vec::new();
     for _ in 0..7 {
         let id = store.create_session(&agent, "").unwrap();
-        store.append_message(&id, "user", "x", "", "done", &[]).unwrap();
+        store.append_message(&id, "user", "x", "", "done", &[], "").unwrap();
         ids.push(id);
     }
     // 7 sessions touched; at most 5 resident, oldest evicted.
@@ -229,7 +250,7 @@ fn flush_rewrites_empty_reply_placeholder() {
     let (_tmp, paths) = temp_paths();
     let (mut store, id) = make_store_with_session(&paths);
     store
-        .append_message(&id, "assistant", "…", "kimi", "pending", &[])
+        .append_message(&id, "assistant", "…", "kimi", "pending", &[], "")
         .unwrap();
     store.flush_last_assistant(&id, Some("done"), None).unwrap();
     let msgs = store.messages(&id).unwrap();
@@ -241,7 +262,7 @@ fn upsert_tool_merges_non_null_and_forces_kind() {
     let (_tmp, paths) = temp_paths();
     let (mut store, id) = make_store_with_session(&paths);
     store
-        .append_message(&id, "assistant", "…", "kimi", "pending", &[])
+        .append_message(&id, "assistant", "…", "kimi", "pending", &[], "")
         .unwrap();
     let mut t1 = Map::new();
     t1.insert("toolCallId".into(), Value::String("c1".into()));
@@ -299,12 +320,12 @@ fn search_hits_snippets_and_title_only() {
     let s1 = store.create_session(&agent, "").unwrap();
     for i in 0..5 {
         store
-            .append_message(&s1, "user", &format!("目标关键词 第{i}条"), "kimi", "done", &[])
+            .append_message(&s1, "user", &format!("目标关键词 第{i}条"), "kimi", "done", &[], "")
             .unwrap();
     }
     // pending placeholder must not match
     store
-        .append_message(&s1, "assistant", "…", "kimi", "pending", &[])
+        .append_message(&s1, "assistant", "…", "kimi", "pending", &[], "")
         .unwrap();
     let s2 = store.create_session(&agent, "").unwrap();
     store.rename_session(&s2, "关键词标题").unwrap();
@@ -361,7 +382,7 @@ fn search_snippet_context_marks() {
         .unwrap();
     let long = format!("{}NEEDLE{}", "前".repeat(100), "后".repeat(100));
     store
-        .append_message(&id, "user", &long, "kimi", "done", &[])
+        .append_message(&id, "user", &long, "kimi", "done", &[], "")
         .unwrap();
     let engine = SearchEngine::new();
     let SearchOutcome::Done { results, .. } = engine.search(&store.search_targets(), "needle", 50)
@@ -384,7 +405,7 @@ fn case_insensitive_search_matches() {
         .create_session(&AgentSnapshot::default(), "")
         .unwrap();
     store
-        .append_message(&id, "user", "Hello World", "kimi", "done", &[])
+        .append_message(&id, "user", "Hello World", "kimi", "done", &[], "")
         .unwrap();
     let engine = SearchEngine::new();
     let SearchOutcome::Done { results, .. } =

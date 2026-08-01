@@ -18,7 +18,7 @@ const reminders = useRemindersStore();
 const dialogOpen = ref(false);
 const listEl = ref<HTMLElement | null>(null);
 
-// Countdown tick: 20s cadence is plenty for minute-resolution reminders.
+// Countdown tick: 1s cadence for the live mm:ss remaining display.
 const now = ref(Date.now());
 let tickTimer = 0;
 
@@ -27,7 +27,7 @@ onMounted(() => {
   void reminders.load(chat.sessionId);
   tickTimer = window.setInterval(() => {
     now.value = Date.now();
-  }, 20_000);
+  }, 1_000);
 });
 onBeforeUnmount(() => window.clearInterval(tickTimer));
 
@@ -46,8 +46,11 @@ function dueLine(r: Reminder): string {
   const stamp = `${p(d.getHours())}:${p(d.getMinutes())}`;
   const diff = r.dueAtMs - now.value;
   if (diff <= 0) return `${stamp} · 已到期`;
-  const mins = Math.round(diff / 60_000);
-  const remain = mins >= 60 ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分钟` : `${mins} 分钟`;
+  const secs = Math.ceil(diff / 1_000);
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  const s = secs % 60;
+  const remain = h > 0 ? `${h}:${p(m)}:${p(s)}` : `${p(m)}:${p(s)}`;
   return `${stamp} · 还剩 ${remain}`;
 }
 

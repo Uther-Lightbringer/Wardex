@@ -301,7 +301,7 @@ fn model_sections_for_provider<'a>(text: &'a str, provider_key: &str) -> Vec<(St
     let mut out: Vec<(String, String)> = Vec::new();
     let mut cur_header = String::new();
     let mut cur_has_provider = false;
-    let mut flush = |header: &str, has: bool, out: &mut Vec<(String, String)>| {
+    let flush = |header: &str, has: bool, out: &mut Vec<(String, String)>| {
         if has {
             if let Some(alias) = header
                 .strip_prefix("[models.\"")

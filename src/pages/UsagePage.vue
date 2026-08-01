@@ -35,11 +35,40 @@ const sessions = useSessionsStore();
 
 const report = ref<UsageReport | null>(null);
 
-onMounted(async () => {
+async function load(): Promise<void> {
   report.value = await cmd<UsageReport | null>('usage_report', undefined, null);
+}
+
+onMounted(async () => {
+  await load();
   // 会话标题 join 来源（list_sessions）；拿不到就回退到 sessionId 前 8 位。
   if (sessions.all.length === 0) await sessions.reloadAll();
 });
+
+// ---- 回填历史：把上线前的 CLI 档案用量补进统计库，完成后刷新本页 ----
+interface BackfillResult {
+  sessions: number;
+  files: number;
+  added: number;
+  skipped: number;
+}
+
+const backfilling = ref(false);
+const backfillHint = ref('');
+
+async function backfill(): Promise<void> {
+  if (backfilling.value) return;
+  backfilling.value = true;
+  backfillHint.value = '';
+  const r = await cmd<BackfillResult | null>('usage_backfill', undefined, null).catch(() => null);
+  backfilling.value = false;
+  if (!r) {
+    backfillHint.value = '回填失败';
+    return;
+  }
+  backfillHint.value = `已回填 ${r.added} 条记录 · 命中 ${r.files} 个档案 · 跳过 ${r.skipped} 个已有数据的会话`;
+  await load();
+}
 
 // Esc returns to the config page (same as the 返回(B) button).
 function onPageKey(e: KeyboardEvent): void {
@@ -140,7 +169,18 @@ function sessionTitle(id: string): string {
           </div>
 
           <!-- bottom actions -->
+          <div v-if="backfillHint" class="usage__backfill-hint" :style="{ fontSize: prefs.fs(12) + 'px' }">
+            {{ backfillHint }}
+          </div>
           <div class="usage__actions">
+            <WarButton
+              skin="dialog"
+              :width="170"
+              :art-aspect="5.34"
+              :text="backfilling ? '回填中…' : '回填历史'"
+              :enabled="!backfilling"
+              @activated="backfill"
+            />
             <span class="usage__spring"></span>
             <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="返回(B)" shortcut-key="B" :shortcut-active="nav.page === 'usage'" @activated="nav.goOverlay('config')" />
           </div>
@@ -277,6 +317,15 @@ function sessionTitle(id: string): string {
   font-family: SimSun, serif;
   text-align: center;
   padding: 12px 0;
+}
+
+.usage__backfill-hint {
+  flex: none;
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .usage__actions {

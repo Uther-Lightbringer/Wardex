@@ -53,6 +53,8 @@ export interface ChatMessage {
   segments: ChatSegment[];
   attachments: string[];
   usage?: TurnUsage;
+  /** Row marker for non-interactive sends ('reminder'); absent = normal. */
+  kind?: string;
 }
 
 export interface ChatStatus {

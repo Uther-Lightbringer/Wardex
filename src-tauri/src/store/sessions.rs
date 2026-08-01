@@ -132,6 +132,10 @@ pub struct MessageRow {
     /// absent on old rows and turns without usage).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<TurnUsage>,
+    /// Row marker for non-interactive sends ("reminder"; empty = normal).
+    /// Absent in old files; the key is only written when non-empty.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub kind: String,
 }
 
 /// Wire shape of one JSONL line. `status` defaults to "done" when the key is
@@ -153,6 +157,7 @@ struct MessageLine {
     segments: Vec<Value>,
     attachments: Vec<String>,
     usage: Option<TurnUsage>,
+    kind: String,
 }
 
 impl Default for MessageLine {
@@ -169,6 +174,7 @@ impl Default for MessageLine {
             segments: Vec::new(),
             attachments: Vec::new(),
             usage: None,
+            kind: String::new(),
         }
     }
 }
@@ -191,6 +197,7 @@ impl MessageLine {
             segments: self.segments,
             attachments: self.attachments,
             usage: self.usage,
+            kind: self.kind,
         };
         if row.segments.is_empty() {
             synthesize_legacy_segments(&mut row);
@@ -245,6 +252,9 @@ fn message_line_value(row: &MessageRow, include_segments: bool) -> Value {
     o.insert("content".to_string(), Value::String(row.content.clone()));
     o.insert("createdAt".to_string(), Value::Number(row.created_at.into()));
     o.insert("id".to_string(), Value::String(row.id.clone()));
+    if !row.kind.is_empty() {
+        o.insert("kind".to_string(), Value::String(row.kind.clone()));
+    }
     o.insert("provider".to_string(), Value::String(row.provider.clone()));
     o.insert("role".to_string(), Value::String(row.role.clone()));
     if include_segments {
@@ -795,6 +805,7 @@ impl SessionStore {
         provider: &str,
         status: &str,
         attachments: &[String],
+        kind: &str,
     ) -> Result<bool, SessionsError> {
         if !self.ensure_open(session_id) {
             return Ok(false);
@@ -808,6 +819,7 @@ impl SessionStore {
             provider: provider.to_string(),
             status: status.to_string(),
             attachments: attachments.to_vec(),
+            kind: kind.to_string(),
             ..Default::default()
         };
         let path = self.paths.session_messages_path(session_id);

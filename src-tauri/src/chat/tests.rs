@@ -472,6 +472,100 @@ async fn subagent_tracked_from_tool_call_through_turn_end() {
     assert!(entry["finishedAt"].as_i64().unwrap_or(0) > 0);
 }
 
+/// 子 Agent 批次唤醒：回合内启动的子 Agent 在回合结束后才全部完成时，
+/// runtime 自动发一条 kind:"reminder" 的追问 prompt 唤醒 agent；一批只发
+/// 一次。同时验证 runtime 在回合外确实能收到 tool_call_update（recv 循环
+/// 不门控 busy），这是事件驱动路径成立的前提。
+#[tokio::test]
+async fn subagent_batch_completion_outside_turn_wakes_agent() {
+    let h = harness();
+    let id = ready_session(&h, "").await;
+    let mock = mock_at(&h, 0);
+    h.manager.send_prompt(&id, "spawn agents", &[]).await.expect("send");
+    assert!(wait_for(|| !prompt_msgs(&mock).is_empty()).await);
+    // 回合内：2 个子 Agent 启动（pending，未等到完成）。
+    for tid in ["bg1", "bg2"] {
+        mock.feed_json(update_frame(
+            "tool_call",
+            json!({ "toolCallId": tid, "title": "Agent", "status": "pending" }),
+        ))
+        .await;
+    }
+    // 回合结束（仍有 2 个子 Agent 未完成 → 记入 bg_pending）。
+    let pid = prompt_msgs(&mock)
+        .last()
+        .and_then(|m| m.get("id").and_then(Value::as_u64))
+        .expect("prompt id");
+    mock.feed_json(json!({ "jsonrpc": "2.0", "id": pid,
+                           "result": { "stopReason": "end_turn" } }))
+        .await;
+    assert!(wait_for(|| h.manager.runtime_states().get(&id).map(|s| !s.busy) == Some(true)).await);
+    let turns = prompt_msgs(&mock).len();
+
+    // 回合外：第 1 个完成 —— 批未齐，不触发。
+    mock.feed_json(update_frame(
+        "tool_call_update",
+        json!({ "toolCallId": "bg1", "status": "completed", "rawOutput": "done-1" }),
+    ))
+    .await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(prompt_msgs(&mock).len(), turns, "partial batch must not wake");
+
+    // 第 2 个完成 —— 批齐，自动追问一次。
+    mock.feed_json(update_frame(
+        "tool_call_update",
+        json!({ "toolCallId": "bg2", "status": "completed", "rawOutput": "done-2" }),
+    ))
+    .await;
+    assert!(wait_for(|| prompt_msgs(&mock).len() == turns + 1).await, "batch done wakes the agent");
+    let wake = prompt_msgs(&mock)
+        .last()
+        .and_then(|m| m.pointer("/params/prompt/0/text").and_then(Value::as_str).map(str::to_string))
+        .expect("wake prompt text");
+    assert_eq!(wake, "你的子 Agent 已全部完成，请读取结果并继续。");
+    // 追问回合的 user 行带 reminder 标记（前端系统样式）。
+    assert!(wait_for(|| {
+        h.manager.session_messages(&id).iter().any(|r| {
+            r.get("role").and_then(Value::as_str) == Some("user")
+                && r.get("content").and_then(Value::as_str) == Some(wake.as_str())
+                && r.get("kind").and_then(Value::as_str) == Some("reminder")
+        })
+    })
+    .await);
+}
+
+/// 回合内完成的子 Agent 是常态：绝不触发追问。
+#[tokio::test]
+async fn subagent_completion_inside_turn_does_not_wake() {
+    let h = harness();
+    let id = ready_session(&h, "").await;
+    let mock = mock_at(&h, 0);
+    h.manager.send_prompt(&id, "one agent", &[]).await.expect("send");
+    assert!(wait_for(|| !prompt_msgs(&mock).is_empty()).await);
+    mock.feed_json(update_frame(
+        "tool_call",
+        json!({ "toolCallId": "fg1", "title": "Agent", "status": "pending" }),
+    ))
+    .await;
+    // 回合内就完成了。
+    mock.feed_json(update_frame(
+        "tool_call_update",
+        json!({ "toolCallId": "fg1", "status": "completed", "rawOutput": "ok" }),
+    ))
+    .await;
+    let pid = prompt_msgs(&mock)
+        .last()
+        .and_then(|m| m.get("id").and_then(Value::as_u64))
+        .expect("prompt id");
+    mock.feed_json(json!({ "jsonrpc": "2.0", "id": pid,
+                           "result": { "stopReason": "end_turn" } }))
+        .await;
+    assert!(wait_for(|| h.manager.runtime_states().get(&id).map(|s| !s.busy) == Some(true)).await);
+    let turns = prompt_msgs(&mock).len();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(prompt_msgs(&mock).len(), turns, "in-turn completion must not wake");
+}
+
 #[tokio::test]
 async fn queue_drains_head_first_until_empty() {
     let h = harness();
@@ -590,6 +684,10 @@ async fn attachments_enqueue_while_busy_and_drain_with_image_block() {
 async fn first_user_message_carries_reminder_guide_prefix() {
     use crate::chat::runtime::REMINDER_GUIDE_PREFIX;
 
+    // 引导语同时覆盖"用户提醒"与"子 Agent/后台任务自我唤醒"两个场景。
+    assert!(REMINDER_GUIDE_PREFIX.contains("set_reminder"));
+    assert!(REMINDER_GUIDE_PREFIX.contains("子 Agent"));
+
     let h = harness();
     let id = ready_session(&h, "").await;
     let mock = mock_at(&h, 0);
@@ -662,18 +760,25 @@ async fn due_reminder_fires_as_prompt_turn() {
         .await,
         "reminder prompt sent to the agent"
     );
-    // user 行 + assistant 占位行出现在历史里。
+    // user 行（带 reminder 标记）+ assistant 占位行出现在历史里。
     assert!(wait_for(|| {
         let rows = h.manager.session_messages(&id);
         rows.iter().any(|r| {
             r.get("role").and_then(Value::as_str) == Some("user")
                 && r.get("content").and_then(Value::as_str) == Some("⏰ 提醒时间到：喝水")
+                && r.get("kind").and_then(Value::as_str) == Some("reminder")
         }) && rows.iter().any(|r| {
             r.get("role").and_then(Value::as_str) == Some("assistant")
                 && r.get("status").and_then(Value::as_str) == Some("pending")
         })
     })
     .await);
+    // chat://messageAppended 的 user 行 payload 也带 reminder 标记。
+    assert!(!h
+        .sink
+        .find(|(ev, p)| ev == "chat://messageAppended"
+            && p.pointer("/row/kind").and_then(Value::as_str) == Some("reminder"))
+        .is_empty());
     // 触发即 done，pending 列表清空，且前端收到 chat://reminders。
     assert!(lock_ok(&h.stores).reminders.list(&id).is_empty());
     assert!(!h

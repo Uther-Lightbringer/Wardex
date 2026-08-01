@@ -188,7 +188,7 @@ fn codex_newest(home: &Path) -> Option<PathBuf> {
 // ---- 行解析 ----
 
 /// 单条用量记录的拆分计数（total 在解析时定案：档案给了用档案的，否则
-/// input+output）。
+/// input+output）。request_id / ts 只为 claude 去重和回填取时间戳服务。
 #[derive(Debug, Default, PartialEq)]
 struct RecordSum {
     input: u64,
@@ -197,10 +197,35 @@ struct RecordSum {
     cache_write: u64,
     thought: u64,
     total: u64,
+    /// claude 顶层 requestId：同一次 API 调用拆出的多条 assistant 行共享，
+    /// 去重时每组只计 output 最大的那行。
+    request_id: Option<String>,
+    /// 记录自带时间戳（ms；0 = 档案没给）。
+    ts: i64,
 }
 
 fn get_u64(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// ISO-8601 时间串 → epoch ms；解析失败返回 0。
+fn iso_to_ms(s: &str) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|d| d.timestamp_millis())
+        .unwrap_or(0)
+}
+
+impl RecordSum {
+    fn into_usage(&self) -> TurnUsage {
+        TurnUsage {
+            input_tokens: self.input,
+            output_tokens: self.output,
+            total_tokens: self.total,
+            cached_read_tokens: (self.cache_read > 0).then_some(self.cache_read),
+            cached_write_tokens: (self.cache_write > 0).then_some(self.cache_write),
+            thought_tokens: (self.thought > 0).then_some(self.thought),
+        }
+    }
 }
 
 /// kimi usage.record 行；非 turn 粒度（session 累计等）跳过，scope 缺失
@@ -226,10 +251,13 @@ fn parse_kimi(line: &str) -> Option<RecordSum> {
         cache_write,
         thought: 0,
         total: input + output,
+        request_id: None,
+        ts: v.get("time").and_then(Value::as_i64).unwrap_or(0),
     })
 }
 
-/// claude assistant 条目的 message.usage（每条 = 一次 API 调用）。
+/// claude assistant 条目的 message.usage（每条 = 一次 API 调用；同一调用
+/// 的多行共享顶层 requestId，由 read_new / 回填按 requestId 去重）。
 fn parse_claude(line: &str) -> Option<RecordSum> {
     let v: Value = serde_json::from_str(line).ok()?;
     if v.get("type").and_then(Value::as_str) != Some("assistant") {
@@ -247,6 +275,15 @@ fn parse_claude(line: &str) -> Option<RecordSum> {
         cache_write,
         thought: 0,
         total: input + output,
+        request_id: v
+            .get("requestId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ts: v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(iso_to_ms)
+            .unwrap_or(0),
     })
 }
 
@@ -279,6 +316,12 @@ fn parse_codex(line: &str) -> Option<RecordSum> {
         cache_write: 0,
         thought,
         total,
+        request_id: None,
+        ts: v
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .map(iso_to_ms)
+            .unwrap_or(0),
     })
 }
 
@@ -287,6 +330,50 @@ fn parse_line(kind: ArchiveKind, line: &str) -> Option<RecordSum> {
         ArchiveKind::Kimi => parse_kimi(line),
         ArchiveKind::Claude => parse_claude(line),
         ArchiveKind::Codex => parse_codex(line),
+    }
+}
+
+/// claude 去重：同一 requestId 的多行（thinking/text 块各一条）只计
+/// output 最大的那行（该次调用的最终完整用量），input/cache 用同一行的
+/// 值；没有 requestId 的行各计各的。保持首次出现顺序。
+fn dedup_by_request_id(records: Vec<RecordSum>) -> Vec<RecordSum> {
+    let mut out: Vec<RecordSum> = Vec::new();
+    let mut by_id: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for r in records {
+        match &r.request_id {
+            Some(id) => {
+                if let Some(&i) = by_id.get(id) {
+                    if r.output > out[i].output {
+                        out[i] = r;
+                    }
+                } else {
+                    by_id.insert(id.clone(), out.len());
+                    out.push(r);
+                }
+            }
+            None => out.push(r),
+        }
+    }
+    out
+}
+
+/// 档案文件选择（locate 与回填共用）：kimi 全量扫描；claude/codex 精确
+/// 优先、回退最新。
+fn archive_files(kind: ArchiveKind, home: &Path, acp_session_id: &str, work_dir: &str) -> Vec<PathBuf> {
+    match kind {
+        ArchiveKind::Kimi => kimi_wire_files(home, acp_session_id),
+        ArchiveKind::Claude => {
+            let exact = claude_exact_file(home, acp_session_id, work_dir);
+            if exact.is_file() {
+                vec![exact]
+            } else {
+                exact.parent().and_then(newest_jsonl).into_iter().collect()
+            }
+        }
+        ArchiveKind::Codex => codex_exact_file(home, acp_session_id)
+            .or_else(|| codex_newest(home))
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -417,29 +504,63 @@ impl ArchiveReader {
                 self.offsets.entry(p).or_insert(0);
             }
         }
-        let mut sum = RecordSum::default();
+        let mut records = Vec::new();
         for (p, off) in self.offsets.iter_mut() {
-            for r in read_records_from(self.kind, p, off) {
-                sum.input += r.input;
-                sum.output += r.output;
-                sum.cache_read += r.cache_read;
-                sum.cache_write += r.cache_write;
-                sum.thought += r.thought;
-                sum.total += r.total;
-            }
+            records.extend(read_records_from(self.kind, p, off));
+        }
+        if self.kind == ArchiveKind::Claude {
+            records = dedup_by_request_id(records);
+        }
+        let mut sum = RecordSum::default();
+        for r in &records {
+            sum.input += r.input;
+            sum.output += r.output;
+            sum.cache_read += r.cache_read;
+            sum.cache_write += r.cache_write;
+            sum.thought += r.thought;
+            sum.total += r.total;
         }
         if sum.total == 0 {
             return None;
         }
-        Some(TurnUsage {
-            input_tokens: sum.input,
-            output_tokens: sum.output,
-            total_tokens: sum.total,
-            cached_read_tokens: (sum.cache_read > 0).then_some(sum.cache_read),
-            cached_write_tokens: (sum.cache_write > 0).then_some(sum.cache_write),
-            thought_tokens: (sum.thought > 0).then_some(sum.thought),
-        })
+        Some(sum.into_usage())
     }
+}
+
+/// 回填用的一条档案用量（逐条，未聚合）。
+#[derive(Debug, Clone)]
+pub struct ArchiveRecord {
+    /// 记录自带时间戳（ms；0 = 档案没给）。
+    pub ts: i64,
+    pub usage: TurnUsage,
+}
+
+/// 回填用全量解析：从 offset 0 读完整文件（不 EOF 对齐，与 ArchiveReader
+/// 的增量状态完全无关），返回 (命中档案数, 逐条记录)。claude 同样按
+/// requestId 去重。
+pub fn read_archive_full(
+    kind: ArchiveKind,
+    home: &Path,
+    acp_session_id: &str,
+    work_dir: &str,
+) -> (usize, Vec<ArchiveRecord>) {
+    let files = archive_files(kind, home, acp_session_id, work_dir);
+    let mut records = Vec::new();
+    for p in &files {
+        let mut off = 0u64;
+        records.extend(read_records_from(kind, p, &mut off));
+    }
+    if kind == ArchiveKind::Claude {
+        records = dedup_by_request_id(records);
+    }
+    let out = records
+        .iter()
+        .map(|r| ArchiveRecord {
+            ts: r.ts,
+            usage: r.into_usage(),
+        })
+        .collect();
+    (files.len(), out)
 }
 
 #[cfg(test)]
@@ -600,9 +721,50 @@ mod tests {
         assert_eq!(reader.read_new(), None);
     }
 
+    fn claude_line_req(req: Option<&str>, input: u64, output: u64) -> String {
+        let req = match req {
+            Some(r) => format!("\"requestId\":\"{r}\","),
+            None => String::new(),
+        };
+        format!(
+            "{{\"type\":\"assistant\",\"timestamp\":\"2026-07-31T10:00:00.000Z\",{req}\"message\":{{\"role\":\"assistant\",\"usage\":{{\"input_tokens\":{input},\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":{output}}}}}}}"
+        )
+    }
+
     #[test]
-    fn claude_fallback_newest_when_name_mismatches() {
+    fn claude_dedups_same_request_id() {
         let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        let dir = home.join("projects").join("C--p");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sid5.jsonl");
+        // Started 时文件尚不存在 → 挂起；回合结束后文件出现，从头读。
+        let mut reader = ArchiveReader::locate(ArchiveKind::Claude, home, "sid5", "C:/p");
+        // 同一 requestId 三行（thinking/text 块拆分，output 不同）只计
+        // 一次，取 output 最大那行；另一个 requestId 和无 requestId 的行
+        // 各计各的。
+        std::fs::write(
+            &file,
+            [
+                claude_line_req(Some("r1"), 100, 5),
+                claude_line_req(Some("r1"), 18762, 149),
+                claude_line_req(Some("r1"), 300, 60),
+                claude_line_req(Some("r2"), 20, 10),
+                claude_line_req(None, 3, 7),
+                String::new(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let u = reader.read_new().expect("usage");
+        assert_eq!(u.input_tokens, 18762 + 20 + 3);
+        assert_eq!(u.output_tokens, 149 + 10 + 7);
+        assert_eq!(u.total_tokens, u.input_tokens + u.output_tokens);
+    }
+
+    #[test]
+    fn claude_fallback_newest_when_name_mismatches() {        let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().to_path_buf();
         let dir = home.join("projects").join("C--p");
         std::fs::create_dir_all(&dir).unwrap();

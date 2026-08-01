@@ -151,6 +151,24 @@ impl UsageStore {
         self.save(paths)
     }
 
+    /// 回填用批量追加：全部进内存后一次原子写。
+    pub fn append_many(&mut self, paths: &Paths, records: Vec<UsageRecord>) -> Result<(), UsageError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.records.extend(records);
+        self.save(paths)
+    }
+
+    /// 该会话已有记录的最早 ts（回填防重用）；无记录返回 None。
+    pub fn earliest_ts(&self, session_id: &str) -> Option<i64> {
+        self.records
+            .iter()
+            .filter(|r| r.session_id == session_id)
+            .map(|r| r.ts)
+            .min()
+    }
+
     pub fn save(&self, paths: &Paths) -> Result<(), UsageError> {
         paths.ensure_layout();
         let file = UsageFile {

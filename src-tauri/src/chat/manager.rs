@@ -331,6 +331,7 @@ impl ChatManager {
             text: send_text,
             images,
             display,
+            kind: String::new(),
             ack: Some(ack_tx),
         })
         .await

@@ -34,6 +34,9 @@ const prefs = usePrefsStore();
 const chat = useChatStore();
 
 const isUser = computed(() => props.row.role === 'user');
+/** Reminder-triggered user rows render as a centered system line (no avatar,
+ * no bubble frame, no branch button); copy is not offered there. */
+const isReminder = computed(() => props.row.kind === 'reminder');
 const fs = (n: number) => prefs.fs(n);
 
 // ---- status / header ----
@@ -183,6 +186,18 @@ function onBodyClick(e: MouseEvent): void {
   const t = e.target as HTMLElement;
   if (t.tagName === 'IMG' && t.closest('.md-body')) {
     lightboxSrc.value = (t as HTMLImageElement).src;
+    return;
+  }
+  // code-block copy button (rendered into .md-body by markdown.ts)
+  const btn = t.closest<HTMLElement>('.codeblock__copy');
+  if (btn && t.closest('.md-body')) {
+    const text = btn.parentElement?.querySelector('pre')?.innerText ?? '';
+    if (!text.trim()) return;
+    void copyText(text).then((ok) => {
+      if (!ok) return;
+      btn.textContent = '已复制';
+      setTimeout(() => (btn.textContent = '复制'), 1200);
+    });
   }
 }
 
@@ -267,7 +282,14 @@ const visibleAtts = computed(() =>
 </script>
 
 <template>
-  <div class="bubble-row" :class="{ user: isUser }">
+  <!-- reminder-triggered user row: centered system line, no avatar/branch -->
+  <div v-if="isReminder" class="bubble-sys">
+    <span class="bubble-sys__text" :style="{ fontSize: fs(12) + 'px' }">
+      <span class="bubble-sys__label">提醒</span>{{ displayBody }}
+    </span>
+    <span class="bubble-sys__time" :style="{ fontSize: fs(11) + 'px' }">{{ timeText }}</span>
+  </div>
+  <div v-else class="bubble-row" :class="{ user: isUser }">
     <div class="bubble-group" :class="{ 'pin-wide': pinWide }">
       <!-- avatar slot: OUTSIDE the body frame, pinned to its top (64×58) -->
       <div class="bubble-slot" :class="{ user: isUser }">
@@ -456,6 +478,36 @@ const visibleAtts = computed(() =>
 </template>
 
 <style scoped>
+/* reminder system line: centered pill, muted colors from the war palette */
+.bubble-sys {
+  display: flex;
+  justify-content: center;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+}
+
+.bubble-sys__text {
+  font-family: SimSun, serif;
+  color: var(--war-text-muted);
+  background: #12151c44;
+  border: 1px solid var(--war-gold-dim);
+  border-radius: 10px;
+  padding: 2px 12px;
+  opacity: 0.85;
+  user-select: text;
+}
+
+.bubble-sys__label {
+  color: var(--war-gold);
+  margin-right: 6px;
+}
+
+.bubble-sys__time {
+  color: var(--war-text-faint);
+  user-select: none;
+}
+
 .bubble-row {
   display: flex;
   justify-content: flex-start;
@@ -813,6 +865,37 @@ const visibleAtts = computed(() =>
   overflow-x: auto;
   font-family: Consolas, monospace;
   font-size: 0.92em;
+}
+/* fenced code block wrapper: copy button pinned top-right, shown on hover */
+.md-body .codeblock {
+  position: relative;
+}
+.md-body .codeblock pre {
+  margin: 6px 0;
+}
+.md-body .codeblock__copy {
+  position: absolute;
+  top: 10px;
+  right: 4px;
+  z-index: 1;
+  padding: 1px 8px;
+  background: #12151cbb;
+  border: 1px solid var(--war-gold-dim);
+  border-radius: 2px;
+  color: #a0a8b8;
+  font-family: SimSun, serif;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.md-body .codeblock:hover .codeblock__copy,
+.md-body .codeblock__copy:focus-visible {
+  opacity: 1;
+}
+.md-body .codeblock__copy:hover {
+  color: var(--war-gold-bright);
+  border-color: var(--war-gold);
 }
 .md-body code {
   font-family: Consolas, monospace;

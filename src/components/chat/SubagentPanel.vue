@@ -104,7 +104,7 @@ function isStuck(s: Subagent): boolean {
 </script>
 
 <template>
-  <div v-if="chat.subagents.length > 0" class="subagent">
+  <div v-if="chat.subagents.length > 0" class="subagent" :class="{ collapsed: !open }">
     <div class="subagent__head" @click="open = !open">
       <span :style="{ fontSize: prefs.fs(12) + 'px' }">
         {{ open ? '▼' : '▶' }} 子 Agent (执行中 {{ activeCount }} / 共 {{ chat.subagents.length }})
@@ -137,6 +137,12 @@ function isStuck(s: Subagent): boolean {
   border: 1px solid #6a5a3f;
   border-radius: 3px;
   font-family: SimSun, serif;
+}
+
+/* Collapsed: hug the header text so the bar doesn't cover the composer's
+   drop-up menus (YOLO / model pickers open upward into this zone). */
+.subagent.collapsed {
+  width: fit-content;
 }
 
 .subagent__head {

@@ -32,12 +32,26 @@ function patchImageRule(mdi: MarkdownIt): void {
   };
 }
 
+// Fenced code blocks get a wrapper with a copy button; the click is
+// delegated by the bubble (v-html can't carry Vue handlers) — same
+// pattern as the inline-image lightbox.
+function patchCodeRule(mdi: MarkdownIt): void {
+  const defaultFence =
+    mdi.renderer.rules.fence ??
+    ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+  mdi.renderer.rules.fence = (tokens, idx, options, env, self) =>
+    `<div class="codeblock"><button class="codeblock__copy" type="button">复制</button>${
+      defaultFence(tokens, idx, options, env, self)
+    }</div>`;
+}
+
 const md = new MarkdownIt({
   html: false,
   linkify: true,
   breaks: false,
 });
 patchImageRule(md);
+patchCodeRule(md);
 
 // User bubbles: pasted-image markdown (四.8 fold still applies) with the
 // user's own line breaks preserved — breaks: true, otherwise identical.
@@ -47,6 +61,7 @@ const mdUser = new MarkdownIt({
   breaks: true,
 });
 patchImageRule(mdUser);
+patchCodeRule(mdUser);
 
 export function renderMarkdown(text: string): string {
   return md.render(text);

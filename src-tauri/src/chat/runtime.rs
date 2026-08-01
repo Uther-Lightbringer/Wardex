@@ -14,7 +14,7 @@
 // generation counters — the Rust equivalent of the old single-shot QTimers
 // re-checking runtime state on fire.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
@@ -67,7 +67,7 @@ const INTERRUPTED_MARK: &str = "（已中断）";
 /// wardex-reminder MCP 工具（build_launch 注入）。只进 prompt 文本，不进
 /// 聊天显示的用户行；判定用 store 里的用户消息计数（resume 的老会话不会
 /// 重复注入）。
-pub const REMINDER_GUIDE_PREFIX: &str = "[Wardex 提示] 本会话已挂载 wardex-reminder MCP 工具（set_reminder/cancel_reminder/list_reminders）。当你想稍后主动跟进、或用户说\"过会提醒我/晚点通知我\"时，调用 set_reminder(minutes, content) 设置提醒；到点后系统会自动把 content 作为新消息发给你。";
+pub const REMINDER_GUIDE_PREFIX: &str = "[Wardex 提示] 本会话已挂载 wardex-reminder MCP 工具（set_reminder/cancel_reminder/list_reminders）。当你想稍后主动跟进、或用户说\"过会提醒我/晚点通知我\"时，调用 set_reminder(minutes, content) 设置提醒；到点后系统会自动把 content 作为新消息发给你。当你自己启动了后台任务/子 Agent、需要等它们完成后继续时，也应主动调用 set_reminder 设置短时提醒（如 1 分钟）来唤醒自己。";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested below)
@@ -569,6 +569,14 @@ pub(crate) struct Actor {
     last_turn_error: String,
     perm_request_id: Option<i64>,
     subagents: Vec<SubagentEntry>,
+    /// Ids of sub-agents still pending/in_progress at a normal turn end —
+    /// possibly background tasks whose completion events arrive later. When
+    /// the last of them reports done outside a turn, the agent is woken with
+    /// a follow-up prompt (see maybe_wake_for_subagent_batch).
+    bg_pending: HashSet<String>,
+    /// Batch wake-up already posted for the current bg_pending set (armed
+    /// again when a new turn starts).
+    bg_wake_sent: bool,
     turn_gen: u64,
     guide_gen: u64,
     last_error: String,
@@ -632,6 +640,8 @@ pub(crate) fn spawn_actor(
         last_turn_error: String::new(),
         perm_request_id: None,
         subagents: Vec::new(),
+        bg_pending: HashSet::new(),
+        bg_wake_sent: false,
         turn_gen: 0,
         guide_gen: 0,
         last_error: String::new(),
@@ -1444,11 +1454,13 @@ impl Actor {
         self.retry_prompt = if images.is_empty() { Some(prompt_text.clone()) } else { None };
         self.retry_attempt = 0;
         self.last_turn_error.clear();
-        // New turn — reset the sub-agent panel.
+        // New turn — reset the sub-agent panel and the batch wake-up state.
         if !self.subagents.is_empty() {
             self.subagents.clear();
             self.emit_subagents();
         }
+        self.bg_pending.clear();
+        self.bg_wake_sent = false;
         self.turn_gen += 1;
         self.set_busy(true);
         self.set_error(String::new());
@@ -2060,6 +2072,30 @@ impl Actor {
             None => self.subagents.push(entry),
         }
         self.emit_subagents();
+        if done {
+            self.settle_bg_subagent(&id);
+        }
+    }
+
+    /// A sub-agent reached a terminal status. If it was one of the batch left
+    /// running at the last turn's end, settle it; the whole batch finishing
+    /// OUTSIDE a turn wakes the agent with a follow-up prompt (the CLI ended
+    /// its turn with "等它们完成再继续" and nothing else would re-prompt it).
+    /// Inside a turn completions are the norm and never wake.
+    fn settle_bg_subagent(&mut self, id: &str) {
+        if !self.bg_pending.remove(id) {
+            return;
+        }
+        if self.bg_pending.is_empty() && !self.busy && !self.bg_wake_sent {
+            self.bg_wake_sent = true;
+            let _ = self.self_tx.try_send(RuntimeCmd::SendPrompt {
+                text: "你的子 Agent 已全部完成，请读取结果并继续。".to_string(),
+                images: Vec::new(),
+                display: Vec::new(),
+                kind: "reminder".to_string(),
+                ack: None,
+            });
+        }
     }
 
     /// Desktop notification for the human when a sub-agent settles. The
@@ -2090,11 +2126,18 @@ impl Actor {
 
     /// finishSubagents (ChatController.cpp:630-646): at turn end, anything
     /// still pending/in_progress settles completed (or interrupted).
+    /// On a NORMAL turn end the unfinished ids are also kept in bg_pending:
+    /// a background sub-agent's real completion may only arrive after the
+    /// turn — its later tool_call_update then settles it (and the last one
+    /// wakes the agent). Interrupted turns settle for real, no wake-up.
     fn finish_subagents(&mut self, interrupted: bool) {
         let mut changed = false;
         for e in self.subagents.iter_mut() {
             if e.status != "pending" && e.status != "in_progress" {
                 continue;
+            }
+            if !interrupted {
+                self.bg_pending.insert(e.id.clone());
             }
             e.status = if interrupted { "interrupted" } else { "completed" }.to_string();
             e.finished_at = now_ms();
