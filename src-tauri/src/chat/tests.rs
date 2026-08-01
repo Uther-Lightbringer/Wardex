@@ -584,6 +584,89 @@ async fn attachments_enqueue_while_busy_and_drain_with_image_block() {
 
 // ---- small helpers ----
 
+/// 提醒调度：store 里注入一条短到期提醒 + RemindersReload 后，runtime 自动
+/// 以一条普通 prompt 发起提醒回合（user + assistant 占位行落盘），提醒
+/// 本体在发 prompt 前已 mark_done（防崩溃重发）。
+#[tokio::test]
+async fn due_reminder_fires_as_prompt_turn() {
+    let h = harness();
+    let id = ready_session(&h, "").await;
+    {
+        let paths = h.stores_paths();
+        let mut stores = lock_ok(&h.stores);
+        stores
+            .reminders
+            .add(&paths, &id, "喝水", 0.005, "user")
+            .expect("add reminder");
+    }
+    h.manager.reminders_reload(&id).await;
+    let mock = mock_at(&h, 0);
+    assert!(
+        wait_for(|| {
+            prompt_msgs(&mock).iter().any(|m| {
+                m.pointer("/params/prompt/0/text").and_then(Value::as_str)
+                    == Some("⏰ 提醒时间到：喝水")
+            })
+        })
+        .await,
+        "reminder prompt sent to the agent"
+    );
+    // user 行 + assistant 占位行出现在历史里。
+    assert!(wait_for(|| {
+        let rows = h.manager.session_messages(&id);
+        rows.iter().any(|r| {
+            r.get("role").and_then(Value::as_str) == Some("user")
+                && r.get("content").and_then(Value::as_str) == Some("⏰ 提醒时间到：喝水")
+        }) && rows.iter().any(|r| {
+            r.get("role").and_then(Value::as_str) == Some("assistant")
+                && r.get("status").and_then(Value::as_str) == Some("pending")
+        })
+    })
+    .await);
+    // 触发即 done，pending 列表清空，且前端收到 chat://reminders。
+    assert!(lock_ok(&h.stores).reminders.list(&id).is_empty());
+    assert!(!h
+        .sink
+        .find(|(ev, p)| ev == "chat://reminders"
+            && p.get("sessionId").and_then(Value::as_str) == Some(id.as_str()))
+        .is_empty());
+}
+
+/// 过期提醒（重启恢复场景）：reload 时 due_at 已过的提醒立即触发。
+#[tokio::test]
+async fn overdue_reminder_fires_immediately() {
+    let h = harness();
+    let id = h.manager.create_session("").await.expect("create session");
+    // 先正常 add，再把落盘的 dueAtMs 改到过去（等价于重启后读到的过期行）。
+    {
+        let paths = h.stores_paths();
+        let mut stores = lock_ok(&h.stores);
+        stores
+            .reminders
+            .add(&paths, &id, "过期提醒", 1.0, "user")
+            .expect("add");
+        let mut rows = crate::store::reminders::load_file(&paths.reminders_path());
+        for r in &mut rows {
+            r.due_at_ms = crate::store::json::now_ms() - 60_000;
+        }
+        crate::store::reminders::save_file(&paths.reminders_path(), &rows).expect("save");
+    }
+    h.manager.reminders_reload(&id).await;
+    assert!(
+        wait_for(|| lock_ok(&h.stores).reminders.list(&id).is_empty()).await,
+        "overdue reminder fired and marked done"
+    );
+    // 提醒回合的 user 行进了历史。
+    assert!(wait_for(|| {
+        h.manager.session_messages(&id).iter().any(|r| {
+            r.get("content").and_then(Value::as_str) == Some("⏰ 提醒时间到：过期提醒")
+        })
+    })
+    .await);
+}
+
+// ---- small helpers ----
+
 fn prompt_msgs(mock: &MockTransport) -> Vec<Value> {
     mock.sent_json()
         .into_iter()

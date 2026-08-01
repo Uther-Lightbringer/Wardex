@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use crate::acp::{AcpError, AcpEvent};
 use crate::acp::events::TurnUsage;
 use crate::chat::driver::{ClientDriver, SessionLaunch, Spawner};
-use crate::chat::wire::{self, WireUsageReader};
+use crate::chat::wire::{ArchiveKind, ArchiveReader};
 use crate::provider;
 use crate::store::agents::Agent;
 use crate::store::json::now_ms;
@@ -422,6 +422,10 @@ pub enum RuntimeCmd {
     Shutdown,
     FlushTick,
     RetryTick(u64),
+    /// Re-read reminders.json (MCP 子进程/命令层可能刚写过) 并重排定时器。
+    RemindersReload,
+    /// 提醒到点定时器回投（gen 校验作废旧定时器，仿 RetryTick）。
+    ReminderTick(u64),
     CancelTimeout(u64),
     GuideTimeout(u64),
 }
@@ -447,9 +451,9 @@ pub(crate) struct Actor {
     /// Model the current turn is running on: the agent's configured default,
     /// refreshed from the CLI's model picker (configOptions currentValue).
     current_model: String,
-    /// kimi wire.jsonl 用量补源：(acp session id, reader)，Started 时定位；
-    /// 非 kimi provider 为 None。
-    wire_usage: Option<(String, WireUsageReader)>,
+    /// 档案用量补源（kimi/claude/codex，见 chat/wire.rs），Started 时按
+    /// provider 定位；其他 provider 为 None。
+    archive_usage: Option<ArchiveReader>,
 
     busy: bool,
     user_stop: bool,
@@ -474,6 +478,7 @@ pub(crate) struct Actor {
     retry_countdown: u64,
     retry_active: bool,
     retry_gen: u64,
+    reminder_gen: u64,
     continue_retries: u32,
     last_turn_error: String,
     perm_request_id: Option<i64>,
@@ -503,7 +508,7 @@ pub(crate) fn spawn_actor(
         session_id: session_id.to_string(),
         agent,
         current_model,
-        wire_usage: None,
+        archive_usage: None,
         stores,
         sink,
         registry,
@@ -533,6 +538,7 @@ pub(crate) fn spawn_actor(
         retry_countdown: 0,
         retry_active: false,
         retry_gen: 0,
+        reminder_gen: 0,
         continue_retries: 0,
         last_turn_error: String::new(),
         perm_request_id: None,
@@ -542,6 +548,8 @@ pub(crate) fn spawn_actor(
         last_error: String::new(),
     };
     tokio::spawn(async move { actor.run().await });
+    // 启动即 reload 一次提醒：重启恢复时过期的提醒会立即触发。
+    let _ = cmd_tx.try_send(RuntimeCmd::RemindersReload);
     cmd_tx
 }
 
@@ -670,6 +678,8 @@ impl Actor {
                 }
             }
             RuntimeCmd::RetryTick(gen) => self.retry_tick(gen).await,
+            RuntimeCmd::RemindersReload => self.reminders_reload(),
+            RuntimeCmd::ReminderTick(gen) => self.reminder_tick(gen).await,
             RuntimeCmd::CancelTimeout(gen) => {
                 // 2500ms force-kill fallback (ChatController.cpp:1088-1101).
                 if gen == self.turn_gen && self.busy && self.user_stop {
@@ -961,14 +971,26 @@ impl Actor {
             AcpEvent::Started { session_id } => {
                 self.acp_ready = true;
                 self.snap().acp_running = true;
-                // kimi 不在 prompt 响应里报 usage；定位它的 wire.jsonl 作为
-                // 补源（跳过历史内容，见 chat/wire.rs）。
-                self.wire_usage = if self.agent.provider.trim().eq_ignore_ascii_case("kimi") {
-                    wire::kimi_home()
-                        .map(|h| (session_id.clone(), WireUsageReader::locate(&h, &session_id)))
-                } else {
-                    None
-                };
+                // ACP 适配器不报 usage 的 provider（kimi/claude/codex）：
+                // 定位各自的本地会话档案做增量补源（见 chat/wire.rs）。
+                self.archive_usage = ArchiveKind::for_provider(&self.agent.provider).and_then(
+                    |kind| {
+                        let home = match kind {
+                            ArchiveKind::Kimi => crate::chat::wire::kimi_home(),
+                            ArchiveKind::Claude => crate::chat::wire::claude_home(),
+                            ArchiveKind::Codex => crate::chat::wire::codex_home(),
+                        }?;
+                        let work_dir = {
+                            let mut stores = lock_ok(&self.stores);
+                            stores
+                                .sessions
+                                .meta_for(&self.session_id)
+                                .map(|m| m.work_dir)
+                                .unwrap_or_default()
+                        };
+                        Some(ArchiveReader::locate(kind, home, &session_id, &work_dir))
+                    },
+                );
                 {
                     let mut stores = lock_ok(&self.stores);
                     if let Err(e) =
@@ -1135,8 +1157,9 @@ impl Actor {
     async fn on_turn_finished(&mut self, stop: &str, usage: Option<TurnUsage>) {
         self.flush_stream_buffers();
         self.clear_permission();
-        // kimi 的 ACP 适配器不报 usage：从 wire.jsonl 增量补（见 chat/wire.rs）。
-        let usage = usage.or_else(|| self.read_wire_usage());
+        // ACP 适配器不报 usage 的 provider：从本地会话档案增量补（见
+        // chat/wire.rs）。
+        let usage = usage.or_else(|| self.read_archive_usage());
         // Phase 4: a rate-limited turn is not final — enter backoff and
         // resend the same prompt instead of closing with an error.
         if stop == "error"
@@ -1191,6 +1214,9 @@ impl Actor {
         self.finish_subagents(status == "interrupted");
         self.emit_turn(status, stop, usage.as_ref());
         self.finish_reply();
+        // 回合结束 reload 一次：AI 只可能在回合内调 set_reminder，这里能
+        // 捕获 MCP 子进程刚写入 reminders.json 的新提醒。
+        self.reminders_reload();
     }
 
     // ---- turn lifecycle ----
@@ -1395,7 +1421,7 @@ impl Actor {
         // a typo degrades to "no MCP servers" with a log line
         // (ChatController.cpp:876-889).
         let mcp_text = self.agent.mcp_servers.trim();
-        let mcp_servers = if mcp_text.is_empty() {
+        let mut mcp_servers = if mcp_text.is_empty() {
             Vec::new()
         } else {
             match serde_json::from_str::<Value>(mcp_text) {
@@ -1410,6 +1436,21 @@ impl Actor {
                 }
             }
         };
+        // Built-in reminder MCP server (mcp_reminder.rs): one `--mcp-reminder`
+        // subprocess per session, context passed via env; it reads/writes the
+        // shared reminders.json directly (no IPC).
+        if let Ok(exe) = std::env::current_exe() {
+            let reminders_path = lock_ok(&self.stores).paths.reminders_path();
+            mcp_servers.push(json!({
+                "name": "wardex-reminder",
+                "command": exe.to_string_lossy(),
+                "args": ["--mcp-reminder"],
+                "env": [
+                    { "name": "WARDEX_SESSION_ID", "value": self.session_id },
+                    { "name": "WARDEX_REMINDERS_PATH", "value": reminders_path.to_string_lossy() },
+                ],
+            }));
+        }
         let (cwd, resume) = {
             let mut stores = lock_ok(&self.stores);
             let mut cwd = stores.sessions.workspace_path_for(&self.session_id);
@@ -1647,6 +1688,96 @@ impl Actor {
             self.finish_reply();
         }
         self.emit_status(None);
+    }
+
+    // ---- reminders (mcp_reminder.rs / reminder_* 命令共用存储) ----
+
+    /// Re-read reminders.json and re-arm the next-fire timer. Called on actor
+    /// start, turn end, ReminderTick, and the manual add/cancel commands.
+    fn reminders_reload(&mut self) {
+        {
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            stores.reminders.reload(&paths);
+        }
+        self.schedule_next_reminder();
+    }
+
+    /// Arm a one-shot sleep for the earliest pending reminder; with none
+    /// pending only the gen bump invalidates any in-flight timer.
+    fn schedule_next_reminder(&mut self) {
+        self.reminder_gen += 1;
+        let gen = self.reminder_gen;
+        let next_due = {
+            let stores = lock_ok(&self.stores);
+            stores
+                .reminders
+                .list(&self.session_id)
+                .into_iter()
+                .map(|r| r.due_at_ms)
+                .min()
+        };
+        let Some(due) = next_due else { return };
+        let wait_ms = due.saturating_sub(now_ms()).max(0) as u64;
+        let tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+            let _ = tx.send(RuntimeCmd::ReminderTick(gen)).await;
+        });
+    }
+
+    /// Timer fired: mark every due reminder done (persisted BEFORE the prompt
+    /// goes out so a crash cannot double-fire), then post each as a normal
+    /// SendPrompt — busy turns queue it like any user message.
+    async fn reminder_tick(&mut self, gen: u64) {
+        if gen != self.reminder_gen {
+            return; // superseded by a newer reload/schedule
+        }
+        let due = {
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            stores.reminders.reload(&paths);
+            let now = now_ms();
+            let due: Vec<_> = stores
+                .reminders
+                .list(&self.session_id)
+                .into_iter()
+                .filter(|r| r.due_at_ms <= now)
+                .collect();
+            for r in &due {
+                if let Err(e) = stores.reminders.mark_done(&paths, &r.id) {
+                    log::warn!("chat[{}] reminder mark_done failed: {e}", self.session_id);
+                }
+            }
+            due
+        };
+        let fired = !due.is_empty();
+        for r in due {
+            let tx = self.self_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(RuntimeCmd::SendPrompt {
+                        text: format!("⏰ 提醒时间到：{}", r.content),
+                        images: Vec::new(),
+                        display: Vec::new(),
+                        ack: None,
+                    })
+                    .await;
+            });
+        }
+        if fired {
+            self.emit_reminders();
+        }
+        self.schedule_next_reminder();
+    }
+
+    /// chat://reminders {sessionId, reminders[]} — after add/cancel/fire.
+    fn emit_reminders(&self) {
+        let reminders = lock_ok(&self.stores).reminders.list(&self.session_id);
+        self.emit(
+            "chat://reminders",
+            json!({ "sessionId": self.session_id, "reminders": reminders }),
+        );
     }
 
     // ---- sub-agent tracking (ChatController.cpp:485-652) ----
@@ -1933,12 +2064,10 @@ impl Actor {
         );
     }
 
-    /// kimi wire.jsonl 补读（chat/wire.rs）：增量求和各 agent 的
-    /// usage.record；reader 未定位（非 kimi / 未 Started）或无新增返回 None。
-    fn read_wire_usage(&mut self) -> Option<TurnUsage> {
-        let (sid, reader) = self.wire_usage.as_mut()?;
-        let home = wire::kimi_home()?;
-        reader.read_new(&home, sid)
+    /// 档案用量补读（chat/wire.rs）：增量求和新记录；reader 未定位
+    /// （不支持的 provider / 未 Started）或无新增返回 None。
+    fn read_archive_usage(&mut self) -> Option<TurnUsage> {
+        self.archive_usage.as_mut()?.read_new()
     }
 
     fn emit_turn(&self, status: &str, stop_reason: &str, usage: Option<&TurnUsage>) {

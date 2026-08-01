@@ -236,6 +236,10 @@ impl ChatManager {
         self.close_session(session_id);
         let deleted = {
             let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            if let Err(e) = stores.reminders.remove_session(&paths, session_id) {
+                log::warn!("reminders remove_session failed: {e}");
+            }
             stores.sessions.delete_session(session_id)?
         };
         self.sink.emit("store://sessions", json!({}));
@@ -268,6 +272,10 @@ impl ChatManager {
         self.destroy_runtime(session_id);
         {
             let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            if let Err(e) = stores.reminders.remove_session(&paths, session_id) {
+                log::warn!("reminders remove_session failed: {e}");
+            }
             if let Err(e) = stores.sessions.delete_session(session_id) {
                 log::warn!("discard_if_empty delete failed: {e}");
             }
@@ -339,6 +347,14 @@ impl ChatManager {
 
     pub async fn retry_cancel(&self, session_id: &str) -> Result<(), ChatError> {
         self.send(session_id, RuntimeCmd::RetryCancel).await
+    }
+
+    /// 提醒变更后通知对应 runtime reload（手动 add/cancel；runtime 不存在
+    /// 时静默跳过——下次打开会话 actor 启动会自行 reload）。
+    pub async fn reminders_reload(&self, session_id: &str) {
+        if let Some(tx) = self.entry_tx(session_id) {
+            let _ = tx.send(RuntimeCmd::RemindersReload).await;
+        }
     }
 
     pub async fn answer_permission(

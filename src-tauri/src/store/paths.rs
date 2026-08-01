@@ -105,6 +105,10 @@ impl Paths {
         self.root.join("todos.json")
     }
 
+    pub fn reminders_path(&self) -> PathBuf {
+        self.root.join("reminders.json")
+    }
+
     pub fn usage_path(&self) -> PathBuf {
         self.root.join("usage.json")
     }

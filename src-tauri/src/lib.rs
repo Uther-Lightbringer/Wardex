@@ -18,6 +18,7 @@
 //     chat://bubbleSet {sessionId, row}         (整段替换: 中断/错误/重试提示)
 //     chat://status    {sessionId, statusText, busy, queueLength, retry*, lastError, acpReady, imageSupported}
 //     chat://retry     {sessionId, active, countdown, attempt, maxAttempts}
+//     chat://reminders {sessionId, reminders[]}  (提醒列表变更: add/cancel/触发)
 //     chat://unread    {sessionId}
 //     store://sessions / store://prefs           (粗粒度变更通知，前端重拉)
 // Phase 3b additions (thin shells over existing store/probe helpers):
@@ -27,6 +28,7 @@
 pub mod acp;
 pub mod chat;
 pub mod inspect;
+pub mod mcp_reminder;
 pub mod models;
 pub mod probe;
 pub mod provider;
@@ -744,6 +746,84 @@ fn todos_clear_done(state: State<'_, AppState>) -> Result<(), String> {
     stores.todos.clear_done(&paths).map_err(err)
 }
 
+// ---------------------------------------------------------------------------
+// Commands: reminders (mcp_reminder.rs 与这里共用 reminders.json)
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn reminders_list(state: State<'_, AppState>, session_id: String) -> Value {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.reminders.reload(&paths);
+    serde_json::to_value(stores.reminders.list(&session_id)).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+async fn reminder_add(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    content: String,
+    minutes: f64,
+) -> Result<Value, String> {
+    let reminder = {
+        let mut stores = lock(&state.stores);
+        let paths = stores.paths.clone();
+        stores
+            .reminders
+            .add(&paths, &session_id, &content, minutes, "user")
+            .map_err(err)?
+    };
+    let Some(reminder) = reminder else {
+        return Err("提醒内容不能为空且分钟数必须大于 0".to_string());
+    };
+    state.chat.reminders_reload(&session_id).await;
+    emit_reminders(&app, &state, &session_id);
+    serde_json::to_value(reminder).map_err(err)
+}
+
+#[tauri::command]
+async fn reminder_cancel(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<bool, String> {
+    let (cancelled, session_id) = {
+        let mut stores = lock(&state.stores);
+        let paths = stores.paths.clone();
+        stores.reminders.reload(&paths);
+        let session_id = stores
+            .reminders
+            .rows()
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.session_id.clone())
+            .unwrap_or_default();
+        let cancelled = stores.reminders.cancel(&paths, &id).map_err(err)?;
+        (cancelled, session_id)
+    };
+    if !session_id.is_empty() {
+        state.chat.reminders_reload(&session_id).await;
+        emit_reminders(&app, &state, &session_id);
+    }
+    Ok(cancelled)
+}
+
+fn emit_reminders(app: &tauri::AppHandle, state: &State<'_, AppState>, session_id: &str) {
+    let reminders = {
+        let mut stores = lock(&state.stores);
+        let paths = stores.paths.clone();
+        stores.reminders.reload(&paths);
+        stores.reminders.list(session_id)
+    };
+    if let Err(e) = app.emit(
+        "chat://reminders",
+        json!({ "sessionId": session_id, "reminders": reminders }),
+    ) {
+        log::warn!("emit chat://reminders failed: {e}");
+    }
+}
+
 #[tauri::command]
 fn prompts_list(state: State<'_, AppState>) -> Value {
     let stores = lock(&state.stores);
@@ -1028,6 +1108,9 @@ pub fn run() {
             todo_add,
             todo_toggle,
             todo_remove,
+            reminders_list,
+            reminder_add,
+            reminder_cancel,
             todos_clear_done,
             prompts_list,
             prompt_add,

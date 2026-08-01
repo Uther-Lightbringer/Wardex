@@ -308,10 +308,31 @@ export const useChatStore = defineStore('chat', {
 
     // ---- streaming merge (mirrors sessions.rs append_text_segment) ----
 
+    /** The assistant row that stream events append to. If the last row is not
+     * a pending assistant placeholder (chat://messageAppended not emitted or
+     * already flipped), synthesize one instead of dropping the event. */
+    ensureStreamRow(): ChatMessage {
+      const last = this.rows[this.rows.length - 1];
+      if (last && last.role === 'assistant' && last.status === 'pending') return last;
+      const row = markRaw({
+        id: `synth-${Date.now()}-${this.rows.length}`,
+        role: 'assistant',
+        content: '',
+        createdAt: Date.now(),
+        provider: '',
+        status: 'pending',
+        thinking: '',
+        toolCalls: [],
+        segments: [],
+        attachments: [],
+      } as ChatMessage);
+      this.rows = [...this.rows, row];
+      return row;
+    },
+
     onChunk(p: { sessionId: string; kind: string; text: string }): void {
       if (p.sessionId !== this.sessionId) return; // background: self-heal on open
-      const last = this.rows[this.rows.length - 1];
-      if (!last || last.role !== 'assistant') return;
+      const last = this.ensureStreamRow();
       const kind = p.kind === 'thinking' ? 'thinking' : 'text';
       const segs = last.segments;
       const tail = segs[segs.length - 1];
@@ -343,8 +364,7 @@ export const useChatStore = defineStore('chat', {
 
     onTool(p: { sessionId: string; tool: Record<string, unknown> }): void {
       if (p.sessionId !== this.sessionId) return;
-      const last = this.rows[this.rows.length - 1];
-      if (!last || last.role !== 'assistant') return;
+      const last = this.ensureStreamRow();
       const id = String(p.tool.toolCallId ?? '');
       const segs = [...last.segments];
       const i = id ? segs.findIndex((s) => s.kind === 'tool' && s.toolCallId === id) : -1;

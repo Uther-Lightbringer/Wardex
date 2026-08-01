@@ -1,15 +1,18 @@
 <script setup lang="ts">
 // File preview dialog (features/chat.md §6.5): frame_popup modal, Esc closes.
 // Entry flow: preview_file → >2MB asks first (继续打开 / 外部打开 / 取消);
-// binary/unreadable asks 系统默认方式打开. Three bodies: text (line-number
-// gutter + editable, save when dirty; 256KB-truncated files are read-only),
-// markdown (rendered ⇄ raw-editable toggle, unsaved edits kept), image
-// (asset-protocol img, fit width with scroll). Text writes back as UTF-8 via
+// binary/unreadable asks 系统默认方式打开. Three bodies: text (CodeMirror 6
+// with line numbers + syntax highlighting, editable, save when dirty;
+// 256KB-truncated files are read-only), markdown (rendered ⇄ raw-editable
+// toggle, unsaved edits kept), image (asset-protocol img, fit width with
+// scroll). Text writes back as UTF-8 via
 // save_preview (backend refuses binary/image). Edge/corner drag resizes
 // (min 380×480, clamped to the window), persisted on pointerup. Closing
 // tears down every copy of the content.
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import type { EditorView as CmEditorView } from 'codemirror';
+import type { Compartment } from '@codemirror/state';
 import { cmd, openPath } from '../../lib/tauri';
 import { renderMarkdown } from '../../lib/markdown';
 import { useChatStore } from '../../stores/chat';
@@ -119,19 +122,129 @@ const truncated = computed(() => outcome.value?.truncated === true);
 const editable = computed(() => !truncated.value && kind.value !== 'image');
 const canSave = computed(() => dirty.value && editable.value);
 
-const lines = computed(() => raw.value.split('\n').length);
-
 function onEdit(): void {
   dirty.value = raw.value !== original.value;
   if (dirty.value) statusLine.value = '';
   else statusLine.value = truncated.value ? '文件过大，仅显示前 256KB，内容只读' : '';
 }
 
-const gutterEl = ref<HTMLElement | null>(null);
-const editorEl = ref<HTMLTextAreaElement | null>(null);
-function syncGutter(): void {
-  if (gutterEl.value && editorEl.value) gutterEl.value.scrollTop = editorEl.value.scrollTop;
+// ---- CodeMirror body for code/text files ----
+// Owns its own gutter (line numbers) and syntax highlighting; wrap and
+// read-only are reconfigurable compartments. Doc edits flow back into
+// `raw` via the update listener so save/dirty logic stays unchanged.
+// The whole CM stack is dynamically imported so the main bundle stays
+// lean — it loads on the first code/text preview only.
+const cmHost = ref<HTMLElement | null>(null);
+let cm: CmEditorView | null = null;
+let cmWrap: Compartment | null = null;
+let cmReadOnly: Compartment | null = null;
+let cmBuild = 0; // guards async module/language loading against superseded builds
+
+async function buildEditor(): Promise<void> {
+  const build = ++cmBuild;
+  cm?.destroy();
+  cm = null;
+  if (kind.value !== 'text' || !cmHost.value) return;
+  const host = cmHost.value;
+  const doc = raw.value;
+  const mods = await Promise.all([
+    import('codemirror'),
+    import('@codemirror/state'),
+    import('@codemirror/language'),
+    import('@codemirror/language-data'),
+    import('thememirror'),
+  ]).catch((e) => {
+    console.error('CodeMirror core failed to load', e);
+    return null;
+  });
+  if (!mods) {
+    if (build === cmBuild) statusLine.value = '编辑器加载失败，请查看控制台';
+    return;
+  }
+  const [cmMod, stateMod, langMod, dataMod, themeMod] = mods;
+  const { EditorView, basicSetup } = cmMod;
+  const { EditorState, Compartment } = stateMod;
+  let lang = null;
+  try {
+    const desc = langMod.LanguageDescription.matchFilename(
+      dataMod.languages,
+      fileName.value,
+    );
+    lang = desc ? await desc.load() : null;
+  } catch (e) {
+    // Highlighting is best-effort — fall back to plain text editing.
+    console.error(`language pack for ${fileName.value} failed to load`, e);
+  }
+  if (build !== cmBuild || !cmHost.value || cmHost.value !== host) return; // superseded
+  if (!cmWrap) {
+    cmWrap = new Compartment();
+    cmReadOnly = new Compartment();
+  }
+  const cmTheme = EditorView.theme(
+    {
+      '&': {
+        height: '100%',
+        backgroundColor: 'transparent',
+        fontSize: '12px',
+      },
+      '.cm-content': {
+        fontFamily: 'Consolas, monospace',
+        padding: '4px 8px 4px 0',
+      },
+      '.cm-gutters': {
+        backgroundColor: '#00000040',
+        border: 'none',
+        borderRight: '1px solid #2a3344',
+        fontFamily: 'Consolas, monospace',
+      },
+      '.cm-scroller': {
+        fontFamily: 'Consolas, monospace',
+        lineHeight: '18px',
+      },
+    },
+    { dark: true },
+  );
+  cm = new EditorView({
+    parent: host,
+    state: EditorState.create({
+      doc,
+      extensions: [
+        basicSetup,
+        cmTheme,
+        themeMod.dracula,
+        ...(lang ? [lang] : []),
+        cmWrap.of(wrap.value ? EditorView.lineWrapping : []),
+        cmReadOnly!.of([
+          EditorState.readOnly.of(!editable.value),
+          EditorView.editable.of(editable.value),
+        ]),
+        EditorView.updateListener.of((u) => {
+          if (u.docChanged && cm) {
+            raw.value = u.state.doc.toString();
+            onEdit();
+          }
+        }),
+      ],
+    }),
+  });
+  cm.focus();
 }
+
+watch([phase, kind], ([p, k]) => {
+  if (p === 'view' && k === 'text') void nextTick(buildEditor);
+  else {
+    cmBuild++;
+    cm?.destroy();
+    cm = null;
+  }
+});
+
+watch(wrap, (w) => {
+  if (!cm || !cmWrap) return;
+  void import('codemirror').then(({ EditorView }) => {
+    cm?.dispatch({ effects: cmWrap!.reconfigure(w ? EditorView.lineWrapping : []) });
+  });
+});
 
 const mdHtml = computed(() => renderMarkdown(raw.value));
 
@@ -342,22 +455,9 @@ watch(
           <span class="pv__status" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ statusLine }}</span>
         </div>
 
-        <!-- text body -->
+        <!-- text body (CodeMirror: line numbers + syntax highlighting) -->
         <div v-if="kind === 'text'" class="pv__body">
-          <div ref="gutterEl" class="pv__gutter">
-            <div v-for="n in lines" :key="n" class="pv__gutter-line">{{ n }}</div>
-          </div>
-          <textarea
-            ref="editorEl"
-            v-model="raw"
-            class="pv__editor"
-            :class="{ nowrap: !wrap }"
-            :wrap="wrap ? 'soft' : 'off'"
-            :readonly="!editable"
-            spellcheck="false"
-            @input="onEdit"
-            @scroll="syncGutter"
-          ></textarea>
+          <div ref="cmHost" class="pv__cm"></div>
         </div>
 
         <!-- markdown body -->
@@ -470,24 +570,14 @@ watch(
   background: #0b0d12;
 }
 
-.pv__gutter {
-  flex: none;
-  width: 48px;
+.pv__cm {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
-  border-right: 1px solid #2a3344;
-  background: #00000040;
-  color: var(--war-text-faint);
-  font-family: Consolas, monospace;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: right;
-  padding: 4px 6px 4px 0;
-  box-sizing: border-box;
-  user-select: none;
 }
 
-.pv__gutter-line {
-  height: 18px;
+.pv__cm .cm-editor {
+  height: 100%;
 }
 
 .pv__editor {
@@ -504,12 +594,6 @@ watch(
   padding: 4px 8px;
   white-space: pre-wrap;
   overflow-wrap: break-word;
-}
-
-.pv__editor.nowrap {
-  white-space: pre;
-  overflow-wrap: normal;
-  overflow-x: auto;
 }
 
 .pv__editor--full {

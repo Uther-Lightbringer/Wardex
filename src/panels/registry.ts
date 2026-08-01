@@ -32,6 +32,15 @@ export const panelRegistry: PanelDef[] = [
     alwaysOpen: true, // pinned top, never collapses (docs/panels.md §2)
   },
   {
+    id: 'reminders',
+    title: '提醒',
+    component: () => import('./RemindersPanel.vue'),
+    defaultOpen: false,
+    defaultHeight: 200,
+    order: 15,
+    refreshOn: ['turnEnd', 'sessionSwitch', 'manual'],
+  },
+  {
     id: 'git',
     title: '版本控制',
     component: () => import('./GitPanel.vue'),
