@@ -389,18 +389,25 @@ params：`{ "sessionId", "path", "content", ... }`。
 
 params 结构：`{ "sessionId": "...", "update": { "sessionUpdate": "<kind>", ... } }`。
 
-**回放丢弃**：`replaying == true`（session/load 在途）时所有 update 直接 return
-（`AcpClient.cpp:489-491`）。
-
-按 `update.sessionUpdate` 分派：
+按 `update.sessionUpdate` 分派（Rust 侧现状，2026-08 更新）：
 
 | kind | 处理 |
 |---|---|
-| `agent_thought_chunk` | 取 `update.content.text`，发 `thoughtChunk(text)` |
-| `agent_message_chunk` | 取 `update.content.text`，发 `messageChunk(text)` |
-| `tool_call` | 归一化后发 `toolCall(map)` |
-| `tool_call_update` | 归一化后发 `toolCallUpdate(map)` |
-| `available_commands_update` / `plan` / `config_option_update` / 其他 | **忽略**（`AcpClient.cpp:516`） |
+| `agent_thought_chunk` | 取 `update.content.text`，发 `AcpEvent::ThoughtChunk` |
+| `agent_message_chunk` | 取 `update.content.text`，发 `AcpEvent::MessageChunk` |
+| `tool_call` | 归一化后发 `AcpEvent::ToolCall` |
+| `tool_call_update` | 归一化后发 `AcpEvent::ToolCallUpdate` |
+| `available_commands_update` | 存 `available_commands` 并发 `AcpEvent::AvailableCommands`；**回放期只存不发**，session_ready 补发（状态非历史） |
+| `plan` | 发 `AcpEvent::Plan`；chat 层构造 `{toolCallId:"plan", kind:"plan"}` 段 upsert，前端渲染计划卡片 |
+| `usage_update` | `TurnUsage::from_acp` 容错解析后发 `AcpEvent::UsageUpdate`；chat 层在 prompt result 无 usage 时回退使用 |
+| `session_info_update` | 发 `AcpEvent::SessionInfo`；chat 层非空 title 更新会话标题 |
+| `current_mode_update` | 取 `currentModeId`（兼容 `modeId`）发 `AcpEvent::ModeChanged`；chat 层修补 mode picker 并重发 configOptions |
+| `config_option_update` | 修补 config_options 后发 `AcpEvent::ConfigOptions` |
+| `user_message_chunk` | 只在回放中有意义（回放已丢）；非回放期记日志忽略 |
+| 其他未知 kind | 记 `log::info!`（kind 名 + 键集）后丢弃 |
+
+回放丢弃规则：`replaying == true` 时除 `available_commands_update` 外所有
+update 直接 return（旧码为全部丢弃，`AcpClient.cpp:489-491`）。
 
 **tool_call 归一化**（`AcpClient.cpp:505-514`）：把整个 `update` 对象转成 map；
 若顶层没有 `toolCallId` 但有 `toolCall` 字段（部分 adapter 嵌套一层），则改用

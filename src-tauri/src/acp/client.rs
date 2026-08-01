@@ -63,11 +63,27 @@ pub struct AcpClient<T: Transport> {
     /// pickers), refreshed by set_config_option responses and
     /// config_option_update notifications.
     config_options: Vec<Value>,
+    /// Slash commands from available_commands_update (state, not history:
+    /// kept during replay, re-emitted by session_ready). Raw ACP objects
+    /// {name, description, input?} passed through.
+    available_commands: Vec<Value>,
     /// session/load replays the whole history as session/update
     /// notifications; WarDex keeps its own local history, so everything
-    /// arriving while this is set is discarded (AcpClient.cpp:489-491).
+    /// arriving while this is set is discarded (AcpClient.cpp:489-491)
+    /// except state-type updates (available_commands_update).
     replaying: bool,
     mcp_servers: Vec<Value>,
+    /// authMethods[] from the initialize result; used when a prompt is
+    /// rejected with -32002 (auth required) — authenticate is tried once
+    /// with the first method, then the prompt is resent (see last_prompt).
+    auth_methods: Vec<Value>,
+    /// In-flight authenticate request id.
+    auth_id: Option<i64>,
+    /// Only one automatic authenticate attempt per spawn.
+    auth_retried: bool,
+    /// The prompt being sent, kept so an auth-required retry can resend it
+    /// verbatim after authenticate succeeds.
+    last_prompt: Option<(String, Vec<String>)>,
 }
 
 /// JSON-RPC error object -> display text. The numeric code is kept alongside
@@ -103,8 +119,13 @@ impl<T: Transport> AcpClient<T> {
             can_load_session: false,
             image_supported: false,
             config_options: Vec::new(),
+            available_commands: Vec::new(),
             replaying: false,
             mcp_servers: Vec::new(),
+            auth_methods: Vec::new(),
+            auth_id: None,
+            auth_retried: false,
+            last_prompt: None,
         }
     }
 
@@ -153,6 +174,11 @@ impl<T: Transport> AcpClient<T> {
         self.set_mode_id = None;
         self.set_option_id = None;
         self.config_options.clear();
+        self.available_commands.clear();
+        self.auth_methods.clear();
+        self.auth_id = None;
+        self.auth_retried = false;
+        self.last_prompt = None;
     }
 
     /// Begin the handshake: sends initialize (AcpClient.cpp:119-135). The
@@ -236,6 +262,9 @@ impl<T: Transport> AcpClient<T> {
         self.turn_busy = true;
         let id = self.alloc_id();
         self.prompt_id = Some(id);
+        // Kept for the auth-required (-32002) retry: authenticate, then
+        // resend this prompt verbatim.
+        self.last_prompt = Some((text.to_string(), image_paths.to_vec()));
 
         let mut blocks: Vec<Value> = Vec::new();
         if !text.is_empty() {
@@ -347,7 +376,8 @@ impl<T: Transport> AcpClient<T> {
         if msg.get("id").is_some() && msg.get("method").is_none() {
             let id = msg.get("id").and_then(types::json_int).unwrap_or(-1);
             if let Some(err) = msg.get("error") {
-                return self.handle_error_response(id, rpc_error_text(err)).await;
+                let code = err.get("code").and_then(types::json_int);
+                return self.handle_error_response(id, rpc_error_text(err), code).await;
             }
             let result = msg.get("result").cloned().unwrap_or(Value::Null);
             return self.handle_result_response(id, &result).await;
@@ -379,10 +409,12 @@ impl<T: Transport> AcpClient<T> {
                 None => Ok(()),
             },
             // Unknown reverse request: reject only when it expects a
-            // response (AcpClient.cpp:463-465); id-less notifications of any
-            // kind are ignored.
+            // response (AcpClient.cpp:463-465); id-less notifications are
+            // ignored. Both paths are logged now — terminal/* and other
+            // unsupported namespaces must be visible, not silent.
             _ => match req_id {
                 Some(id) => {
+                    log::info!("AcpClient unsupported reverse method '{method}' -> -32601");
                     self.send_error(
                         id,
                         types::RPC_ERROR_METHOD_NOT_FOUND,
@@ -390,12 +422,58 @@ impl<T: Transport> AcpClient<T> {
                     )
                     .await
                 }
-                None => Ok(()),
+                None => {
+                    log::info!("AcpClient unknown notification '{method}' ignored");
+                    Ok(())
+                }
             },
         }
     }
 
-    async fn handle_error_response(&mut self, id: i64, em: String) -> Result<(), AcpError> {
+    async fn handle_error_response(&mut self, id: i64, em: String, code: Option<i64>) -> Result<(), AcpError> {
+        // -32002 (auth required): try authenticate once with the first
+        // advertised method, then resend the failed prompt. kimi/claude
+        // authenticate via env so this path is for on-demand-auth agents.
+        if code == Some(types::RPC_ERROR_AUTH_REQUIRED)
+            && !self.auth_methods.is_empty()
+            && !self.auth_retried
+            && self.prompt_id == Some(id)
+        {
+            self.auth_retried = true;
+            self.prompt_id = None; // turn stays busy; the resend re-arms it
+            let method_id = self
+                .auth_methods
+                .first()
+                .and_then(|m| m.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            log::info!("AcpClient auth required; trying authenticate('{method_id}')");
+            let auth_id = self.alloc_id();
+            self.auth_id = Some(auth_id);
+            return self
+                .send_request(
+                    "authenticate",
+                    json!({ "methodId": method_id }),
+                    auth_id,
+                )
+                .await;
+        }
+        if self.auth_id == Some(id) {
+            // authenticate itself failed: close the turn like a prompt error.
+            self.auth_id = None;
+            self.turn_busy = false;
+            self.emit(AcpEvent::ProtocolError {
+                error: format!("ACP 认证失败：{em}"),
+            })
+            .await;
+            self.emit(AcpEvent::TurnFinished {
+                stop_reason: "error".to_string(),
+                usage: None,
+            })
+            .await;
+            return Ok(());
+        }
         if self.load_session_id == Some(id) {
             // Stored session expired/unknown on the agent side — fall back
             // to a fresh one instead of failing the whole start
@@ -456,6 +534,11 @@ impl<T: Transport> AcpClient<T> {
                 .and_then(|p| p.get("image"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
+            self.auth_methods = result
+                .get("authMethods")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
             if self.can_load_session && !self.resume_session_id.is_empty() {
                 let req_id = self.alloc_id();
                 self.load_session_id = Some(req_id);
@@ -472,6 +555,21 @@ impl<T: Transport> AcpClient<T> {
                 .await
             } else {
                 self.request_new_session().await
+            }
+        } else if self.auth_id == Some(id) {
+            // authenticate succeeded: resend the prompt that got -32002.
+            self.auth_id = None;
+            self.turn_busy = false; // prompt() re-arms it and re-checks
+            match self.last_prompt.clone() {
+                Some((text, images)) => self.prompt(&text, &images).await,
+                None => {
+                    self.emit(AcpEvent::TurnFinished {
+                        stop_reason: "error".to_string(),
+                        usage: None,
+                    })
+                    .await;
+                    Ok(())
+                }
             }
         } else if self.load_session_id == Some(id) {
             self.load_session_id = None;
@@ -533,7 +631,9 @@ impl<T: Transport> AcpClient<T> {
             self.emit(AcpEvent::TurnFinished { stop_reason: stop, usage }).await;
             Ok(())
         } else {
-            // Response for an unknown id: silently ignored (AcpClient.cpp:411).
+            // Response for an unknown id: still ignored (AcpClient.cpp:411),
+            // but logged — a stray/duplicated agent response is diagnosable.
+            log::warn!("AcpClient response with no matching in-flight id: {id}");
             Ok(())
         }
     }
@@ -541,9 +641,6 @@ impl<T: Transport> AcpClient<T> {
     // ---- session/update notifications (AcpClient.cpp:487-517) ----
 
     async fn handle_session_update(&mut self, params: &Value) -> Result<(), AcpError> {
-        if self.replaying {
-            return Ok(());
-        }
         let Some(update) = params.get("update").filter(|u| u.is_object()) else {
             return Ok(());
         };
@@ -551,6 +648,14 @@ impl<T: Transport> AcpClient<T> {
             .get("sessionUpdate")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // Replay drop (AcpClient.cpp:489-491) — EXCEPT available_commands:
+        // it is state (the session's slash-command list), not history, so a
+        // resumed session must not lose it. It is stored during replay and
+        // re-emitted by session_ready(). plan stays dropped: it is the
+        // replayed turn's history, like message chunks.
+        if self.replaying && kind != "available_commands_update" {
+            return Ok(());
+        }
         match kind {
             "agent_thought_chunk" => {
                 let text = update
@@ -582,7 +687,60 @@ impl<T: Transport> AcpClient<T> {
                 })
                 .await;
             }
-            // available_commands_update / plan / ... ignored.
+            "available_commands_update" => {
+                // [{name, description, input?}] passed through verbatim;
+                // latest list replaces the old one. During replay: store
+                // only, session_ready() emits it (like ConfigOptions).
+                if let Some(cmds) = update.get("availableCommands").and_then(Value::as_array) {
+                    self.available_commands = cmds.clone();
+                    if !self.replaying {
+                        self.emit(AcpEvent::AvailableCommands {
+                            commands: self.available_commands.clone(),
+                        })
+                        .await;
+                    }
+                }
+            }
+            "plan" => {
+                let entries = update
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                self.emit(AcpEvent::Plan { entries }).await;
+            }
+            "usage_update" => {
+                // Token usage outside the prompt result; a broken payload is
+                // simply skipped (same tolerance rule as the prompt result).
+                if let Some(usage) = update.get("usage").and_then(TurnUsage::from_acp) {
+                    self.emit(AcpEvent::UsageUpdate { usage }).await;
+                }
+            }
+            "session_info_update" => {
+                let title = update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.emit(AcpEvent::SessionInfo { title }).await;
+            }
+            "current_mode_update" => {
+                // Schema field is currentModeId; tolerate modeId for adapters.
+                let mode = update
+                    .get("currentModeId")
+                    .or_else(|| update.get("modeId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if !mode.is_empty() {
+                    self.pending_mode = mode.clone();
+                    self.emit(AcpEvent::ModeChanged { mode }).await;
+                }
+            }
+            "user_message_chunk" => {
+                // Only meaningful inside a session/load replay (which is
+                // dropped wholesale above); outside one it is an agent quirk.
+                log::info!("AcpClient user_message_chunk outside replay (ignored)");
+            }
             "config_option_update" => {
                 // kimi sends the single changed option {configId, value};
                 // patch the stored list and forward the whole thing.
@@ -600,7 +758,15 @@ impl<T: Transport> AcpClient<T> {
                     .await;
                 }
             }
-            _ => {}
+            other => {
+                // Unknown kinds are dropped by design, but logged so new
+                // agent-side update types are visible instead of silent.
+                let keys: Vec<&str> = update
+                    .as_object()
+                    .map(|m| m.keys().map(String::as_str).collect())
+                    .unwrap_or_default();
+                log::info!("AcpClient unknown sessionUpdate kind '{other}' (keys: {keys:?})");
+            }
         }
         Ok(())
     }
@@ -693,6 +859,14 @@ impl<T: Transport> AcpClient<T> {
             options: self.config_options.clone(),
         })
         .await;
+        // Re-emit state captured during session/load replay (the replay path
+        // stores available_commands without emitting).
+        if !self.available_commands.is_empty() {
+            self.emit(AcpEvent::AvailableCommands {
+                commands: self.available_commands.clone(),
+            })
+            .await;
+        }
         Ok(())
     }
 
@@ -1457,15 +1631,15 @@ async fn session_update_chunks_and_tool_normalization() {
         .await;
     h.client.recv_once().await.expect("tool_call_update");
 
-    // Ignored kinds produce nothing.
+    // available_commands_update / plan are now wired: they emit events.
     h.transport
         .feed_json(update_frame("available_commands_update", json!({ "availableCommands": [] })))
         .await;
-    h.client.recv_once().await.expect("ignored1");
+    h.client.recv_once().await.expect("commands");
     h.transport
         .feed_json(update_frame("plan", json!({ "entries": [] })))
         .await;
-    h.client.recv_once().await.expect("ignored2");
+    h.client.recv_once().await.expect("plan");
 
     assert_eq!(
         events(&mut h),
@@ -1482,6 +1656,8 @@ async fn session_update_chunks_and_tool_normalization() {
                 update: json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1",
                                 "kind": "edit", "status": "completed", "name": "edit" }),
             },
+            AcpEvent::AvailableCommands { commands: vec![] },
+            AcpEvent::Plan { entries: vec![] },
         ]
     );
 }
@@ -1528,5 +1704,158 @@ async fn eof_emits_process_exited_with_code() {
     let alive = h.client.recv_once().await.expect("eof");
     assert!(!alive);
     assert_eq!(events(&mut h), vec![AcpEvent::ProcessExited { code: 7 }]);
+}
+
+#[tokio::test]
+async fn usage_session_info_and_mode_updates_are_forwarded() {
+    let mut h = harness();
+    drive_to_ready(&mut h).await;
+    events(&mut h);
+
+    h.transport
+        .feed_json(update_frame("usage_update", json!({
+            "usage": { "inputTokens": 100, "outputTokens": 20, "totalTokens": 120 }
+        })))
+        .await;
+    h.client.recv_once().await.expect("usage");
+    h.transport
+        .feed_json(update_frame("session_info_update", json!({ "title": "修 bug" })))
+        .await;
+    h.client.recv_once().await.expect("info");
+    h.transport
+        .feed_json(update_frame("current_mode_update", json!({ "currentModeId": "yolo" })))
+        .await;
+    h.client.recv_once().await.expect("mode");
+    // Broken usage payloads are skipped without an event.
+    h.transport
+        .feed_json(update_frame("usage_update", json!({ "usage": "oops" })))
+        .await;
+    h.client.recv_once().await.expect("bad usage");
+
+    assert_eq!(
+        events(&mut h),
+        vec![
+            AcpEvent::UsageUpdate {
+                usage: TurnUsage {
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    total_tokens: 120,
+                    ..Default::default()
+                },
+            },
+            AcpEvent::SessionInfo {
+                title: Some("修 bug".into()),
+            },
+            AcpEvent::ModeChanged { mode: "yolo".into() },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn available_commands_survive_load_replay() {
+    let mut h = harness();
+    let params = StartParams {
+        resume_session_id: "old-9".to_string(),
+        ..start_params()
+    };
+    h.client.start(params).await.expect("start");
+    h.transport.feed_json(init_result(true, false)).await;
+    h.client.recv_once().await.expect("init");
+
+    // During replay: commands stored but NOT emitted; message chunks dropped.
+    h.transport
+        .feed_json(update_frame("available_commands_update", json!({
+            "availableCommands": [{ "name": "tasks", "description": "后台任务" }]
+        })))
+        .await;
+    h.client.recv_once().await.expect("replay commands");
+    h.transport
+        .feed_json(update_frame("agent_message_chunk", json!({ "content": { "text": "history" } })))
+        .await;
+    h.client.recv_once().await.expect("replay chunk");
+    assert!(events(&mut h).is_empty(), "replay emits nothing");
+
+    h.transport
+        .feed_json(json!({ "jsonrpc": "2.0", "id": 2, "result": {} }))
+        .await;
+    h.client.recv_once().await.expect("load ok");
+    let evs = events(&mut h);
+    assert!(
+        evs.contains(&AcpEvent::AvailableCommands {
+            commands: vec![json!({ "name": "tasks", "description": "后台任务" })],
+        }),
+        "session_ready re-emits replayed commands: {evs:?}"
+    );
+}
+
+#[tokio::test]
+async fn auth_required_triggers_authenticate_and_resend() {
+    let mut h2 = harness();
+    h2.client.start(start_params()).await.expect("start");
+    let mut init = init_result(false, true);
+    init["result"]["authMethods"] = json!([{ "id": "oauth", "name": "OAuth" }]);
+    h2.transport.feed_json(init).await;
+    h2.client.recv_once().await.expect("init");
+    h2.transport
+        .feed_json(json!({ "jsonrpc": "2.0", "id": 2, "result": { "sessionId": "s-1" } }))
+        .await;
+    h2.client.recv_once().await.expect("new");
+    events(&mut h2);
+
+    h2.client.prompt("hello", &[]).await.expect("prompt");
+    let sent = sent_requests(&h2);
+    let prompt_id = sent.last().unwrap()["id"].as_i64().unwrap();
+
+    // Prompt rejected with -32002: authenticate goes out, no error events.
+    h2.transport
+        .feed_json(json!({ "jsonrpc": "2.0", "id": prompt_id,
+                           "error": { "code": -32002, "message": "auth required" } }))
+        .await;
+    h2.client.recv_once().await.expect("auth error");
+    assert!(events(&mut h2).is_empty(), "no turn error while authenticating");
+    let sent = sent_requests(&h2);
+    assert_eq!(
+        sent.last().unwrap(),
+        &json!({ "jsonrpc": "2.0", "id": prompt_id + 1, "method": "authenticate",
+                 "params": { "methodId": "oauth" } })
+    );
+
+    // authenticate succeeds: the same prompt is resent verbatim.
+    h2.transport
+        .feed_json(json!({ "jsonrpc": "2.0", "id": prompt_id + 1, "result": {} }))
+        .await;
+    h2.client.recv_once().await.expect("auth ok");
+    let sent = sent_requests(&h2);
+    let resent = sent.last().unwrap();
+    assert_eq!(resent["method"], json!("session/prompt"));
+    assert_eq!(resent["params"]["prompt"], json!([{ "type": "text", "text": "hello" }]));
+
+    // Turn completes normally.
+    h2.transport
+        .feed_json(json!({ "jsonrpc": "2.0", "id": resent["id"].as_i64().unwrap(),
+                           "result": { "stopReason": "end_turn" } }))
+        .await;
+    h2.client.recv_once().await.expect("turn");
+    assert_eq!(
+        events(&mut h2),
+        vec![AcpEvent::TurnFinished {
+            stop_reason: "end_turn".into(),
+            usage: None,
+        }]
+    );
+
+    // A second -32002 is NOT retried (one attempt per spawn).
+    h2.client.prompt("again", &[]).await.expect("prompt2");
+    let pid2 = sent_requests(&h2).last().unwrap()["id"].as_i64().unwrap();
+    h2.transport
+        .feed_json(json!({ "jsonrpc": "2.0", "id": pid2,
+                           "error": { "code": -32002, "message": "auth required" } }))
+        .await;
+    h2.client.recv_once().await.expect("second auth error");
+    let evs = events(&mut h2);
+    assert!(
+        evs.iter().any(|e| matches!(e, AcpEvent::TurnFinished { stop_reason, .. } if stop_reason == "error")),
+        "second auth failure surfaces as a turn error: {evs:?}"
+    );
 }
 }

@@ -15,6 +15,9 @@ pub const RPC_ERROR_FS: i64 = -32000;
 /// JSON-RPC "method not found" for unknown agent->client requests with an id
 /// (AcpClient.cpp:463-465).
 pub const RPC_ERROR_METHOD_NOT_FOUND: i64 = -32601;
+/// JSON-RPC "auth required" (ACP spec): answered by sending authenticate
+/// with one of the advertised authMethods, then retrying the request.
+pub const RPC_ERROR_AUTH_REQUIRED: i64 = -32002;
 
 /// clientInfo is pinned (AcpClient.cpp:127-129). probe.rs's testAgent
 /// handshake shares this same value via initialize_request() — bump the

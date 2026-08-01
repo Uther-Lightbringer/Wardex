@@ -77,6 +77,11 @@ function onKeydown(e: KeyboardEvent): void {
     return;
   }
   if (e.key === 'Enter' && !e.shiftKey && !composing.value && !e.isComposing) {
+    if (slashOpen.value) {
+      e.preventDefault();
+      pickSlash(slashIndex.value);
+      return;
+    }
     if (pickerOpen.value) {
       e.preventDefault();
       pickPicker(pickerIndex.value);
@@ -84,6 +89,23 @@ function onKeydown(e: KeyboardEvent): void {
     }
     e.preventDefault();
     void send();
+    return;
+  }
+  if (slashOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      slashIndex.value = Math.min(slashIndex.value + 1, slashItems.value.length - 1);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      slashIndex.value = Math.max(slashIndex.value - 1, 0);
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      pickSlash(slashIndex.value);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      slashOpen.value = false;
+    }
     return;
   }
   if (pickerOpen.value) {
@@ -347,6 +369,39 @@ watch(text, () => {
   if (!composing.value) updatePicker();
 });
 
+// ---- slash command completion (acp://commands, available_commands_update) ----
+// The agent owns execution: picking a command only completes the draft text
+// (`/name `), and it is sent as a normal prompt.
+const slashOpen = ref(false);
+const slashIndex = ref(0);
+
+/** Commands matching the draft when it is exactly "/<filter>" (first token,
+ * no whitespace yet). Empty unless the agent advertised commands. */
+const slashItems = computed(() => {
+  const m = text.value.match(/^\/(\S*)$/);
+  if (!m) return [];
+  const f = m[1].toLowerCase();
+  return chat.commands.filter((c) => c.name.toLowerCase().includes(f));
+});
+
+watch(slashItems, (items) => {
+  slashOpen.value = items.length > 0;
+  slashIndex.value = 0;
+});
+
+function pickSlash(i: number): void {
+  const cmd = slashItems.value[i];
+  slashOpen.value = false;
+  if (!cmd) return;
+  text.value = `/${cmd.name} `;
+  void Promise.resolve().then(() => {
+    if (inputEl.value) {
+      inputEl.value.selectionStart = inputEl.value.selectionEnd = text.value.length;
+      inputEl.value.focus();
+    }
+  });
+}
+
 // ---- @ expansion at send time (§3.3 refBlock) ----
 const EXPAND_RE = /@([^\s@]+(?:, ?[^\s@,]+)*)/g;
 
@@ -493,6 +548,25 @@ function onExpandConfirm(v: string): void {
       :style="{ fontSize: prefs.fs(10) + 'px' }"
     >
       {{ text.length }} / {{ MAX_LEN }}
+    </div>
+
+    <!-- slash command popup (non-modal, same style as the @ picker) -->
+    <div v-if="slashOpen" class="composer__picker">
+      <div
+        v-for="(item, i) in slashItems.slice(0, 12)"
+        :key="item.name"
+        class="composer__picker-row"
+        :class="{ active: i === slashIndex }"
+        :style="{ fontSize: prefs.fs(12) + 'px' }"
+        @mousedown.prevent="pickSlash(i)"
+        @mouseenter="slashIndex = i"
+      >
+        <span class="composer__slash-name">/{{ item.name }}</span>
+        <span v-if="item.description" class="composer__slash-desc">{{ item.description }}</span>
+      </div>
+      <div class="composer__picker-hint" :style="{ fontSize: prefs.fs(10) + 'px' }">
+        ↑↓ 选择 · Enter 确认 · Esc 关闭 · 命令由 agent 执行，选中后继续输入参数
+      </div>
     </div>
 
     <!-- @ picker popup (non-modal, focus stays in the field) -->
@@ -643,6 +717,15 @@ function onExpandConfirm(v: string): void {
   border-top: 1px solid #2a3344;
   margin-top: 4px;
   font-family: SimSun, serif;
+}
+
+.composer__slash-name {
+  color: var(--war-gold);
+}
+
+.composer__slash-desc {
+  color: var(--war-text-faint);
+  margin-left: 8px;
 }
 
 .composer__field-wrap {

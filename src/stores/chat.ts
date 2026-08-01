@@ -86,6 +86,12 @@ export interface ConfigOption {
   options: ConfigOptionChoice[];
 }
 
+/** ACP available_commands_update entry (raw {name, description?, input?}). */
+export interface SlashCommand {
+  name: string;
+  description?: string;
+}
+
 export interface Subagent {
   id: string;
   kind: string;
@@ -191,6 +197,10 @@ export const useChatStore = defineStore('chat', {
     /** ACP config option pickers for the active session (kimi: model /
      * thinking / mode); refreshed by acp://configOptions. */
     configOptions: [] as ConfigOption[],
+    /** Slash commands per session (acp://commands); keyed so a session switch
+     * never loses a background session's list (the event only re-fires when
+     * the agent sends it). */
+    commandsBySession: {} as Record<string, SlashCommand[]>,
     permission: null as PermissionRequest | null,
     retry: { active: false, countdown: 0, attempt: 0, maxAttempts: 3 },
     /** Mirror of the send queue; rebuilt from the backend snapshot on switch. */
@@ -215,6 +225,10 @@ export const useChatStore = defineStore('chat', {
     previewPath: '',
   }),
   getters: {
+    /** Slash commands of the active session (composer `/` completion). */
+    commands(): SlashCommand[] {
+      return this.commandsBySession[this.sessionId] ?? [];
+    },
     /** The row currently receiving stream chunks (last assistant, busy). */
     streamRow(): ChatMessage | null {
       if (!this.status.busy && !this.status.retryActive) return null;
@@ -260,6 +274,12 @@ export const useChatStore = defineStore('chat', {
         }),
         await listen<{ sessionId: string; options: ConfigOption[] }>('acp://configOptions', (e) => {
           if (e.payload.sessionId === this.sessionId) this.configOptions = e.payload.options;
+        }),
+        await listen<{ sessionId: string; commands: SlashCommand[] }>('acp://commands', (e) => {
+          this.commandsBySession = {
+            ...this.commandsBySession,
+            [e.payload.sessionId]: e.payload.commands,
+          };
         }),
         await listen<{ sessionId: string; row: ChatMessage }>('chat://messageAppended', (e) => {
           if (e.payload.sessionId !== this.sessionId) return;
@@ -557,6 +577,11 @@ export const useChatStore = defineStore('chat', {
         this.configOptions = [];
         this.permission = null;
         this.queueMirror = [];
+      }
+      if (id in this.commandsBySession) {
+        const rest = { ...this.commandsBySession };
+        delete rest[id];
+        this.commandsBySession = rest;
       }
       await sessions.refresh(this.projectDir);
     },

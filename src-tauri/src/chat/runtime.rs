@@ -537,6 +537,12 @@ pub(crate) struct Actor {
     /// Model the current turn is running on: the agent's configured default,
     /// refreshed from the CLI's model picker (configOptions currentValue).
     current_model: String,
+    /// Last configOptions batch forwarded to the frontend; current_mode_update
+    /// patches the "mode" picker's currentValue and re-emits it.
+    last_config_options: Vec<Value>,
+    /// usage_update notifications seen during the current turn; used when the
+    /// prompt result carries no usage (before the archive backfill).
+    turn_usage_live: Option<TurnUsage>,
     /// 档案用量补源（kimi/claude/codex，见 chat/wire.rs），Started 时按
     /// provider 定位；其他 provider 为 None。
     archive_usage: Option<ArchiveReader>,
@@ -608,6 +614,8 @@ pub(crate) fn spawn_actor(
         session_id: session_id.to_string(),
         agent,
         current_model,
+        last_config_options: Vec::new(),
+        turn_usage_live: None,
         archive_usage: None,
         stores,
         sink,
@@ -1216,7 +1224,56 @@ impl Actor {
                 }
                 self.emit_status(None);
             }
-            AcpEvent::ModeChanged { .. } => {}
+            AcpEvent::ModeChanged { mode } => {
+                // current_mode_update / set_mode ack: patch the mode picker's
+                // currentValue in the last options batch and re-forward so the
+                // status bar reflects agent-side mode switches.
+                let mut changed = false;
+                for o in self.last_config_options.iter_mut() {
+                    if o["id"].as_str() == Some("mode") {
+                        o["currentValue"] = json!(mode);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    self.emit(
+                        "acp://configOptions",
+                        json!({ "sessionId": self.session_id, "options": self.last_config_options }),
+                    );
+                }
+            }
+            AcpEvent::AvailableCommands { commands } => {
+                self.emit(
+                    "acp://commands",
+                    json!({ "sessionId": self.session_id, "commands": commands }),
+                );
+            }
+            AcpEvent::Plan { entries } => {
+                // Render the plan as a tool-style segment on the last
+                // assistant row; repeated plan updates replace it by id.
+                let tool = json!({
+                    "toolCallId": "plan",
+                    "kind": "plan",
+                    "title": "计划",
+                    "status": "completed",
+                    "entries": entries,
+                });
+                self.on_tool(tool).await;
+            }
+            AcpEvent::UsageUpdate { usage } => {
+                self.turn_usage_live = Some(usage);
+            }
+            AcpEvent::SessionInfo { title } => {
+                if let Some(t) = title.filter(|t| !t.trim().is_empty()) {
+                    let renamed = {
+                        let mut stores = lock_ok(&self.stores);
+                        stores.sessions.rename_session(&self.session_id, &t).unwrap_or(false)
+                    };
+                    if renamed {
+                        self.emit("store://sessions", json!({}));
+                    }
+                }
+            }
             AcpEvent::ConfigOptions { options } => {
                 // Track the running model for usage records: the CLI's model
                 // picker currentValue is authoritative once seen.
@@ -1255,6 +1312,7 @@ impl Actor {
                         }
                     }
                 }
+                self.last_config_options = options.clone();
                 self.emit(
                     "acp://configOptions",
                     json!({ "sessionId": self.session_id, "options": options }),
@@ -1388,9 +1446,12 @@ impl Actor {
     async fn on_turn_finished(&mut self, stop: &str, usage: Option<TurnUsage>) {
         self.flush_stream_buffers();
         self.clear_permission();
-        // ACP 适配器不报 usage 的 provider：从本地会话档案增量补（见
-        // chat/wire.rs）。
-        let usage = usage.or_else(|| self.read_archive_usage());
+        // Usage priority: prompt result > usage_update notifications seen
+        // during the turn > local archive backfill (chat/wire.rs) for
+        // providers whose ACP adapter reports nothing.
+        let usage = usage
+            .or_else(|| self.turn_usage_live.take())
+            .or_else(|| self.read_archive_usage());
         // Phase 4: a rate-limited turn is not final — enter backoff and
         // resend the same prompt instead of closing with an error.
         if stop == "error"
@@ -1455,6 +1516,7 @@ impl Actor {
     /// startSend (ChatController.cpp:1006-1068) — order is a hard contract.
     async fn start_send(&mut self, text: String, images: Vec<String>, display: Vec<String>, kind: &str) {
         let provider = self.agent.provider.trim().to_lowercase();
+        self.turn_usage_live = None; // stale usage must not leak into a new turn
         // 首条用户消息：发给 agent 的文本前注入提醒工具引导语（只进
         // prompt，不进显示的用户行；pending_prompt 路径复用同一文本）。
         let prompt_text = {

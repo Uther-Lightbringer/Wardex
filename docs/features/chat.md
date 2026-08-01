@@ -184,6 +184,33 @@
 - 发给 agent 前经 ProviderRegistry 映射（kimi 系 id 原样；claude：`auto→acceptEdits`、`yolo→bypassPermissions`；映射表见 sessions-and-config.md 附录与 ../acp-protocol.md）。
 - 状态行后缀同步显示 `· 需批准` 等（见 6.1）。
 
+### 3.8 `/` 斜杠命令补全（ACP available_commands_update）
+
+新实现（无旧码对应）：`src-tauri/src/acp/client.rs`（`available_commands_update` 分派）、
+`src/stores/chat.ts`（`acp://commands` → `commandsBySession`）、
+`src/components/chat/Composer.vue`（slash 补全弹层）。
+
+- agent 通过 `available_commands_update` 下发命令列表（如 kimi 的 `/tasks`）；
+  协议层存 `available_commands` 并发 `AcpEvent::AvailableCommands`，回放期只存不发，
+  session_ready 补发（状态非历史，load 会话不丢命令）。
+- 输入框内容恰为 `/<filter>`（首 token、无空白）时按子串过滤弹补全层，
+  样式复用 @ 引用弹层；↑↓ 选择、Enter/Tab 确认、Esc 关闭。
+- 选中只把 `/name ` 补进草稿——**命令由 agent 执行**，选中后继续输入参数，
+  发送走普通 prompt 路径（客户端不做命令解析）。
+- 前端按 sessionId 缓存命令列表（`commandsBySession`），会话切换不丢后台会话的
+  命令（事件只在该 agent 下发时重发）；删除会话时清缓存。
+
+### 3.9 ACP plan 更新 → 计划卡片
+
+新实现（无旧码对应）：agent 的 `plan` update（`entries: [{content, status, priority?}]`）
+经 `AcpEvent::Plan` 到 chat 层，构造 `{toolCallId:"plan", kind:"plan", title:"计划"}` 段
+走工具段 upsert 通道（重复更新按 id 替换）；ChatBubble 识别 `toolCallId === 'plan'`
+渲染为计划卡片：○ pending / ▶ in_progress / ✓ completed。
+
+- 计划卡片在流式与最终行都内嵌可见，**不进**「⚙ N 个步骤」过程行/过程对话框
+  （`structSegs` 过滤掉 plan 段）。
+- 状态符号着色：completed 绿色，其余 muted。
+
 ## 4. 浮动件
 
 ### 4.1 发送队列面板

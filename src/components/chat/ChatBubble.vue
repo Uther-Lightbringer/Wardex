@@ -74,11 +74,37 @@ const hasStructSegs = computed(() => segs.value.some((s) => s.kind !== 'text'));
 /** Streaming or structured bubbles pin to max width (no frame-width jitter). */
 const pinWide = computed(() => props.streaming || hasStructSegs.value);
 
+// ---- plan card (ACP plan updates, toolCallId "plan") ----
+// Plan segments ride the tool-segment channel but render as a visible
+// checklist card — inline in streaming AND final rows, never folded into
+// the process line.
+const isPlan = (s: ChatSegment): boolean => s.toolCallId === 'plan';
+
+interface PlanEntry {
+  content?: string;
+  status?: string;
+  priority?: string;
+}
+
+function planEntries(s: ChatSegment): PlanEntry[] {
+  return Array.isArray(s.entries) ? (s.entries as PlanEntry[]) : [];
+}
+
+function planIcon(status?: string): string {
+  if (status === 'completed') return '✓';
+  if (status === 'in_progress') return '▶';
+  return '○'; // pending / unknown
+}
+
+const planSegs = computed(() =>
+  segs.value.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'tool' && isPlan(s)),
+);
+
 // ---- process dialog (final rows: thinking/tool blocks move OUT of the bubble) ----
 // Final rows show a single "⚙ N 个步骤" line; clicking opens ProcessDialog
 // with the full step list. Streaming rows keep the inline one-line blocks —
 // the live-append contract (data-live-seg) needs the tail segment mounted.
-const structSegs = computed(() => segs.value.filter((s) => s.kind !== 'text'));
+const structSegs = computed(() => segs.value.filter((s) => s.kind !== 'text' && !isPlan(s)));
 const textSegs = computed(() =>
   segs.value.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'text'),
 );
@@ -372,6 +398,19 @@ const visibleAtts = computed(() =>
               <span v-if="!mdEnabled" class="seg-text__plain">{{ s.text }}</span>
               <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
             </div>
+            <!-- plan updates stay visible on final rows (checklist card) -->
+            <div v-for="{ s, i } in planSegs" :key="'plan' + i" class="seg-plan">
+              <div class="seg-plan__title" :style="{ fontSize: fs(12) + 'px' }">计划</div>
+              <div
+                v-for="(e, j) in planEntries(s)"
+                :key="j"
+                class="seg-plan__row"
+                :style="{ fontSize: fs(12) + 'px' }"
+              >
+                <span class="seg-plan__icon" :class="{ done: e.status === 'completed' }">{{ planIcon(e.status) }}</span>
+                {{ e.content }}
+              </div>
+            </div>
             <ProcessDialog v-model:open="procOpen" :segments="structSegs" :title="displayName + ' · ' + timeText" />
           </template>
 
@@ -404,6 +443,20 @@ const visibleAtts = computed(() =>
                 >{{ s.text }}</span
               >
               <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
+            </div>
+
+            <!-- plan updates: visible checklist card (live-replaced by id) -->
+            <div v-else-if="isPlan(s)" class="seg-plan">
+              <div class="seg-plan__title" :style="{ fontSize: fs(12) + 'px' }">计划</div>
+              <div
+                v-for="(e, j) in planEntries(s)"
+                :key="j"
+                class="seg-plan__row"
+                :style="{ fontSize: fs(12) + 'px' }"
+              >
+                <span class="seg-plan__icon" :class="{ done: e.status === 'completed' }">{{ planIcon(e.status) }}</span>
+                {{ e.content }}
+              </div>
             </div>
 
             <!-- tool: single-line header, payload on expand -->
@@ -772,6 +825,35 @@ const visibleAtts = computed(() =>
   border-radius: 2px;
   margin: 4px 0;
   padding: 4px 8px;
+}
+
+/* ---- plan card (ACP plan updates) ---- */
+.seg-plan {
+  background: #12151c44;
+  border: 1px solid #4a4033;
+  border-radius: 2px;
+  margin: 4px 0;
+  padding: 4px 8px;
+}
+
+.seg-plan__title {
+  color: var(--war-gold);
+  user-select: none;
+}
+
+.seg-plan__row {
+  color: #d0d6e0;
+  padding: 1px 0;
+  user-select: text;
+}
+
+.seg-plan__icon {
+  color: var(--war-text-muted);
+  margin-right: 6px;
+}
+
+.seg-plan__icon.done {
+  color: #7ec88a;
 }
 
 .seg-tool__head {

@@ -74,6 +74,19 @@ pub enum AcpEvent {
         usage: Option<TurnUsage>,
     },
     ProtocolError { error: String },
+    /// available_commands_update: the session's slash-command list (raw ACP
+    /// {name, description, input?} objects passed through). State-type: kept
+    /// during session/load replay, latest value wins.
+    AvailableCommands { commands: Vec<Value> },
+    /// plan update: agent's task plan entries ([{content, priority?, status}]).
+    /// State-type like AvailableCommands — replay-safe, latest value wins.
+    Plan { entries: Vec<Value> },
+    /// usage_update notification: mid/post-turn token usage reported outside
+    /// the prompt result. Parsed with the same tolerant TurnUsage path.
+    UsageUpdate { usage: TurnUsage },
+    /// session_info_update: session metadata (title). Absent/empty title
+    /// never overwrites the stored one (handled by the chat layer).
+    SessionInfo { title: Option<String> },
     /// session/load failed and the client silently fell back to session/new:
     /// the chat layer must surface this (with the load error verbatim) so a
     /// lost-context resume is never invisible to the user.
