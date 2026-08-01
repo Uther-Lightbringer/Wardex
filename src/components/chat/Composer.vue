@@ -31,6 +31,25 @@ const inputEl = ref<HTMLTextAreaElement | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const composing = ref(false);
 
+// ---- popup anchoring ----
+// Popups (slash / @ pickers) float ABOVE the composer, but the composer lives
+// inside WarFrame's overflow:hidden content layer — position:absolute there
+// is clipped. position:fixed escapes it (no transformed ancestor), anchored
+// to the composer rect, recomputed on every open.
+const popupPos = ref({ left: 0, bottom: 0 });
+
+function anchorPopup(): void {
+  const r = rootEl.value?.getBoundingClientRect();
+  if (!r) return;
+  popupPos.value = { left: r.left, bottom: window.innerHeight - r.top + 4 };
+}
+
+const popupStyle = computed(() => ({
+  position: 'fixed' as const,
+  left: popupPos.value.left + 'px',
+  bottom: popupPos.value.bottom + 'px',
+}));
+
 // ---- 64K cap ----
 const notice = ref('');
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -338,6 +357,7 @@ async function fetchPickerItems(token: RefToken): Promise<void> {
     }
     pickerItems.value = items;
     pickerIndex.value = 0;
+    anchorPopup();
     pickerOpen.value = true;
   } catch {
     pickerOpen.value = false;
@@ -385,6 +405,7 @@ const slashItems = computed(() => {
 });
 
 watch(slashItems, (items) => {
+  if (items.length > 0 && !slashOpen.value) anchorPopup();
   slashOpen.value = items.length > 0;
   slashIndex.value = 0;
 });
@@ -551,7 +572,7 @@ function onExpandConfirm(v: string): void {
     </div>
 
     <!-- slash command popup (non-modal, same style as the @ picker) -->
-    <div v-if="slashOpen" class="composer__picker">
+    <div v-if="slashOpen" class="composer__picker" :style="popupStyle">
       <div
         v-for="(item, i) in slashItems.slice(0, 12)"
         :key="item.name"
@@ -570,7 +591,7 @@ function onExpandConfirm(v: string): void {
     </div>
 
     <!-- @ picker popup (non-modal, focus stays in the field) -->
-    <div v-if="pickerOpen" class="composer__picker">
+    <div v-if="pickerOpen" class="composer__picker" :style="popupStyle">
       <div
         v-for="(item, i) in pickerItems.slice(0, 12)"
         :key="item"
@@ -680,10 +701,9 @@ function onExpandConfirm(v: string): void {
 }
 
 .composer__picker {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 4px);
-  z-index: 46;
+  /* position/left/bottom come from the inline popupStyle (fixed anchoring —
+   * WarFrame's overflow:hidden content layer would clip absolute popups) */
+  z-index: 60;
   width: min(520px, 90%);
   max-height: 320px;
   overflow-y: auto;
