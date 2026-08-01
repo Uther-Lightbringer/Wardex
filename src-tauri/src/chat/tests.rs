@@ -584,6 +584,56 @@ async fn attachments_enqueue_while_busy_and_drain_with_image_block() {
 
 // ---- small helpers ----
 
+/// 首条用户消息注入提醒工具引导语：首条 session/prompt 文本 = 引导语 +
+/// 原文，第二条起不再注入；聊天显示/落盘的用户行始终是原文。
+#[tokio::test]
+async fn first_user_message_carries_reminder_guide_prefix() {
+    use crate::chat::runtime::REMINDER_GUIDE_PREFIX;
+
+    let h = harness();
+    let id = ready_session(&h, "").await;
+    let mock = mock_at(&h, 0);
+
+    h.manager.send_prompt(&id, "第一条", &[]).await.expect("send");
+    assert!(wait_for(|| !prompt_msgs(&mock_at(&h, 0)).is_empty()).await);
+    let first = prompt_msgs(&mock_at(&h, 0))
+        .last()
+        .and_then(|m| m.pointer("/params/prompt/0/text").and_then(Value::as_str).map(str::to_string))
+        .expect("first prompt text");
+    assert!(
+        first.starts_with(REMINDER_GUIDE_PREFIX) && first.ends_with("\n\n第一条"),
+        "first prompt prefixed with the reminder guide, got: {first}"
+    );
+
+    // Finish the turn, then send the second message.
+    let pid = prompt_msgs(&mock_at(&h, 0))
+        .last()
+        .and_then(|m| m.get("id").and_then(Value::as_u64))
+        .expect("prompt id");
+    mock.feed_json(json!({ "jsonrpc": "2.0", "id": pid,
+                           "result": { "stopReason": "end_turn" } }))
+        .await;
+    h.manager.send_prompt(&id, "第二条", &[]).await.expect("send 2");
+    assert!(wait_for(|| prompt_msgs(&mock_at(&h, 0)).len() == 2).await);
+    let second = prompt_msgs(&mock_at(&h, 0))
+        .last()
+        .and_then(|m| m.pointer("/params/prompt/0/text").and_then(Value::as_str).map(str::to_string))
+        .expect("second prompt text");
+    assert_eq!(second, "第二条", "no guide prefix on subsequent prompts");
+
+    // Store 里的用户行保持原文（引导语不进历史/显示）。
+    assert!(wait_for(|| {
+        let rows = h.manager.session_messages(&id);
+        let users: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.get("role").and_then(Value::as_str) == Some("user"))
+            .filter_map(|r| r.get("content").and_then(Value::as_str))
+            .collect();
+        users == ["第一条", "第二条"]
+    })
+    .await);
+}
+
 /// 提醒调度：store 里注入一条短到期提醒 + RemindersReload 后，runtime 自动
 /// 以一条普通 prompt 发起提醒回合（user + assistant 占位行落盘），提醒
 /// 本体在发 prompt 前已 mark_done（防崩溃重发）。
@@ -604,8 +654,9 @@ async fn due_reminder_fires_as_prompt_turn() {
     assert!(
         wait_for(|| {
             prompt_msgs(&mock).iter().any(|m| {
+                // 提醒回合若是本会话首条用户消息，prompt 文本带引导语前缀。
                 m.pointer("/params/prompt/0/text").and_then(Value::as_str)
-                    == Some("⏰ 提醒时间到：喝水")
+                    .is_some_and(|t| t.ends_with("⏰ 提醒时间到：喝水"))
             })
         })
         .await,

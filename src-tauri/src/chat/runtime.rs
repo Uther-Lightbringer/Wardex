@@ -56,6 +56,12 @@ pub const K_FLUSH_LONG_THRESHOLD: usize = 64 * 1024;
 const PLACEHOLDER: &str = "…";
 const INTERRUPTED_MARK: &str = "（已中断）";
 
+/// 会话首条用户消息发往 ACP 前注入的引导语：告知 agent 本会话挂载了内置
+/// wardex-reminder MCP 工具（build_launch 注入）。只进 prompt 文本，不进
+/// 聊天显示的用户行；判定用 store 里的用户消息计数（resume 的老会话不会
+/// 重复注入）。
+pub const REMINDER_GUIDE_PREFIX: &str = "[Wardex 提示] 本会话已挂载 wardex-reminder MCP 工具（set_reminder/cancel_reminder/list_reminders）。当你想稍后主动跟进、或用户说\"过会提醒我/晚点通知我\"时，调用 set_reminder(minutes, content) 设置提醒；到点后系统会自动把 content 作为新消息发给你。";
+
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested below)
 // ---------------------------------------------------------------------------
@@ -1224,6 +1230,21 @@ impl Actor {
     /// startSend (ChatController.cpp:1006-1068) — order is a hard contract.
     async fn start_send(&mut self, text: String, images: Vec<String>, display: Vec<String>) {
         let provider = self.agent.provider.trim().to_lowercase();
+        // 首条用户消息：发给 agent 的文本前注入提醒工具引导语（只进
+        // prompt，不进显示的用户行；pending_prompt 路径复用同一文本）。
+        let prompt_text = {
+            let mut stores = lock_ok(&self.stores);
+            stores.sessions.ensure_open(&self.session_id);
+            let first_user = stores
+                .sessions
+                .messages(&self.session_id)
+                .is_none_or(|ms| !ms.iter().any(|m| m.role == "user"));
+            if first_user {
+                format!("{REMINDER_GUIDE_PREFIX}\n\n{text}")
+            } else {
+                text.clone()
+            }
+        };
         let (user_row, asst_row) = {
             let mut stores = lock_ok(&self.stores);
             if let Err(e) = stores.sessions.append_message(
@@ -1266,7 +1287,7 @@ impl Actor {
         // Phase 4 retry bookkeeping: only text-only prompts are resendable.
         // Image payloads are not kept and re-reading files could pick up
         // changed content; non-image attachments are already inlined text.
-        self.retry_prompt = if images.is_empty() { Some(text.clone()) } else { None };
+        self.retry_prompt = if images.is_empty() { Some(prompt_text.clone()) } else { None };
         self.retry_attempt = 0;
         self.last_turn_error.clear();
         // New turn — reset the sub-agent panel.
@@ -1292,7 +1313,7 @@ impl Actor {
         }
 
         if self.client.is_none() || !self.acp_ready {
-            self.pending_prompt = Some((text, images));
+            self.pending_prompt = Some((prompt_text, images));
             self.ensure_acp().await;
             return;
         }
@@ -1303,7 +1324,7 @@ impl Actor {
             if let Err(e) = c.set_mode(&mode).await {
                 log::warn!("chat[{}] set_mode failed: {e}", self.session_id);
             }
-            if let Err(e) = c.prompt(&text, &images).await {
+            if let Err(e) = c.prompt(&prompt_text, &images).await {
                 log::warn!("chat[{}] prompt failed: {e}", self.session_id);
             }
         }
