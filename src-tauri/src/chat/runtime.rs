@@ -52,14 +52,6 @@ pub const K_FLUSH_MS: u64 = 50;
 /// Backlog above 64KB stretches the coalescing interval to 250ms.
 pub const K_FLUSH_LONG_MS: u64 = 250;
 pub const K_FLUSH_LONG_THRESHOLD: usize = 64 * 1024;
-/// Stall watchdog: a busy turn with zero ACP activity for this long is
-/// declared dead. Covers the hang where the CLI's internal HTTP retries all
-/// fail silently and session/prompt is never answered — without this the
-/// bubble sits on "生成中…" forever. Must exceed the CLI's own retry span
-/// (observed ~90s for 3 attempts) and is suspended during permission
-/// prompts and rate-limit countdowns.
-pub const K_TURN_STALL_SECS: u64 = 120;
-
 const PLACEHOLDER: &str = "…";
 const INTERRUPTED_MARK: &str = "（已中断）";
 
@@ -586,12 +578,6 @@ pub(crate) struct Actor {
     turn_gen: u64,
     guide_gen: u64,
     last_error: String,
-    /// Last time any ACP data arrived (event or recv). Drives the stall
-    /// watchdog; reset on every handle_event / handle_recv.
-    last_activity: std::time::Instant,
-    /// When the current busy turn started (start_send); reported in the
-    /// stall bubble so the user sees how long the turn actually ran.
-    turn_started: Option<std::time::Instant>,
 }
 
 /// Spawn the per-session actor task; returns the command sender.
@@ -656,8 +642,6 @@ pub(crate) fn spawn_actor(
         turn_gen: 0,
         guide_gen: 0,
         last_error: String::new(),
-        last_activity: std::time::Instant::now(),
-        turn_started: None,
     };
     tokio::spawn(async move { actor.run().await });
     // 启动即 reload 一次提醒：重启恢复时过期的提醒会立即触发。
@@ -673,33 +657,9 @@ async fn recv_step(client: &mut Option<Box<dyn ClientDriver>>) -> Result<bool, A
     }
 }
 
-/// Stall-watchdog arm for the select!: fires K_TURN_STALL_SECS after the last
-/// ACP activity, but only while a turn is genuinely waiting on the agent —
-/// suspended when no turn is busy, when the client is gone, while a
-/// permission question awaits the USER (agent is legitimately silent), and
-/// during rate-limit retry countdowns (up to K_RATE_LIMIT_MAX_DELAY_SEC).
-async fn stall_deadline(
-    busy: bool,
-    has_client: bool,
-    perm_pending: bool,
-    retry_active: bool,
-    last: std::time::Instant,
-) {
-    if busy && has_client && !perm_pending && !retry_active {
-        let deadline = tokio::time::Instant::from_std(last)
-            + std::time::Duration::from_secs(K_TURN_STALL_SECS);
-        tokio::time::sleep_until(deadline).await;
-    } else {
-        std::future::pending::<()>().await;
-    }
-}
-
 impl Actor {
     async fn run(&mut self) {
         loop {
-            // Precomputed outside the select!: recv_step holds &mut
-            // self.client, so the watchdog arm may not touch that field.
-            let has_client = self.client.is_some();
             tokio::select! {
                 biased;
                 cmd = self.cmd_rx.recv() => {
@@ -718,69 +678,13 @@ impl Actor {
                 r = recv_step(&mut self.client) => {
                     self.handle_recv(r);
                 }
-                () = stall_deadline(self.busy, has_client, self.perm_request_id.is_some(), self.retry_active, self.last_activity) => {
-                    self.on_turn_stall().await;
-                }
             }
         }
-    }
-
-    // ---- stall watchdog ----
-
-    /// The agent went silent mid-turn (hung model endpoint, dead network,
-    /// CLI frozen in internal retries): kill the CLI (kill_on_drop) and
-    /// surface the failure IN THE BUBBLE — previously this left "生成中…"
-    /// spinning forever with the reason only visible in the log.
-    async fn on_turn_stall(&mut self) {
-        if !self.busy {
-            return; // turn finished between the deadline and this poll
-        }
-        log::warn!(
-            "chat[{}] turn stalled: no ACP activity for {K_TURN_STALL_SECS}s, killing CLI",
-            self.session_id
-        );
-        self.cancel_retry(false);
-        // Grab diagnostics BEFORE dropping the client (drop kills the CLI).
-        let silent_secs = self.last_activity.elapsed().as_secs();
-        let turn_secs = self
-            .turn_started
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(silent_secs);
-        let stderr = self
-            .client
-            .as_ref()
-            .map(|c| c.stderr_tail())
-            .unwrap_or_default();
-        self.client = None;
-        self.acp_ready = false;
-        self.snap().acp_running = false;
-        let mut msg = format!(
-            "回合失败：超过 {K_TURN_STALL_SECS} 秒没有收到模型端点的任何数据（连接已重置）。实际静默 {silent_secs} 秒，回合已运行 {turn_secs} 秒。请检查网络/代理、Base URL 与 API Key 后重试"
-        );
-        let stderr = stderr.trim();
-        if !stderr.is_empty() {
-            msg.push_str(&format!("\n\nCLI stderr 末尾输出：\n{stderr}"));
-        }
-        self.set_error(msg.clone());
-        self.flush_stream_buffers();
-        if self.assistant_buf.trim().is_empty() {
-            self.update_last_assistant(&msg, "error");
-            self.emit_turn("error", "stallTimeout", None);
-        } else {
-            // Keep the partial reply; just close it as interrupted.
-            self.mark_interrupted();
-            self.emit_turn("interrupted", "stallTimeout", None);
-        }
-        self.assistant_buf.clear();
-        self.thinking_buf.clear();
-        self.finish_reply();
-        self.emit_status(None);
     }
 
     // ---- recv lifecycle ----
 
     fn handle_recv(&mut self, r: Result<bool, AcpError>) {
-        self.last_activity = std::time::Instant::now();
         match r {
             Ok(true) => {}
             Ok(false) => {
@@ -1161,7 +1065,6 @@ impl Actor {
     // ---- ACP events ----
 
     async fn handle_event(&mut self, ev: AcpEvent) {
-        self.last_activity = std::time::Instant::now();
         match ev {
             AcpEvent::Started { session_id } => {
                 self.acp_ready = true;
@@ -1588,7 +1491,6 @@ impl Actor {
         self.bg_wake_sent = false;
         self.turn_gen += 1;
         self.set_busy(true);
-        self.turn_started = Some(std::time::Instant::now());
         self.set_error(String::new());
         self.emit_status(None);
 
@@ -1625,7 +1527,6 @@ impl Actor {
     fn finish_reply(&mut self) {
         self.clear_permission();
         self.set_busy(false);
-        self.turn_started = None;
         // Background turn completion marks the session unread (runtime flag,
         // not persisted); opening the session clears it.
         let is_active = lock_ok(&self.shared).active_id == self.session_id;

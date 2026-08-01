@@ -116,8 +116,8 @@ pub struct SpawnConfig {
     pub cwd: String,
 }
 
-/// stderr tail kept for failure diagnostics (stall/kill bubbles): the last
-/// this many chars of everything the child wrote to stderr.
+/// stderr tail kept for failure diagnostics: the last this many chars of
+/// everything the child wrote to stderr.
 pub const K_STDERR_TAIL_CHARS: usize = 4000;
 
 /// tokio Child stdin/stdout transport. stderr is drained on a background
