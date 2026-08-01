@@ -118,15 +118,23 @@ function answerQuestion(optionId: string): void {
   <WarDialog v-model:open="open" title-text="工具权限请求" no-auto-close :dialog-width="dialogWidth">
     <template #plate>
       <div class="perm__title">{{ title }}</div>
-      <div v-if="!questionMode && detail" class="perm__detail">{{ detail }}</div>
+      <!-- question mode: the question text is the headline content — show it
+           big and centered inside the plate instead of cramped below -->
+      <div v-if="questionMode" class="perm__plate-questions">
+        <div v-for="(q, qi) in questions" :key="q.index" class="perm__plate-q">
+          <div v-if="questions.length > 1" class="perm__qhead">
+            问题 {{ qi + 1 }} / {{ questions.length }}
+          </div>
+          <div class="perm__qtext">{{ q.text || '（无问题文本）' }}</div>
+          <div v-if="q.multi_select" class="perm__qhint">
+            （该问题允许多选；ACP 通道每次仅回传一个选项）
+          </div>
+        </div>
+      </div>
+      <div v-else-if="detail" class="perm__detail">{{ detail }}</div>
     </template>
     <div v-if="questionMode" class="perm__questions">
-      <div v-for="(q, qi) in questions" :key="q.index" class="perm__question">
-        <div v-if="questions.length > 1" class="perm__qhead">问题 {{ qi + 1 }} / {{ questions.length }}</div>
-        <div class="perm__qtext">{{ q.text || '（无问题文本）' }}</div>
-        <div v-if="q.multi_select" class="perm__qhint">
-          （该问题允许多选；ACP 通道每次仅回传一个选项）
-        </div>
+      <div v-for="q in questions" :key="q.index" class="perm__question">
         <div class="perm__buttons" :class="{ grid: q.options.length > 3 }">
           <WarButton
             v-for="(o, i) in q.options"
@@ -194,6 +202,25 @@ function answerQuestion(optionId: string): void {
   justify-items: center;
 }
 
+/* question text lives in the plate (the frame art's black gold-rim area) */
+.perm__plate-questions {
+  width: 100%;
+  max-height: 120px; /* plate is ~35% of the dialog; scroll long texts */
+  overflow-y: auto;
+  scrollbar-width: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.perm__plate-q {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
 .perm__questions {
   width: 100%;
   max-height: 320px;
@@ -215,22 +242,25 @@ function answerQuestion(optionId: string): void {
   color: var(--war-text-faint);
   font-family: SimSun, serif;
   font-size: 11px;
-  align-self: flex-start;
 }
 
 .perm__qtext {
-  color: var(--war-text);
+  color: var(--war-gold-bright);
   font-family: SimSun, serif;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: bold;
+  text-align: center;
+  line-height: 1.5;
+  text-shadow:
+    -1px 0 var(--war-outline-dark), 1px 0 var(--war-outline-dark),
+    0 -1px var(--war-outline-dark), 0 1px var(--war-outline-dark);
   overflow-wrap: break-word;
-  align-self: flex-start;
 }
 
 .perm__qhint {
   color: var(--war-text-muted);
   font-family: SimSun, serif;
   font-size: 11px;
-  align-self: flex-start;
+  text-align: center;
 }
 </style>

@@ -1,19 +1,24 @@
 <script setup lang="ts">
 // Composer (features/chat.md §3): 64K cap with the three truncation paths,
 // Enter/Shift+Enter with IME guard, @ file-reference picker with :from-to
-// line suffix, Ctrl+V image paste → media cache + attachment bar (≤6),
-// permission-mode dropdown, send/enqueue button.
+// line suffix, Ctrl+V image paste → media cache + attachment bar (≤6) plus a
+// ![](<path>) embed in the draft, OS file drag-drop (image → embed +
+// attachment, project file → @reference), permission-mode dropdown,
+// send/enqueue button.
 //
 // Send path: the draft keeps short @tokens; only at send time each token is
 // expanded through read_file_range into a 【引用文件：…】 block (§3.3) and the
 // expanded text + attachment paths go to send_prompt. The draft and
 // attachments are cleared ONLY when the backend accepts (§3.2).
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { cmd, isTauri } from '../../lib/tauri';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
 import WarDropdown from '../war/WarDropdown.vue';
 import WarButton from '../war/WarButton.vue';
+import WarScrollBar from '../war/WarScrollBar.vue';
+import ComposerExpandDialog from './ComposerExpandDialog.vue';
 
 const MAX_LEN = 64000;
 const REF_INJECT_NOTE = '…（文件超过 200KB，已截断）';
@@ -23,14 +28,15 @@ const prefs = usePrefsStore();
 
 const text = ref('');
 const inputEl = ref<HTMLTextAreaElement | null>(null);
+const rootEl = ref<HTMLElement | null>(null);
 const composing = ref(false);
 
 // ---- 64K cap ----
 const notice = ref('');
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
-function showNotice(): void {
-  notice.value = `已达输入上限（${MAX_LEN} 字），超出部分已截断；大段内容请作为附件发送`;
+function showNotice(msg?: string): void {
+  notice.value = msg ?? `已达输入上限（${MAX_LEN} 字），超出部分已截断；大段内容请作为附件发送`;
   if (noticeTimer) clearTimeout(noticeTimer);
   noticeTimer = setTimeout(() => (notice.value = ''), 6000);
 }
@@ -98,6 +104,95 @@ function onKeydown(e: KeyboardEvent): void {
   }
 }
 
+// ---- markdown image embed + file drag-drop ----
+// Pasted/dropped images go to the attachment bar (the model sees them) AND
+// leave a ![name](<path>) embed in the draft so the sent bubble renders the
+// image inline (ChatBubble skips re-thumbnailing embedded paths). Dropped
+// non-image files inside the project insert an @reference (§3.3); outside
+// files are rejected with a notice.
+const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
+
+function isImagePath(p: string): boolean {
+  const ext = p.split('.').pop()?.toLowerCase() ?? '';
+  return IMAGE_EXTS.includes(ext);
+}
+
+function fileNameOf(p: string): string {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? p;
+}
+
+function mdImageFor(p: string): string {
+  // markdown-it strips '\' as escape chars inside the destination — store
+  // Windows paths with forward slashes (the asset protocol accepts both).
+  return `![${fileNameOf(p)}](<${p.replace(/\\/g, '/')}>)`;
+}
+
+/** Project-relative path for @ references; '' when the file is outside. */
+function relUnderProject(p: string): string {
+  const root = (chat.projectDir || '').replace(/[\\/]+$/, '');
+  if (!root) return '';
+  const norm = p.replace(/\//g, '\\');
+  const r = root.replace(/\//g, '\\');
+  if (!norm.toLowerCase().startsWith(r.toLowerCase() + '\\')) return '';
+  return norm.slice(r.length + 1).replace(/\\/g, '/');
+}
+
+/** Insert at the cursor (replacing any selection), keeping the caret after it. */
+function insertAtCursor(snippet: string): void {
+  const el = inputEl.value;
+  const s = el ? el.selectionStart : text.value.length;
+  const t = el ? el.selectionEnd : text.value.length;
+  text.value = text.value.slice(0, s) + snippet + text.value.slice(t);
+  truncateInput(); // an embed past the cap is clipped like typed input
+  void Promise.resolve().then(() => {
+    if (el) {
+      el.selectionStart = el.selectionEnd = s + snippet.length;
+      el.focus();
+    }
+  });
+}
+
+/** OS file drop (Tauri window drag-drop event, scoped to the composer rect). */
+function onDropPaths(paths: string[]): void {
+  let snippet = '';
+  const images: string[] = [];
+  for (const p of paths) {
+    if (isImagePath(p)) {
+      images.push(p);
+      snippet += (snippet ? '\n' : '') + mdImageFor(p);
+    } else {
+      const rel = relUnderProject(p);
+      if (rel) snippet += (snippet ? '\n' : '') + '@' + rel;
+      else showNotice(`「${fileNameOf(p)}」不在项目目录内，无法 @ 引用（图片可直接拖入）`);
+    }
+  }
+  if (images.length) chat.addAttachments(images);
+  if (snippet) insertAtCursor(snippet);
+}
+
+let unlistenDrag: (() => void) | null = null;
+onMounted(async () => {
+  if (!isTauri) return;
+  try {
+    unlistenDrag = await getCurrentWebviewWindow().onDragDropEvent((ev) => {
+      if (ev.payload.type !== 'drop') return;
+      const r = rootEl.value?.getBoundingClientRect();
+      if (!r) return;
+      const scale = window.devicePixelRatio || 1; // payload position is physical px
+      const x = ev.payload.position.x / scale;
+      const y = ev.payload.position.y / scale;
+      if (x < r.left || x > r.right || y < r.top || y > r.bottom) return;
+      onDropPaths(ev.payload.paths);
+    });
+  } catch (e) {
+    console.warn('[composer] drag-drop listener failed', e);
+  }
+});
+onBeforeUnmount(() => {
+  unlistenDrag?.();
+});
+
 // ---- paste: image → media cache; text → capped head insert (§3.1 path ③) ----
 async function onPaste(e: ClipboardEvent): Promise<void> {
   const items = e.clipboardData?.items;
@@ -113,7 +208,10 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
           sessionId: chat.sessionId,
           bytes: Array.from(new Uint8Array(buf)),
         });
-        if (path) chat.addAttachments([path]);
+        if (path) {
+          chat.addAttachments([path]);
+          insertAtCursor(mdImageFor(path)); // inline render in the sent bubble
+        }
       } catch (err) {
         console.warn('[composer] save_clipboard_image failed', err);
       }
@@ -371,10 +469,18 @@ watch(
 );
 
 onMounted(() => inputEl.value?.focus());
+
+// ---- expand-to-dialog (⛶): edit the draft in a roomy popup ----
+const expandOpen = ref(false);
+
+function onExpandConfirm(v: string): void {
+  text.value = v.slice(0, MAX_LEN);
+  void Promise.resolve().then(() => inputEl.value?.focus());
+}
 </script>
 
 <template>
-  <div class="composer">
+  <div ref="rootEl" class="composer">
     <!-- truncation notice -->
     <div v-if="notice" class="composer__notice" :style="{ fontSize: prefs.fs(11) + 'px' }">
       {{ notice }}
@@ -407,20 +513,30 @@ onMounted(() => inputEl.value?.focus());
       </div>
     </div>
 
-    <textarea
-      ref="inputEl"
-      v-model="text"
-      class="composer__field"
-      placeholder="输入消息…（@ 引用文件，Ctrl+V 粘贴图片）"
-      :style="{ fontSize: prefs.fs(14) + 'px' }"
-      @input="onInput"
-      @keydown="onKeydown"
-      @paste="onPaste"
-      @compositionstart="composing = true"
-      @compositionend="composing = false; onInput()"
-      @click="updatePicker"
-      @keyup="updatePicker"
-    ></textarea>
+    <div class="composer__field-wrap">
+      <textarea
+        ref="inputEl"
+        v-model="text"
+        class="composer__field"
+        placeholder="输入消息…（@ 引用文件，Ctrl+V 粘贴图片）"
+        :style="{ fontSize: prefs.fs(14) + 'px' }"
+        @input="onInput"
+        @keydown="onKeydown"
+        @paste="onPaste"
+        @compositionstart="composing = true"
+        @compositionend="composing = false; onInput()"
+        @click="updatePicker"
+        @keyup="updatePicker"
+      ></textarea>
+      <span
+        class="composer__expand"
+        :style="{ fontSize: prefs.fs(16) + 'px' }"
+        title="放大输入框，在弹框中编辑"
+        @click="expandOpen = true"
+        >⛶</span
+      >
+      <WarScrollBar :target="inputEl" />
+    </div>
 
     <div class="composer__side">
       <div class="composer__tools">
@@ -435,11 +551,19 @@ onMounted(() => inputEl.value?.focus());
       </div>
       <WarButton
         :width="150"
+        :art-aspect="5"
+        skin="blue"
         :text="chat.sendLabel"
         :enabled="sendEnabled"
         @activated="send"
       />
     </div>
+
+    <ComposerExpandDialog
+      v-model:open="expandOpen"
+      :initial-text="text"
+      @confirm="onExpandConfirm"
+    />
   </div>
 </template>
 
@@ -470,7 +594,7 @@ onMounted(() => inputEl.value?.focus());
 
 .composer__counter {
   position: absolute;
-  right: 148px;
+  right: 176px; /* side column (158px) + WC3 scrollbar + gap */
   top: 2px;
   z-index: 5;
   color: var(--war-text-muted);
@@ -491,10 +615,10 @@ onMounted(() => inputEl.value?.focus());
   overflow-y: auto;
   border-style: solid;
   border-color: transparent;
-  border-width: 14px 16px 13px 20px;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
+  border-width: 13px 14px 12px 14px;
+  border-image: url('/assets/ui/dropdown/dropdown_panel2.png') 21 23 20 23 fill stretch;
   box-sizing: border-box;
-  background: #0d1116f0;
+  background: #0d1116f0 padding-box;
   padding: 8px;
 }
 
@@ -521,6 +645,14 @@ onMounted(() => inputEl.value?.focus());
   font-family: SimSun, serif;
 }
 
+.composer__field-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 4px;
+}
+
 .composer__field {
   flex: 1;
   min-width: 0;
@@ -532,6 +664,7 @@ onMounted(() => inputEl.value?.focus());
   font-family: SimSun, serif;
   padding: 6px 8px;
   outline: none;
+  scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
 }
 
 .composer__field:focus {
@@ -555,6 +688,23 @@ onMounted(() => inputEl.value?.focus());
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.composer__expand {
+  position: absolute;
+  top: 4px;
+  right: 30px; /* left of the WC3 scrollbar */
+  z-index: 6;
+  color: var(--war-gold);
+  user-select: none;
+  line-height: 1;
+  padding: 2px 4px;
+  background: #10141fcc; /* keep the glyph readable over typed text */
+  border-radius: 3px;
+}
+
+.composer__expand:hover {
+  color: var(--war-gold-bright);
 }
 
 .composer__mode {

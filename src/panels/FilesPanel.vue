@@ -10,6 +10,7 @@ import { cmd, openPath } from '../lib/tauri';
 import { useChatStore } from '../stores/chat';
 import { usePrefsStore } from '../stores/prefs';
 import WarMenu from '../components/war/WarMenu.vue';
+import WarScrollBar from '../components/war/WarScrollBar.vue';
 
 interface DirEntry {
   name: string;
@@ -30,6 +31,9 @@ const prefs = usePrefsStore();
 
 const rows = ref<TreeRow[]>([]);
 const loaded = new Set<string>(); // rel paths of expanded dirs ('' = root)
+
+// ---- scroll target (WC3 WarScrollBar) ----
+const listEl = ref<HTMLElement | null>(null);
 
 const root = computed(() => chat.meta?.workDir || chat.meta?.projectDir || chat.projectDir);
 
@@ -146,33 +150,36 @@ const emptyText = computed(() =>
     <div class="tree__bar">
       <span class="tree__refresh" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="reload">刷新</span>
     </div>
-    <div class="tree__list">
-      <div v-if="rows.length === 0" class="tree__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">
-        {{ emptyText }}
-      </div>
-      <div
-        v-for="(row, i) in rows"
-        :key="row.rel"
-        class="tree__row"
-        :style="{ paddingLeft: row.depth * 14 + 2 + 'px' }"
-        @click="onRowClick(row, i)"
-        @contextmenu.prevent="onContextMenu($event, row)"
-      >
-        <span v-if="row.dir" class="tree__arrow">{{ row.expanded ? '▼' : '▶' }}</span>
-        <span v-else class="tree__arrow-file"></span>
-        <img
-          class="tree__icon"
-          :src="row.dir ? '/assets/wc3_extracted/ui/icon-folder.png' : '/assets/wc3_extracted/ui/icon-file.png'"
-          draggable="false"
-        />
-        <span
-          class="tree__name"
-          :class="{ dir: row.dir }"
-          :style="{ fontSize: prefs.fs(12) + 'px' }"
-          :title="row.rel"
-          >{{ row.name }}</span
+    <div class="tree__list-wrap">
+      <div ref="listEl" class="tree__list">
+        <div v-if="rows.length === 0" class="tree__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">
+          {{ emptyText }}
+        </div>
+        <div
+          v-for="(row, i) in rows"
+          :key="row.rel"
+          class="tree__row"
+          :style="{ paddingLeft: row.depth * 14 + 2 + 'px' }"
+          @click="onRowClick(row, i)"
+          @contextmenu.prevent="onContextMenu($event, row)"
         >
+          <span v-if="row.dir" class="tree__arrow">{{ row.expanded ? '▼' : '▶' }}</span>
+          <span v-else class="tree__arrow-file"></span>
+          <img
+            class="tree__icon"
+            :src="row.dir ? '/assets/wc3_extracted/ui/icon-folder.png' : '/assets/wc3_extracted/ui/icon-file.png'"
+            draggable="false"
+          />
+          <span
+            class="tree__name"
+            :class="{ dir: row.dir }"
+            :style="{ fontSize: prefs.fs(12) + 'px' }"
+            :title="row.rel"
+            >{{ row.name }}</span
+          >
+        </div>
       </div>
+      <WarScrollBar :target="listEl" />
     </div>
 
     <WarMenu
@@ -209,11 +216,17 @@ const emptyText = computed(() =>
   color: var(--war-gold-bright);
 }
 
-.tree__list {
+.tree__list-wrap {
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+
+.tree__list {
+  flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  scrollbar-width: none;
+  scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
 }
 
 .tree__empty {

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// Warcraft-menu style button (WarButton.qml). Two skins:
+// Warcraft-menu style button (WarButton.qml). Three skins:
 //   menu   — btn_normal/hover/pressed, artAspect 4.87 (default)
 //   dialog — dialog_btn_*, artAspect 5.34
+//   blue   — btn_blue_* (blue center strip only, no metal frame), artAspect 6.08
 // Height is ALWAYS derived from width (width / artAspect) — never set from
 // outside. Disabled or uiGate-busy: opacity 0.38, no hover/click/shortcut.
 // Click plays the `click` SFX. Three stacked <img> swap on hover/pressed
@@ -15,7 +16,7 @@ const props = withDefaults(
     text: string;
     width?: number; // canonical menu width 276
     artAspect?: number;
-    skin?: 'menu' | 'dialog';
+    skin?: 'menu' | 'dialog' | 'blue';
     enabled?: boolean;
     /** Single-letter shortcut (main menu O/C/L/S/T/A, page B/L/R...). */
     shortcutKey?: string;
@@ -35,9 +36,12 @@ const height = computed(() => Math.round(props.width / props.artAspect));
 const labelSize = computed(() => Math.max(13, Math.min(19, Math.round(props.width * 0.075))));
 const disabled = computed(() => !props.enabled || ui.busy);
 
-const srcNormal = computed(() => `/assets/ui/buttons/${props.skin === 'dialog' ? 'dialog_btn' : 'btn'}_normal.png`);
-const srcHover = computed(() => `/assets/ui/buttons/${props.skin === 'dialog' ? 'dialog_btn' : 'btn'}_hover.png`);
-const srcPressed = computed(() => `/assets/ui/buttons/${props.skin === 'dialog' ? 'dialog_btn' : 'btn'}_pressed.png`);
+const srcPrefix = computed(() =>
+  props.skin === 'dialog' ? 'dialog_btn' : props.skin === 'blue' ? 'btn_blue' : 'btn',
+);
+const srcNormal = computed(() => `/assets/ui/buttons/${srcPrefix.value}_normal.png`);
+const srcHover = computed(() => `/assets/ui/buttons/${srcPrefix.value}_hover.png`);
+const srcPressed = computed(() => `/assets/ui/buttons/${srcPrefix.value}_pressed.png`);
 const currentSrc = computed(() => {
   if (!disabled.value && pressed.value) return srcPressed.value;
   if (!disabled.value && hover.value) return srcHover.value;
@@ -73,7 +77,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
     @mousedown="pressed = true"
     @mouseup="pressed = false"
   >
-    <img :src="currentSrc" :alt="text" draggable="false" />
+    <!-- blue skin: fill (not contain) so the strip can match an exact
+         width×height box (e.g. the composer's 150x30 dropdown row) -->
+    <img
+      :src="currentSrc"
+      :alt="text"
+      draggable="false"
+      :style="{ objectFit: skin === 'blue' ? 'fill' : 'contain' }"
+    />
     <span class="war-btn__label" :style="{ fontSize: labelSize + 'px' }">{{ text }}</span>
   </div>
 </template>

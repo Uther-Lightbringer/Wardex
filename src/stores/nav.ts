@@ -1,5 +1,5 @@
 // Page state machine + the WC3 three-stage transition (docs/ui-design.md §5.6).
-// Five page states: main | config | sessionSelect | chat | todo.
+// Six page states: main | config | sessionSelect | chat | todo | usage.
 //
 // All navigation is the same "pull up → wait for the popUp SFX → drop down":
 //   1. Up-slide (770ms, ease-in-quad) of the current layer + popUp SFX.
@@ -23,7 +23,7 @@ import { delay, easeInQuad, easeOutQuad, tween } from '../lib/animate';
 import { play, POP_UP_SOUND_MS } from '../lib/sfx';
 import { useUiStore } from './ui';
 
-export type PageId = 'main' | 'config' | 'sessionSelect' | 'chat' | 'todo';
+export type PageId = 'main' | 'config' | 'sessionSelect' | 'chat' | 'todo' | 'usage';
 
 const POP_UP_DUR = 770; // up-slide of menu / overlay band
 const MENU_DOWN_DUR = 770; // main menu slide-down

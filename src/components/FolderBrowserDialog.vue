@@ -66,6 +66,7 @@ function normalizePath(raw: string): string {
 }
 
 function startPathEdit(): void {
+  if (pathEditing.value) return;
   pathError.value = '';
   pathDraft.value = currentPath.value;
   pathEditing.value = true;
@@ -245,30 +246,29 @@ watch(
 
         <!-- drive dropdown + path bar (editable) -->
         <div class="fb__pathbar">
-          <div class="fb__pathbar-frame"></div>
           <WarDropdown
             class="fb__drive"
             :options="drives"
             :model-value="drives.indexOf(currentDrive)"
             @activated="(i: number) => setDrive(drives[i])"
           />
-          <input
-            v-if="pathEditing"
-            ref="pathInput"
-            v-model="pathDraft"
-            class="war-inline-input fb__path-input"
-            spellcheck="false"
-            @input="pathError = ''"
-            @keydown.enter.prevent="confirmPathEdit"
-            @keydown.esc.stop="cancelPathEdit"
-            @keydown.stop
-          />
-          <span
-            v-else
-            class="fb__path"
-            title="点击输入路径"
-            @click="startPathEdit"
-          >{{ currentPath }}</span>
+          <div class="fb__field" @click="startPathEdit">
+            <input
+              v-if="pathEditing"
+              ref="pathInput"
+              v-model="pathDraft"
+              class="war-inline-input fb__path-input"
+              spellcheck="false"
+              @input="pathError = ''"
+              @keydown.enter.prevent="confirmPathEdit"
+              @keydown.esc.stop="cancelPathEdit"
+              @keydown.stop
+              @click.stop
+            />
+            <!-- \u200E (LRM): pins the trailing "\" so the rtl-ellipsis trick
+                 below can't flip "C:\" into ":C" via bidi reordering -->
+            <span v-else class="fb__path" title="点击输入路径">{{ currentPath + '\u200E' }}</span>
+          </div>
         </div>
 
         <!-- create/path error row -->
@@ -359,8 +359,8 @@ watch(
   align-items: center;
   border-style: solid;
   border-color: transparent;
-  border-width: 14px 16px 13px 20px;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
+  border-width: 13px 14px 12px 14px;
+  border-image: url('/assets/ui/dropdown/dropdown_panel2.png') 21 23 20 23 fill stretch;
   box-sizing: border-box;
 }
 
@@ -373,32 +373,30 @@ watch(
 }
 
 .fb__pathbar {
-  position: relative;
-  height: 40px;
+  height: 32px;
   flex: none;
   display: flex;
-  align-items: center;
-  padding: 0 12px 0 18px;
-  gap: 8px;
+  align-items: stretch;
+  gap: 10px;
   box-sizing: border-box;
 }
 
-.fb__pathbar-frame {
-  position: absolute;
-  inset: 0;
-  border-style: solid;
-  border-color: transparent;
-  border-width: 14px 16px 13px 20px;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
+/* Plain address text next to the drive dropdown — no art frame. */
+.fb__field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
   box-sizing: border-box;
-  pointer-events: none;
+  cursor: text;
 }
 
 .fb__path {
   position: relative;
   flex: 1;
-  height: 30px;
-  line-height: 30px;
+  min-width: 0;
   color: var(--war-text);
   font-size: 14px;
   font-family: SimSun, serif;
@@ -407,27 +405,24 @@ watch(
   text-overflow: ellipsis;
   direction: rtl;
   text-align: left;
-  cursor: text;
-  border-radius: 3px;
 }
 
-.fb__path:hover {
-  background: #32509640;
+.fb__field:hover .fb__path {
   color: var(--war-gold);
 }
 
 .fb__path-input {
   position: relative;
   flex: 1;
-  height: 30px;
+  min-width: 0;
+  height: 26px;
   font-size: 14px;
   font-family: SimSun, serif;
 }
 
 .fb__drive {
-  position: relative;
   width: 88px;
-  height: 30px;
+  height: 32px;
   flex: none;
 }
 

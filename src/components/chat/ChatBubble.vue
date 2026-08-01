@@ -15,10 +15,11 @@
 // stay open (ChatBubble.qml:113-123 parity).
 import { computed, onBeforeUnmount, onMounted, onUpdated, reactive, ref, watch } from 'vue';
 import { fileSrc, openPath } from '../../lib/tauri';
-import { renderMarkdown } from '../../lib/markdown';
+import { renderMarkdown, renderUserMarkdown } from '../../lib/markdown';
 import { copyText } from '../../lib/clipboard';
 import { usePrefsStore } from '../../stores/prefs';
 import { useChatStore, type ChatMessage, type ChatSegment } from '../../stores/chat';
+import { formatTokens } from '../../lib/format';
 import ProcessDialog from './ProcessDialog.vue';
 
 const props = defineProps<{
@@ -57,6 +58,11 @@ const timeText = computed(() => {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 });
+
+// ---- token usage (assistant, final turns only) ----
+const usage = computed(() =>
+  !isUser.value && !props.streaming ? props.row.usage : undefined,
+);
 
 // ---- segments ----
 
@@ -168,6 +174,30 @@ onMounted(registerLive);
 onUpdated(registerLive);
 onBeforeUnmount(() => chat.registerStreamTarget(props.row.id, '', null));
 
+// ---- inline-image lightbox (markdown ![](…) embeds) ----
+// v-html content can't carry Vue handlers, so clicks are delegated from the
+// bubble body: any <img> inside .md-body opens the fullscreen preview.
+const lightboxSrc = ref('');
+
+function onBodyClick(e: MouseEvent): void {
+  const t = e.target as HTMLElement;
+  if (t.tagName === 'IMG' && t.closest('.md-body')) {
+    lightboxSrc.value = (t as HTMLImageElement).src;
+  }
+}
+
+function onLightboxKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    lightboxSrc.value = '';
+  }
+}
+watch(lightboxSrc, (v) => {
+  if (v) window.addEventListener('keydown', onLightboxKey, true);
+  else window.removeEventListener('keydown', onLightboxKey, true);
+});
+onBeforeUnmount(() => window.removeEventListener('keydown', onLightboxKey, true));
+
 // ---- copy (lazy: full text assembled only on click, R1) ----
 const copied = ref(false);
 let copyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -189,6 +219,11 @@ async function copyBody(): Promise<void> {
 onBeforeUnmount(() => {
   if (copyTimer) clearTimeout(copyTimer);
 });
+
+// ---- branch (fork the session at this user message) ----
+function branchHere(): void {
+  void chat.branchFromMessage(props.row.id);
+}
 
 // ---- long user message fold (四.8) ----
 // Pasted logs etc.: over ~15 lines or ~800 chars the bubble clamps to the
@@ -212,6 +247,23 @@ function fileName(p: string): string {
   const parts = p.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? p;
 }
+
+// ---- user pasted-image markdown (Composer inserts ![name](<path>)) ----
+// User text stays plain EXCEPT when it embeds an image — only then does it
+// go through the breaks:true user renderer (renderUserMarkdown).
+const MD_IMG_RE = /!\[[^\]]*\]\(/;
+const userMdHtml = computed(() =>
+  isUser.value && MD_IMG_RE.test(displayBody.value) ? renderUserMarkdown(displayBody.value) : '',
+);
+
+// Attachments already embedded in the message text as markdown images are
+// not repeated as thumbnails below the bubble. The embed normalizes '\' to
+// '/' (markdown destinations), so compare slash-insensitively.
+const visibleAtts = computed(() =>
+  (props.row.attachments ?? []).filter(
+    (p) => !displayBody.value.includes(p.replace(/\\/g, '/')),
+  ),
+);
 </script>
 
 <template>
@@ -230,6 +282,7 @@ function fileName(p: string): string {
         class="bubble-body"
         :class="{ error: isError, streaming: props.streaming }"
         :style="{ fontSize: fs(14) + 'px' }"
+        @click="onBodyClick"
       >
         <!-- header: name · time · status · copy -->
         <div class="bubble-head" :class="{ user: isUser }">
@@ -247,11 +300,29 @@ function fileName(p: string): string {
             >{{ statusLabel }}</span
           >
           <span
+            v-if="usage"
+            class="bubble-head__usage"
+            :style="{ fontSize: fs(11) + 'px' }"
+          >
+            <span class="bubble-head__usage-in">↑</span
+            ><span class="bubble-head__usage-num">{{ formatTokens(usage.inputTokens) }}</span>
+            <span class="bubble-head__usage-out">↓</span
+            ><span class="bubble-head__usage-num">{{ formatTokens(usage.outputTokens) }}</span>
+          </span>
+          <span
             v-if="!isUser && !streaming"
             class="bubble-head__md"
             :style="{ fontSize: fs(11) + 'px' }"
             @click="mdEnabled = !mdEnabled"
             >{{ mdEnabled ? '原文' : '渲染' }}</span
+          >
+          <span
+            v-if="isUser"
+            class="bubble-head__branch"
+            :style="{ fontSize: fs(11) + 'px' }"
+            title="从此消息分支新会话"
+            @click="branchHere"
+            >分支</span
           >
           <span
             class="bubble-head__copy"
@@ -328,7 +399,13 @@ function fileName(p: string): string {
         <!-- fallback: user rows and the pending placeholder have no segments -->
         <div v-else-if="displayBody" class="seg-text">
           <div
-            v-if="!isUser && mdEnabled"
+            v-if="userMdHtml"
+            class="seg-text__md md-body"
+            :class="{ 'user-clamped': userLong && !userExpanded }"
+            v-html="userMdHtml"
+          ></div>
+          <div
+            v-else-if="!isUser && mdEnabled"
             class="seg-text__md md-body"
             v-html="markdownOf(displayBody)"
           ></div>
@@ -348,9 +425,9 @@ function fileName(p: string): string {
           </div>
         </div>
 
-        <!-- user attachments -->
-        <div v-if="row.attachments && row.attachments.length" class="bubble-atts">
-          <template v-for="(p, i) in row.attachments" :key="i">
+        <!-- user attachments (paths already embedded as markdown images are skipped) -->
+        <div v-if="visibleAtts.length" class="bubble-atts">
+          <template v-for="(p, i) in visibleAtts" :key="i">
             <img
               v-if="isImagePath(p)"
               class="bubble-atts__img"
@@ -365,6 +442,14 @@ function fileName(p: string): string {
             </div>
           </template>
         </div>
+
+        <!-- inline-image lightbox -->
+        <Teleport to="body">
+          <div v-if="lightboxSrc" class="imglb" @click="lightboxSrc = ''">
+            <img class="imglb__img" :src="lightboxSrc" draggable="false" />
+            <span class="imglb__hint" :style="{ fontSize: fs(11) + 'px' }">点击任意处或 Esc 关闭</span>
+          </div>
+        </Teleport>
       </div>
     </div>
   </div>
@@ -500,9 +585,35 @@ function fileName(p: string): string {
   font-weight: bold;
 }
 
+.bubble-head__usage {
+  white-space: nowrap;
+}
+
+.bubble-head__usage-in {
+  color: var(--war-error);
+}
+
+.bubble-head__usage-out {
+  color: #6fd17f;
+  margin-left: 6px;
+}
+
+.bubble-head__usage-num {
+  color: var(--war-text-muted);
+  margin-left: 2px;
+}
+
 .bubble-head__copy {
   color: #a0a8b8;
   margin-left: auto;
+}
+
+.bubble-head__branch {
+  color: #a0a8b8;
+}
+
+.bubble-head__branch:hover {
+  color: var(--war-gold-bright);
 }
 
 .bubble-head__md {
@@ -539,7 +650,8 @@ function fileName(p: string): string {
 
 /* 四.8: collapsed long user message — clamp to the first lines (pre-wrap
    newlines are preserved inside the line-clamp box). */
-.seg-text__plain.user-clamped {
+.seg-text__plain.user-clamped,
+.seg-text__md.user-clamped {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 6;
@@ -750,6 +862,39 @@ function fileName(p: string): string {
 }
 .md-body a:hover {
   color: var(--war-gold);
+}
+.md-body img {
+  max-width: min(100%, 320px);
+  max-height: 320px;
+  object-fit: contain;
+  border-radius: 2px;
+  cursor: zoom-in;
+}
+
+/* inline-image lightbox (unscoped: teleported to body) */
+.imglb {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  background: #000000d0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.imglb__img {
+  max-width: 94vw;
+  max-height: 90vh;
+  object-fit: contain;
+}
+.imglb__hint {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: var(--war-text-faint);
+  font-family: SimSun, serif;
+  user-select: none;
 }
 .md-body table {
   border-collapse: collapse;

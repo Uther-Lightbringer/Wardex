@@ -43,6 +43,16 @@ pub struct Agent {
     pub cli_path: String,
     #[serde(rename = "createdAt", deserialize_with = "de_ms_i64")]
     pub created_at: i64,
+    /// Per-agent default thinking effort ("" = follow CLI). Non-empty values
+    /// make WarDex declare the model in ~/.kimi-code/config.toml with
+    /// support_efforts so the ACP thinking picker shows real levels.
+    #[serde(rename = "defaultEffort")]
+    pub default_effort: String,
+    /// Context size (in K = 1024 tokens) stamped into the config.toml model
+    /// aliases that the 刷新-button bulk sync writes for this agent.
+    /// 0 = fallback 256K.
+    #[serde(rename = "maxContextK")]
+    pub max_context_k: u32,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(rename = "extraArgs")]
@@ -84,6 +94,8 @@ impl Default for Agent {
             base_url: String::new(),
             cli_path: default_cli_path(),
             created_at: 0,
+            default_effort: String::new(),
+            max_context_k: 0,
             enabled: true,
             extra_args: String::new(),
             id: String::new(),
@@ -108,6 +120,10 @@ pub struct AgentPatch {
     pub model: Option<String>,
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
+    #[serde(rename = "defaultEffort")]
+    pub default_effort: Option<String>,
+    #[serde(rename = "maxContextK")]
+    pub max_context_k: Option<u32>,
     #[serde(rename = "cliPath")]
     pub cli_path: Option<String>,
     #[serde(rename = "apiKey")]
@@ -287,6 +303,12 @@ impl AgentStore {
         }
         if let Some(v) = &patch.base_url {
             a.base_url = v.trim().to_string();
+        }
+        if let Some(v) = &patch.default_effort {
+            a.default_effort = v.trim().to_lowercase();
+        }
+        if let Some(v) = patch.max_context_k {
+            a.max_context_k = v;
         }
         if let Some(v) = &patch.cli_path {
             a.cli_path = v.trim().to_string();

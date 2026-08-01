@@ -27,6 +27,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::acp::events::TurnUsage;
 use crate::store::json::{
     append_json_line, contains_case_insensitive, de_ms_i64, ellipsize,
     find_case_insensitive, left_chars, now_ms, snippet_around, write_text_atomic,
@@ -53,6 +54,8 @@ pub enum SessionsError {
     MetaWrite,
     #[error("无法删除会话目录")]
     DeleteFailed,
+    #[error("分支点消息不存在")]
+    BranchMessageMissing,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +128,10 @@ pub struct MessageRow {
     pub segments: Vec<Value>,
     /// Local file paths attached to a user message (images etc.).
     pub attachments: Vec<String>,
+    /// Token usage reported by the agent at turn end (assistant rows only;
+    /// absent on old rows and turns without usage).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TurnUsage>,
 }
 
 /// Wire shape of one JSONL line. `status` defaults to "done" when the key is
@@ -145,6 +152,7 @@ struct MessageLine {
     tool_calls: Vec<Value>,
     segments: Vec<Value>,
     attachments: Vec<String>,
+    usage: Option<TurnUsage>,
 }
 
 impl Default for MessageLine {
@@ -160,6 +168,7 @@ impl Default for MessageLine {
             tool_calls: Vec::new(),
             segments: Vec::new(),
             attachments: Vec::new(),
+            usage: None,
         }
     }
 }
@@ -181,6 +190,7 @@ impl MessageLine {
             tool_calls: self.tool_calls,
             segments: self.segments,
             attachments: self.attachments,
+            usage: self.usage,
         };
         if row.segments.is_empty() {
             synthesize_legacy_segments(&mut row);
@@ -523,6 +533,64 @@ impl SessionStore {
 
     pub fn is_open(&self, session_id: &str) -> bool {
         self.open.contains_key(session_id)
+    }
+
+    /// branchSession: fork `session_id` into a NEW session holding messages
+    /// [0..=idx] where idx is `up_to_message_id`'s position. The branch
+    /// inherits provider/model/agent/work/project dirs but NOT acpSessionId
+    /// (the fork starts a fresh runtime conversation). The source session is
+    /// untouched. Returns the new session's meta.
+    pub fn branch_session(
+        &mut self,
+        session_id: &str,
+        up_to_message_id: &str,
+    ) -> Result<SessionMeta, SessionsError> {
+        if !self.ensure_open(session_id) {
+            return Err(SessionsError::BranchMessageMissing);
+        }
+        let (src_meta, rows) = {
+            let open = self.open.get(session_id).ok_or(SessionsError::BranchMessageMissing)?;
+            let idx = open
+                .messages
+                .iter()
+                .position(|m| m.id == up_to_message_id)
+                .ok_or(SessionsError::BranchMessageMissing)?;
+            (open.meta.clone(), open.messages[..=idx].to_vec())
+        };
+
+        let agent = AgentSnapshot {
+            id: src_meta.agent_id.clone(),
+            name: src_meta.agent_name.clone(),
+            provider: src_meta.provider.clone(),
+            model: src_meta.model.clone(),
+            base_url: src_meta.base_url.clone(),
+            cli_path: src_meta.cli_path.clone(),
+        };
+        let new_id = self.create_session(&agent, &src_meta.project_dir)?;
+
+        // Title: keep the source's title (+ 分支) once it has one; a still-
+        // untitled source derives from the first user message, same as the
+        // append_message title hint.
+        let title = if src_meta.title != DEFAULT_TITLE && !src_meta.title.is_empty() {
+            left_chars(&format!("{} （分支）", src_meta.title.trim()), 48)
+        } else {
+            rows.iter()
+                .find(|m| m.role == "user" && !m.content.trim().is_empty())
+                .map(|m| ellipsize(&m.content, 24))
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| DEFAULT_TITLE.to_string())
+        };
+        let summary_source = rows
+            .last()
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        if let Some(open) = self.open.get_mut(&new_id) {
+            open.messages = rows;
+        }
+        self.rewrite_messages_file(&new_id)?;
+        self.update_meta_after_write(&new_id, &summary_source, Some(&title))?;
+        Ok(self.meta_for(&new_id).unwrap_or_default())
     }
 
     /// Number of resident message models (for tests / memory HUD).
@@ -972,6 +1040,7 @@ impl SessionStore {
         &mut self,
         session_id: &str,
         status: Option<&str>,
+        usage: Option<TurnUsage>,
     ) -> Result<bool, SessionsError> {
         if !self.ensure_open(session_id) {
             return Ok(false);
@@ -991,6 +1060,9 @@ impl SessionStore {
                 if !s.is_empty() {
                     row.status = s.to_string();
                 }
+            }
+            if usage.is_some() {
+                row.usage = usage;
             }
             if row.content == PLACEHOLDER && row.status == "done" {
                 row.content = EMPTY_REPLY.to_string();

@@ -16,6 +16,10 @@ export interface AgentRecord {
   provider: string;
   model: string;
   baseUrl: string;
+  /** "" = 跟随 CLI；否则为 thinking effort 档位（low/high/…，见 models.rs）。 */
+  defaultEffort: string;
+  /** 刷新批量同步写入 config.toml 的 max_context_size，单位 K；0 = 256K 兜底。 */
+  maxContextK: number;
   cliPath: string;
   /** PLAINTEXT from the backend — display surfaces must maskKey() it. */
   apiKey: string;
@@ -37,6 +41,8 @@ export type AgentPatch = Partial<
     | 'provider'
     | 'model'
     | 'baseUrl'
+    | 'defaultEffort'
+    | 'maxContextK'
     | 'cliPath'
     | 'apiKey'
     | 'extraArgs'
@@ -98,6 +104,8 @@ export const useAgentsStore = defineStore('agents', {
     probeCache: {} as Record<string, ProbeResult>,
     probing: {} as Record<string, boolean>,
     lastError: '',
+    /** Non-fatal save warning (e.g. kimi config.toml effort sync failed). */
+    lastWarning: '',
     loaded: false,
   }),
   getters: {
@@ -150,7 +158,7 @@ export const useAgentsStore = defineStore('agents', {
     async save(id: string, patch: AgentPatch): Promise<boolean> {
       try {
         this.lastError = '';
-        await cmd('save_agent', { agentId: id, patch });
+        this.lastWarning = (await cmd<string | null>('save_agent', { agentId: id, patch }, null)) ?? '';
         await this.refresh();
         return true;
       } catch (e) {

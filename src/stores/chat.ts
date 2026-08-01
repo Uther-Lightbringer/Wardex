@@ -31,6 +31,16 @@ export interface ChatSegment {
   [key: string]: unknown;
 }
 
+/** Token usage of one finished turn (chat://turn payload / messages.jsonl row). */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedReadTokens?: number;
+  cachedWriteTokens?: number;
+  thoughtTokens?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: string;
@@ -42,6 +52,7 @@ export interface ChatMessage {
   toolCalls: unknown[];
   segments: ChatSegment[];
   attachments: string[];
+  usage?: TurnUsage;
 }
 
 export interface ChatStatus {
@@ -345,15 +356,17 @@ export const useChatStore = defineStore('chat', {
       this.rows = next;
     },
 
-    onTurn(p: { sessionId: string; status: string }): void {
+    onTurn(p: { sessionId: string; status: string; usage?: TurnUsage }): void {
       this.turnSeq += 1;
       if (p.sessionId !== this.sessionId) return;
       this.streamTarget = null;
       const last = this.rows[this.rows.length - 1];
       if (last && last.role === 'assistant') {
         // Status flip triggers the one-time markdown render of the bubble.
+        // usage rides along on this structural replacement only (R1: no
+        // per-chunk updates).
         const next = [...this.rows];
-        next[next.length - 1] = markRaw({ ...last, status: p.status });
+        next[next.length - 1] = markRaw({ ...last, status: p.status, usage: p.usage ?? last.usage });
         this.rows = next;
       }
     },
@@ -526,6 +539,30 @@ export const useChatStore = defineStore('chat', {
       await sessions.refresh(this.projectDir);
     },
 
+    /** Fork the active session at `messageId`: the backend creates a new
+     * session with all messages up to and including it; we switch to the
+     * branch and prefill the composer with the clicked user message so the
+     * user can edit before resending (no auto-send). */
+    async branchFromMessage(messageId: string): Promise<void> {
+      if (!this.sessionId) return;
+      const sessions = useSessionsStore();
+      const clicked = this.rows.find((r) => r.id === messageId);
+      const draft = clicked?.role === 'user' ? clicked.content : '';
+      let meta: { id?: string } | null;
+      try {
+        meta = await cmd<{ id?: string } | null>('branch_session', {
+          sessionId: this.sessionId,
+          upToMessageId: messageId,
+        });
+      } catch (e) {
+        this.status = { ...this.status, lastError: String(e) };
+        return;
+      }
+      if (!meta?.id) return;
+      const ok = await this.openSession(meta.id);
+      if (ok && draft) sessions.pendingComposerText = draft;
+    },
+
     // ---- turn actions ----
 
     /**
@@ -580,6 +617,17 @@ export const useChatStore = defineStore('chat', {
         await cmd('set_config_option', { sessionId: this.sessionId, configId, value });
       } catch (e) {
         console.warn('[chat] set_config_option failed', e);
+      }
+    },
+
+    /** Endpoint (non-picker) model switch: backend persists it onto the
+     * agent and respawns the CLI with the KIMI_MODEL_* env injection. */
+    async setSessionModel(model: string): Promise<void> {
+      if (!this.sessionId) return;
+      try {
+        await cmd('set_session_model', { sessionId: this.sessionId, model });
+      } catch (e) {
+        this.status = { ...this.status, lastError: String(e) };
       }
     },
 

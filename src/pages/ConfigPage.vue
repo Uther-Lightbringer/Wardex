@@ -44,6 +44,9 @@ const draft = reactive({
   provider: 'kimi',
   model: '',
   baseUrl: '',
+  defaultEffort: '',
+  /** 上下文长度（K），批量同步写入 config.toml 的 max_context_size；0/空 = 256。 */
+  maxContextK: 256,
   cliPath: '',
   apiKey: '',
   extraArgs: '',
@@ -79,6 +82,12 @@ const modelCandidates = ref<string[]>([]);
 const fetchingModels = ref(false);
 const modelFetchMsg = ref('');
 
+/** Context-size input guard: K units, 0 (=256K fallback)…4096. */
+function clampContextK(v: number): number {
+  const n = Math.round(Number(v) || 0);
+  return Math.min(4096, Math.max(0, n));
+}
+
 async function refreshModels(): Promise<void> {
   fetchingModels.value = true;
   modelFetchMsg.value = '';
@@ -96,11 +105,33 @@ async function refreshModels(): Promise<void> {
           apiKey,
         });
         ids.forEach((id) => out.add(id));
+        // Bulk-declare the endpoint's models in config.toml under this
+        // agent's own provider namespace: the CLI picker then lists them and
+        // chat-page switching hot-applies via set_config_option instead of
+        // respawning. Stale aliases of this agent are pruned. kimi CLI only;
+        // unsaved new agents skip (no id to namespace under).
+        if (draft.provider === 'kimi' && selectedId.value && ids.length > 0) {
+          try {
+            await cmd('sync_agent_models', {
+              agentId: selectedId.value,
+              baseUrl: draft.baseUrl.trim(),
+              apiKey,
+              models: ids,
+              maxContextK: clampContextK(draft.maxContextK) || 256,
+            });
+            modelFetchMsg.value = `已同步 ${ids.length} 个模型到 config.toml`;
+          } catch (e) {
+            modelFetchMsg.value = String(e);
+          }
+        }
       } catch (e) {
         modelFetchMsg.value = String(e);
       }
     }
-    if (draft.provider === 'kimi') {
+    // Global config.toml aliases are only a fallback: when the agent has its
+    // own Base URL, its /models list is the per-agent source of truth and the
+    // shared aliases would just pollute every kimi agent's picker.
+    if (draft.provider === 'kimi' && !draft.baseUrl.trim()) {
       try {
         const aliases = await cmd<string[]>('kimi_model_aliases');
         aliases.forEach((a) => out.add(a));
@@ -126,6 +157,28 @@ function onModelPick(i: number): void {
   markDirty();
 }
 
+// ---- default thinking effort (kimi only; backend declares the model with
+// support_efforts in ~/.kimi-code/config.toml so the picker shows levels) ----
+const effortValues = ref<string[]>([]);
+const EFFORT_FOLLOW = '跟随 CLI';
+const EFFORT_DISPLAY: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max' };
+const effortLabels = computed(() => [
+  EFFORT_FOLLOW,
+  ...effortValues.value.map((v) => EFFORT_DISPLAY[v] ?? v),
+]);
+const effortIndex = computed(() => Math.max(0, effortValues.value.indexOf(draft.defaultEffort) + 1));
+
+function onEffortPick(i: number): void {
+  draft.defaultEffort = i <= 0 ? '' : (effortValues.value[i - 1] ?? '');
+  markDirty();
+}
+
+onMounted(() => {
+  void cmd<string[]>('effort_options', undefined, []).then((v) => {
+    effortValues.value = v;
+  });
+});
+
 const nameInput = ref<HTMLInputElement | null>(null);
 
 function markDirty(): void {
@@ -138,6 +191,8 @@ function loadAgent(a: AgentRecord): void {
   draft.provider = a.provider;
   draft.model = a.model;
   draft.baseUrl = a.baseUrl;
+  draft.defaultEffort = a.defaultEffort ?? '';
+  draft.maxContextK = a.maxContextK || 256;
   draft.cliPath = a.cliPath;
   draft.apiKey = maskKey(a.apiKey); // display surface: masked only (§9.5)
   draft.extraArgs = a.extraArgs;
@@ -166,6 +221,8 @@ async function saveCurrent(): Promise<boolean> {
     provider: draft.provider,
     model: draft.model,
     baseUrl: draft.baseUrl,
+    defaultEffort: draft.defaultEffort,
+    maxContextK: clampContextK(draft.maxContextK),
     cliPath: draft.cliPath,
     apiKey: draft.apiKey,
     extraArgs: draft.extraArgs,
@@ -174,7 +231,7 @@ async function saveCurrent(): Promise<boolean> {
   });
   if (ok) {
     dirty.value = false;
-    statusMsg.value = '已保存';
+    statusMsg.value = agents.lastWarning ? `已保存（${agents.lastWarning}）` : '已保存';
   } else {
     statusMsg.value = agents.lastError || '保存失败';
   }
@@ -631,6 +688,36 @@ const pageKeysOn = computed(() => nav.page === 'config');
               {{ modelFetchMsg }}
             </div>
 
+            <div v-if="draft.provider === 'kimi' && draft.baseUrl.trim()" class="cfg__field">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">上下文长度（K）</span>
+              <input
+                v-model.number="draft.maxContextK"
+                type="number"
+                min="0"
+                max="4096"
+                step="8"
+                class="war-input cfg__input"
+                :style="{ fontSize: prefs.fs(13) + 'px' }"
+                @input="markDirty"
+              />
+            </div>
+            <div v-if="draft.provider === 'kimi' && draft.baseUrl.trim()" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              点「刷新」会把模型列表按 Agent 命名空间批量写入 ~/.kimi-code/config.toml（apiKey 明文），上下文长度统一为该值 ×1024，0 = 256K
+            </div>
+
+            <div v-if="draft.provider === 'kimi'" class="cfg__field">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">默认思考强度</span>
+              <WarDropdown
+                class="cfg__dropdown"
+                :options="effortLabels"
+                :model-value="effortIndex"
+                @activated="onEffortPick"
+              />
+            </div>
+            <div v-if="draft.provider === 'kimi' && draft.defaultEffort" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              保存后会把该模型写入 ~/.kimi-code/config.toml（support_efforts）以启用强度档，apiKey 将明文同步
+            </div>
+
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               {{ spec.baseUrlHint }}
             </div>
@@ -756,6 +843,30 @@ const pageKeysOn = computed(() => nav.page === 'config');
         </div>
       </WarFrame>
 
+      <!-- left bottom: usage stats entry -->
+      <WarFrame
+        class="cfg__left-bottom"
+        src="/assets/ui/frames/frame_iron_bar.png"
+        :slice="[62, 110, 70, 108]"
+        :hole="[22, 24, 21, 24]"
+      >
+        <div class="cfg__usage">
+          <div class="cfg__usage-text">
+            <div class="cfg__usage-title" :style="{ fontSize: prefs.fs(14) + 'px' }">用量统计</div>
+            <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              各 Agent / 模型 / 会话的 token 消耗
+            </div>
+          </div>
+          <WarButton
+            skin="dialog"
+            :width="190"
+            :art-aspect="5.34"
+            text="打开统计页"
+            @activated="nav.goOverlay('usage')"
+          />
+        </div>
+      </WarFrame>
+
       <!-- right bottom: action bar -->
       <WarFrame
         class="cfg__right-bottom"
@@ -825,6 +936,29 @@ const pageKeysOn = computed(() => nav.page === 'config');
 .cfg__right-bottom {
   grid-row: 2;
   grid-column: 2;
+}
+
+.cfg__left-bottom {
+  grid-row: 2;
+  grid-column: 1;
+}
+
+.cfg__usage {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cfg__usage-text {
+  min-width: 0;
+}
+
+.cfg__usage-title {
+  color: var(--war-text-dim);
+  font-family: SimSun, serif;
+  font-weight: bold;
 }
 
 .cfg__col {

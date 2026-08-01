@@ -17,6 +17,7 @@
 pub mod driver;
 pub mod manager;
 pub mod runtime;
+pub mod wire;
 
 #[cfg(test)]
 mod tests;

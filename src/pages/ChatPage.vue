@@ -22,16 +22,21 @@ import { useNavStore } from '../stores/nav';
 import { usePrefsStore } from '../stores/prefs';
 import { useChatStore } from '../stores/chat';
 import { useSessionsStore } from '../stores/sessions';
+import { useAgentsStore } from '../stores/agents';
+import { cmd } from '../lib/tauri';
 import { useElementSize } from '../lib/useElementSize';
+import { formatTokens } from '../lib/format';
 
 const nav = useNavStore();
 const prefs = usePrefsStore();
 const chat = useChatStore();
 const sessions = useSessionsStore();
+const agentsStore = useAgentsStore();
 
 onMounted(async () => {
   await chat.init();
   await sessions.refreshAgents();
+  if (!agentsStore.loaded) void agentsStore.refresh();
   if (chat.projectDir) await sessions.refresh(chat.projectDir);
 });
 
@@ -113,22 +118,73 @@ function onThinkingPick(i: number): void {
   void chat.setConfigOption('thinking', o.value);
 }
 
-// ---- title row: model dropdown (ACP configOptions "model" picker) ----
-// Same mechanics as the thinking dropdown; kimi always advertises it.
+// ---- title row: model dropdown (ACP configOptions "model" picker +
+// per-agent endpoint models) ----
+// The CLI-advertised picker only lists config.toml aliases; when the agent
+// has its own baseUrl we merge in the endpoint's /models list so every model
+// the endpoint supports is selectable. Picker values switch live via
+// setConfigOption; endpoint-only values go through set_session_model, which
+// persists the choice onto the agent and respawns the CLI with KIMI_MODEL_*.
 const modelOpt = computed(() => chat.configOptions.find((o) => o.id === 'model'));
-const modelOptions = computed(() => (modelOpt.value?.options ?? []).map((o) => o.name));
-const modelIndex = computed(() =>
-  (modelOpt.value?.options ?? []).findIndex((o) => o.value === modelOpt.value?.currentValue),
+
+const curAgentId = computed(
+  () => chat.meta?.agentId ?? sessions.runtimeStates[chat.sessionId]?.agentId ?? '',
 );
+const curAgent = computed(() => agentsStore.byId(curAgentId.value));
+
+const endpointModels = ref<string[]>([]);
+let modelFetchGen = 0;
+watch(
+  () => [curAgentId.value, curAgent.value?.baseUrl ?? ''] as const,
+  ([, baseUrl]) => {
+    const gen = ++modelFetchGen;
+    if (!baseUrl.trim()) {
+      endpointModels.value = [];
+      return;
+    }
+    void (async () => {
+      const ids = await cmd<string[]>(
+        'fetch_models',
+        { baseUrl: baseUrl.trim(), apiKey: curAgent.value?.apiKey ?? '' },
+        [],
+      );
+      if (gen === modelFetchGen) endpointModels.value = ids;
+    })();
+  },
+  { immediate: true },
+);
+
+/** Unified entries: ACP picker options first, then endpoint-only ids. */
+const modelEntries = computed(() => {
+  const out = (modelOpt.value?.options ?? []).map((o) => ({ name: o.name, value: o.value }));
+  for (const id of endpointModels.value) {
+    if (!out.some((e) => e.value === id)) out.push({ name: id, value: id });
+  }
+  // Keep the agent's configured model visible even if both sources miss it
+  // (e.g. the endpoint /models fetch failed).
+  const cur = curAgent.value?.model.trim() ?? '';
+  if (cur && !out.some((e) => e.value === cur)) out.push({ name: cur, value: cur });
+  return out;
+});
+const modelOptions = computed(() => modelEntries.value.map((e) => e.name));
+const modelIndex = computed(() => {
+  const cur = modelOpt.value?.currentValue || curAgent.value?.model.trim() || '';
+  return modelEntries.value.findIndex((e) => e.value === cur);
+});
 const modelDisplay = computed(() => {
-  const cur = modelOpt.value?.options.find((o) => o.value === modelOpt.value?.currentValue);
-  return `模型 ${cur?.name ?? modelOpt.value?.currentValue ?? ''}`;
+  const cur = modelEntries.value[modelIndex.value];
+  return `模型 ${cur?.name ?? modelOpt.value?.currentValue ?? curAgent.value?.model ?? ''}`;
 });
 
 function onModelPick(i: number): void {
-  const o = modelOpt.value?.options[i];
-  if (!o || o.value === modelOpt.value?.currentValue) return;
-  void chat.setConfigOption('model', o.value);
+  const e = modelEntries.value[i];
+  if (!e || i === modelIndex.value) return;
+  const inPicker = (modelOpt.value?.options ?? []).some((o) => o.value === e.value);
+  if (inPicker) {
+    void chat.setConfigOption('model', e.value);
+  } else {
+    void chat.setSessionModel(e.value).then(() => agentsStore.refresh());
+  }
 }
 
 // ---- action bay: 刷新工作区 / 停止生成 dual state (§6.4, §8) ----
@@ -139,6 +195,19 @@ function onRefreshOrStop(): void {
     chat.workspaceRefreshSeq += 1;
   }
 }
+
+// ---- title row: 本会话 token 累计 (所有助手消息 usage 求和) ----
+const sessionUsage = computed(() => {
+  let input = 0;
+  let output = 0;
+  for (const r of chat.rows) {
+    if (r.role !== 'assistant' || !r.usage) continue;
+    input += r.usage.inputTokens;
+    output += r.usage.outputTokens;
+  }
+  if (input === 0 && output === 0) return '';
+  return `本会话 ↑${formatTokens(input)} ↓${formatTokens(output)}`;
+});
 </script>
 
 <template>
@@ -172,6 +241,9 @@ function onRefreshOrStop(): void {
               <span class="chat__status" :style="{ fontSize: prefs.fs(11) + 'px' }">
                 {{ chat.sessionId ? chat.status.statusText : '' }}
               </span>
+              <span v-if="sessionUsage" class="chat__usage" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                {{ sessionUsage }}
+              </span>
               <span
                 v-if="chat.sessionId"
                 class="chat__seg-toggle"
@@ -179,33 +251,6 @@ function onRefreshOrStop(): void {
                 @click="chat.setAllSegsOpen(!chat.segCollapseOpen)"
                 >{{ chat.segCollapseOpen ? '⊟ 全部折叠' : '⊞ 全部展开' }}</span
               >
-              <WarDropdown
-                v-if="chat.sessionId && modelOpt"
-                class="chat__model-dd"
-                :options="modelOptions"
-                :model-value="modelIndex"
-                :display-text="modelDisplay"
-                :text-size="prefs.fs(12)"
-                @update:model-value="onModelPick"
-              />
-              <WarDropdown
-                v-if="chat.sessionId && thinkingOpt"
-                class="chat__thinking-dd"
-                :options="thinkingOptions"
-                :model-value="thinkingIndex"
-                :display-text="thinkingDisplay"
-                :text-size="prefs.fs(12)"
-                @update:model-value="onThinkingPick"
-              />
-              <WarDropdown
-                v-if="chat.sessionId"
-                class="chat__agent-dd"
-                :options="agentOptions"
-                :model-value="agentIndex"
-                :display-text="agentDisplay"
-                :text-size="prefs.fs(12)"
-                @update:model-value="onAgentPick"
-              />
             </div>
             <div class="chat__list">
               <MessageList v-if="chat.sessionId" />
@@ -215,6 +260,40 @@ function onRefreshOrStop(): void {
             </div>
           </div>
         </WarFrame>
+
+        <!-- dropdown row above the composer: Agent → 模型 → 思考 -->
+        <div v-if="chat.sessionId" class="chat__dd-row">
+          <WarDropdown
+            class="chat__agent-dd"
+            :options="agentOptions"
+            :model-value="agentIndex"
+            :display-text="agentDisplay"
+            :text-size="prefs.fs(12)"
+            drop-up
+            @update:model-value="onAgentPick"
+          />
+          <WarDropdown
+            v-if="modelEntries.length > 0"
+            class="chat__model-dd"
+            :options="modelOptions"
+            :model-value="modelIndex"
+            :display-text="modelDisplay"
+            :text-size="prefs.fs(12)"
+            filterable
+            drop-up
+            @update:model-value="onModelPick"
+          />
+          <WarDropdown
+            v-if="thinkingOpt"
+            class="chat__thinking-dd"
+            :options="thinkingOptions"
+            :model-value="thinkingIndex"
+            :display-text="thinkingDisplay"
+            :text-size="prefs.fs(12)"
+            drop-up
+            @update:model-value="onThinkingPick"
+          />
+        </div>
 
         <WarFrame
           class="chat__input"
@@ -362,6 +441,13 @@ function onRefreshOrStop(): void {
   text-overflow: ellipsis;
 }
 
+.chat__usage {
+  flex: none;
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  white-space: nowrap;
+}
+
 .chat__seg-toggle {
   flex: none;
   color: var(--war-text-muted);
@@ -372,6 +458,14 @@ function onRefreshOrStop(): void {
 
 .chat__seg-toggle:hover {
   color: var(--war-gold);
+}
+
+.chat__dd-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px;
 }
 
 .chat__agent-dd {

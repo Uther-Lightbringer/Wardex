@@ -12,6 +12,7 @@ import ConfigPage from './pages/ConfigPage.vue';
 import SessionSelectPage from './pages/SessionSelectPage.vue';
 import ChatPage from './pages/ChatPage.vue';
 import TodoPage from './pages/TodoPage.vue';
+import UsagePage from './pages/UsagePage.vue';
 import FolderBrowserDialog from './components/FolderBrowserDialog.vue';
 import { DEFAULT_BG, loadBackground, type BgConfig } from './lib/background';
 import { preloadSfx } from './lib/sfx';
@@ -34,6 +35,7 @@ const overlayPages: { id: PageId; comp: unknown }[] = [
   { id: 'sessionSelect', comp: SessionSelectPage },
   { id: 'chat', comp: ChatPage },
   { id: 'todo', comp: TodoPage },
+  { id: 'usage', comp: UsagePage },
 ];
 
 function onResize(): void {

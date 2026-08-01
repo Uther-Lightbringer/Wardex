@@ -83,8 +83,8 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
   min-width: 160px;
   border-style: solid;
   border-color: transparent;
-  border-width: 14px 16px 13px 20px; /* T R B L (slice 14/16/13/20) */
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
+  border-width: 13px 14px 12px 14px; /* T R B L (slice 21/23/20/23) */
+  border-image: url('/assets/ui/dropdown/dropdown_panel2.png') 21 23 20 23 fill stretch;
   box-sizing: border-box;
 }
 

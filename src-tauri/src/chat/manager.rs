@@ -451,6 +451,17 @@ impl ChatManager {
         Ok(())
     }
 
+    /// Chat-page model switch for a model the CLI picker does not advertise
+    /// (per-agent endpoint model): the runtime persists it onto the agent and
+    /// respawns the CLI so the KIMI_MODEL_* env injection applies.
+    pub async fn set_session_model(&self, session_id: &str, model: &str) -> Result<(), ChatError> {
+        let Some(tx) = self.entry_tx(session_id) else {
+            return Err(ChatError::NoSession);
+        };
+        let _ = tx.send(RuntimeCmd::SetModel(model.to_string())).await;
+        Ok(())
+    }
+
     /// Parallel-cap eviction hook, exposed for tests (actors call the free
     /// function directly before spawning).
     pub fn enforce_process_cap(&self, exempt: &str) {

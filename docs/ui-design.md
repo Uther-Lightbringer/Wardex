@@ -369,6 +369,8 @@ const ironStyle = {
 - 选项行高 28：hover 时整行垫 `GlueScreen-Button-KeyboardHighlight.png`（左右各缩 8，拉伸，混合见 §9）；
   文字左 14 右 10；当前项或 hover 项 `#f2cf6b`（当前项加粗），其余 `#cfd6e4`。
 - 点击条切换开合；选中即关并 emit。
+- 长列表：展开层 `max-height: min(420px, 60vh)`，超出出细滚动条；弹层内部滚动不触发关闭（只有页面级 scroll/resize 才关）。
+- `filterable: true` 时展开层顶部带筛选输入框（打开自动聚焦、清空），按选项文字包含匹配（大小写不敏感），Enter 选首个匹配项，无匹配显示 `（无匹配）`；选中仍 emit 原选项下标。模型下拉（30+ 端点模型）已启用。filterable 下列表区固定为满高（不再随过滤结果伸缩），避免筛选框位置跳动。
 
 ### 4.4 WarMenu（右键/上下文菜单）
 

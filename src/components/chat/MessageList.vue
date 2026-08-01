@@ -16,6 +16,7 @@ import { useSessionsStore } from '../../stores/sessions';
 import { usePrefsStore } from '../../stores/prefs';
 import ChatBubble from './ChatBubble.vue';
 import MeasuredRow from './MeasuredRow.vue';
+import WarScrollBar from '../war/WarScrollBar.vue';
 
 const chat = useChatStore();
 const sessions = useSessionsStore();
@@ -219,6 +220,10 @@ defineExpose({ scrollToEnd });
       <div :style="{ height: padBottom + 'px' }"></div>
     </div>
 
+    <div class="msglist__warbar">
+      <WarScrollBar :target="scroller" />
+    </div>
+
     <button
       v-if="chat.rows.length > 0 && !followBottom"
       class="msglist__to-bottom"
@@ -239,12 +244,23 @@ defineExpose({ scrollToEnd });
 .msglist__scroll {
   height: 100%;
   overflow-y: auto;
-  scrollbar-width: none;
+  scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
+  padding-right: 24px; /* room for the WC3 scrollbar */
+  box-sizing: border-box;
+}
+
+.msglist__warbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  z-index: 20;
 }
 
 .msglist__to-bottom {
   position: absolute;
-  right: 16px;
+  right: 34px;
   bottom: 12px;
   z-index: 30;
   width: 108px;

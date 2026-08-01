@@ -12,6 +12,7 @@ import { cmd } from '../lib/tauri';
 import { useChatStore } from '../stores/chat';
 import { usePrefsStore } from '../stores/prefs';
 import GitCommitDialog from './GitCommitDialog.vue';
+import WarScrollBar from '../components/war/WarScrollBar.vue';
 import type { GitCommit, GitDiff, GitStatusEntry } from './git-types';
 
 /** What the open diff view shows; re-fetched on refresh (generation-guarded).
@@ -39,6 +40,10 @@ const diffError = ref('');
 // Generation guard: rapid refreshes never stack stale responses (panels.md
 // §4 checklist: refreshOn triggers need generation invalidation).
 let generation = 0;
+
+// ---- scroll targets (WC3 WarScrollBar) ----
+const listEl = ref<HTMLElement | null>(null);
+const diffEl = ref<HTMLElement | null>(null);
 
 const workDir = computed(() => chat.meta?.workDir || chat.meta?.projectDir || chat.projectDir);
 
@@ -157,7 +162,8 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
             {{ diffSpec.label }}
           </span>
         </div>
-        <div class="gitp__diff">
+        <div class="gitp__diff-wrap">
+          <div ref="diffEl" class="gitp__diff">
           <div v-if="diffError" class="gitp__error" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ diffError }}</div>
           <div v-else-if="diffLoading" class="gitp__empty" :style="{ fontSize: prefs.fs(11) + 'px' }">加载中…</div>
           <template v-else-if="diff">
@@ -190,6 +196,8 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
               …（内容超过 64KB，已截断）
             </div>
           </template>
+          </div>
+          <WarScrollBar :target="diffEl" />
         </div>
       </template>
 
@@ -213,8 +221,9 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
             历史
           </span>
         </div>
-        <div class="gitp__list">
-          <div v-if="error" class="gitp__error" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ error }}</div>
+        <div class="gitp__list-wrap">
+          <div ref="listEl" class="gitp__list">
+            <div v-if="error" class="gitp__error" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ error }}</div>
           <template v-else-if="tab === 'changes'">
             <div v-if="!loading && changes.length === 0" class="gitp__empty" :style="{ fontSize: prefs.fs(11) + 'px' }">
               工作区干净
@@ -254,6 +263,8 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
               </div>
             </div>
           </template>
+          </div>
+          <WarScrollBar :target="listEl" />
         </div>
       </template>
     </template>
@@ -335,12 +346,18 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
   text-underline-offset: 3px;
 }
 
-.gitp__list {
+.gitp__list-wrap {
   flex: 1;
   min-height: 0;
-  max-height: 132px; /* ≈4 rows (features/chat.md §6.3) */
+  max-height: 156px; /* ≈4 rows + scrollbar (features/chat.md §6.3) */
+  display: flex;
+}
+
+.gitp__list {
+  flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  scrollbar-width: none;
+  scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
 }
 
 .gitp__row {
@@ -435,11 +452,17 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
   text-overflow: ellipsis;
 }
 
-.gitp__diff {
+.gitp__diff-wrap {
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+
+.gitp__diff {
+  flex: 1;
+  min-width: 0;
   overflow: auto;
-  scrollbar-width: none;
+  scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
 }
 
 .gitp__file {

@@ -272,6 +272,7 @@ tool 段 / `toolCalls` 元素的键集（来自 ACP update + `toolFromUpdate` �
 | `enabled` | bool | 停用后不参与会话 | `true` |
 | `model` | string | 模型名（新建默认 `"moonshot-v1-auto"`，`src/AgentStore.cpp:112`） | `""` |
 | `baseUrl` | string | 自定义 API base | `""` |
+| `defaultEffort` | string | 默认思考强度：`""` 跟随 CLI，否则 `low/medium/high/xhigh/max`；非空时保存 Agent 会把该模型按 `support_efforts` 写进 `~/.kimi-code/config.toml`（`src/models.rs`），ACP 思考下拉随之显示强度档 | `""` |
 | `cliPath` | string | CLI 绝对路径；空 = 自动探测/用 provider 默认命令 | `"kimi"`（**注意：文件缺字段时旧代码回填 "kimi"**，`src/AgentStore.cpp:525`；新建内存值是空串） |
 | `apiKey` | string | **明文** API key | `""` |
 | `extraArgs` | string | 追加 CLI 参数（空格分隔，`QProcess::splitCommand` 解析） | `""` |

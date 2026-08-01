@@ -19,7 +19,7 @@ use base64::Engine;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
-use super::events::AcpEvent;
+use super::events::{AcpEvent, TurnUsage};
 use super::transport::{AcpError, SpawnConfig, StdioTransport, Transport};
 use super::types;
 
@@ -417,6 +417,7 @@ impl<T: Transport> AcpClient<T> {
             }
             self.emit(AcpEvent::TurnFinished {
                 stop_reason: "error".to_string(),
+                usage: None,
             })
             .await;
             Ok(())
@@ -511,7 +512,10 @@ impl<T: Transport> AcpClient<T> {
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn")
                 .to_string();
-            self.emit(AcpEvent::TurnFinished { stop_reason: stop }).await;
+            // Token usage rides the prompt result (kimi: result.usage). A
+            // missing/broken usage is None — it must never fail the turn.
+            let usage = result.get("usage").and_then(TurnUsage::from_acp);
+            self.emit(AcpEvent::TurnFinished { stop_reason: stop, usage }).await;
             Ok(())
         } else {
             // Response for an unknown id: silently ignored (AcpClient.cpp:411).
@@ -1109,14 +1113,26 @@ async fn prompt_assembles_text_and_image_blocks() {
         ])
     );
 
-    // Success: stopReason present and defaulted.
+    // Success: stopReason present and defaulted; usage parsed from result.
     h.transport
-        .feed_json(json!({ "jsonrpc": "2.0", "id": req["id"], "result": {} }))
+        .feed_json(json!({ "jsonrpc": "2.0", "id": req["id"], "result": {
+            "usage": { "inputTokens": 1200, "outputTokens": 300, "totalTokens": 1500,
+                       "cachedReadTokens": 800 }
+        } }))
         .await;
     h.client.recv_once().await.expect("prompt resp");
     assert_eq!(
         events(&mut h),
-        vec![AcpEvent::TurnFinished { stop_reason: "end_turn".into() }]
+        vec![AcpEvent::TurnFinished {
+            stop_reason: "end_turn".into(),
+            usage: Some(TurnUsage {
+                input_tokens: 1200,
+                output_tokens: 300,
+                total_tokens: 1500,
+                cached_read_tokens: Some(800),
+                ..Default::default()
+            }),
+        }]
     );
     assert!(!h.client.turn_busy());
 }
@@ -1215,7 +1231,7 @@ async fn prompt_error_path_order_is_protocol_error_chunk_turn_finished() {
         vec![
             AcpEvent::ProtocolError { error: "rate limit exceeded".into() },
             AcpEvent::MessageChunk { text: "回合失败：rate limit exceeded".into() },
-            AcpEvent::TurnFinished { stop_reason: "error".into() },
+            AcpEvent::TurnFinished { stop_reason: "error".into(), usage: None },
         ]
     );
     assert!(!h.client.turn_busy());
@@ -1230,7 +1246,7 @@ async fn prompt_error_path_order_is_protocol_error_chunk_turn_finished() {
         events(&mut h),
         vec![
             AcpEvent::ProtocolError { error: String::new() },
-            AcpEvent::TurnFinished { stop_reason: "error".into() },
+            AcpEvent::TurnFinished { stop_reason: "error".into(), usage: None },
         ]
     );
 }

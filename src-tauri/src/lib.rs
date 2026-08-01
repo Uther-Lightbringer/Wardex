@@ -210,6 +210,21 @@ async fn set_config_option(
         .map_err(err)
 }
 
+/// Chat-page model switch for endpoint models the CLI picker does not
+/// advertise; the runtime persists the choice and respawns the CLI.
+#[tauri::command]
+async fn set_session_model(
+    state: State<'_, AppState>,
+    session_id: String,
+    model: String,
+) -> Result<(), String> {
+    state
+        .chat
+        .set_session_model(&session_id, &model)
+        .await
+        .map_err(err)
+}
+
 #[tauri::command]
 async fn retry_cancel(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.retry_cancel(&session_id).await.map_err(err)
@@ -325,6 +340,23 @@ fn session_meta(state: State<'_, AppState>, session_id: String) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// Fork a session at a message: new session with messages [0..=that one],
+/// same agent/provider/project; acpSessionId is NOT inherited. Returns the
+/// new session's meta.
+#[tauri::command]
+fn branch_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    up_to_message_id: String,
+) -> Result<Value, String> {
+    let mut stores = lock(&state.stores);
+    stores
+        .sessions
+        .branch_session(&session_id, &up_to_message_id)
+        .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+        .map_err(err)
+}
+
 /// Full-text search (data-formats.md §10): runs on the blocking pool with
 /// generation-based supersede; a superseded scan returns an empty list.
 #[tauri::command]
@@ -369,10 +401,39 @@ fn save_agent(
     state: State<'_, AppState>,
     agent_id: String,
     patch: AgentPatch,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
+    if let Some(v) = &patch.default_effort {
+        let v = v.trim().to_lowercase();
+        if !v.is_empty() && !crate::models::EFFORT_LEVELS.contains(&v.as_str()) {
+            return Err(format!("无效的思考强度: {v}"));
+        }
+    }
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
-    stores.agents.update_agent(&paths, &agent_id, &patch).map_err(err)
+    stores.agents.update_agent(&paths, &agent_id, &patch).map_err(err)?;
+    // Declare the model in the kimi CLI config with support_efforts so the
+    // ACP thinking picker shows real levels; clearing the effort removes it.
+    // Sync failures never block the save — they come back as a warning.
+    let Some(agent) = stores.agents.get(&agent_id).cloned() else {
+        return Ok(None);
+    };
+    if agent.provider != "kimi" || agent.model.trim().is_empty() {
+        return Ok(None);
+    }
+    let result = if agent.default_effort.is_empty() {
+        crate::models::remove_kimi_effort_model(agent.model.trim())
+    } else {
+        crate::models::sync_kimi_effort_model(
+            agent.model.trim(),
+            &agent.base_url,
+            &agent.api_key,
+            &agent.default_effort,
+        )
+    };
+    match result {
+        Ok(()) => Ok(None),
+        Err(e) => Ok(Some(format!("思考强度同步 kimi config.toml 失败: {e}"))),
+    }
 }
 
 #[tauri::command]
@@ -704,6 +765,12 @@ fn prompt_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn usage_report(state: State<'_, AppState>) -> Value {
+    let stores = lock(&state.stores);
+    serde_json::to_value(stores.usage.report()).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
 fn get_prefs(state: State<'_, AppState>) -> Value {
     let stores = lock(&state.stores);
     json!({
@@ -835,6 +902,27 @@ fn kimi_model_aliases() -> Vec<String> {
     crate::models::kimi_model_aliases()
 }
 
+/// Bulk sync (配置页「刷新」): declare every fetched endpoint model in
+/// config.toml under the agent's own provider namespace, pruning aliases
+/// the endpoint no longer lists. Returns the number of aliases written.
+#[tauri::command]
+fn sync_agent_models(
+    agent_id: String,
+    base_url: String,
+    api_key: String,
+    models: Vec<String>,
+    max_context_k: u32,
+) -> Result<usize, String> {
+    crate::models::sync_agent_models(&agent_id, &base_url, &api_key, &models, max_context_k)
+}
+
+/// Thinking effort levels for the config-page default-effort dropdown
+/// ("" / 跟随 CLI is prepended by the frontend).
+#[tauri::command]
+fn effort_options() -> Vec<String> {
+    crate::models::EFFORT_LEVELS.map(str::to_string).into()
+}
+
 // ---------------------------------------------------------------------------
 // App entry
 // ---------------------------------------------------------------------------
@@ -885,6 +973,7 @@ pub fn run() {
             send_prompt,
             cancel,
             set_config_option,
+            set_session_model,
             retry_cancel,
             answer_permission,
             pending_permission,
@@ -900,6 +989,7 @@ pub fn run() {
             list_sessions,
             sessions_for_project,
             session_meta,
+            branch_session,
             search_messages,
             // agents / providers / probe
             list_agents,
@@ -942,6 +1032,7 @@ pub fn run() {
             prompts_list,
             prompt_add,
             prompt_remove,
+            usage_report,
             get_prefs,
             background_config,
             set_user_name,
@@ -953,6 +1044,8 @@ pub fn run() {
             // model list probing
             fetch_models,
             kimi_model_aliases,
+            sync_agent_models,
+            effort_options,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarDex");

@@ -22,11 +22,14 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 use crate::acp::{AcpError, AcpEvent};
+use crate::acp::events::TurnUsage;
 use crate::chat::driver::{ClientDriver, SessionLaunch, Spawner};
+use crate::chat::wire::{self, WireUsageReader};
 use crate::provider;
 use crate::store::agents::Agent;
 use crate::store::json::now_ms;
 use crate::store::sessions::MessageRow;
+use crate::store::usage::UsageRecord;
 use crate::store::StoreRegistry;
 
 // ---- budget constants (performance.md §3, ChatController.h:47-168) ----
@@ -404,6 +407,10 @@ pub enum RuntimeCmd {
     SetMode(String),
     /// ACP config option picker (kimi: "thinking" / "model"); passthrough.
     SetConfigOption { config_id: String, value: String },
+    /// Chat-page pick of a model the CLI picker does not advertise (per-agent
+    /// endpoint model): persist to the agent record and respawn so
+    /// build_launch injects it via KIMI_MODEL_* env.
+    SetModel(String),
     /// New agent snapshot; the actor persists meta and handles the
     /// same/cross-provider acpSessionId rule itself (it owns the old agent).
     SwitchAgent(Box<Agent>),
@@ -437,6 +444,12 @@ pub(crate) struct Actor {
     self_tx: mpsc::Sender<RuntimeCmd>,
     snap: Arc<Mutex<RuntimeSnap>>,
     agent: Agent,
+    /// Model the current turn is running on: the agent's configured default,
+    /// refreshed from the CLI's model picker (configOptions currentValue).
+    current_model: String,
+    /// kimi wire.jsonl 用量补源：(acp session id, reader)，Started 时定位；
+    /// 非 kimi provider 为 None。
+    wire_usage: Option<(String, WireUsageReader)>,
 
     busy: bool,
     user_stop: bool,
@@ -485,9 +498,12 @@ pub(crate) fn spawn_actor(
     let (cmd_tx, cmd_rx) = mpsc::channel::<RuntimeCmd>(64);
     let (ev_tx, ev_rx) = mpsc::channel::<AcpEvent>(256);
     let self_tx = cmd_tx.clone();
+    let current_model = agent.model.clone();
     let mut actor = Actor {
         session_id: session_id.to_string(),
         agent,
+        current_model,
+        wire_usage: None,
         stores,
         sink,
         registry,
@@ -639,6 +655,7 @@ impl Actor {
                 }
             }
             RuntimeCmd::SwitchAgent(agent) => self.on_switch_agent(*agent).await,
+            RuntimeCmd::SetModel(model) => self.on_set_model(model).await,
             RuntimeCmd::EnsureAcp => self.ensure_acp().await,
             RuntimeCmd::StopProcess => {
                 self.client = None;
@@ -660,7 +677,7 @@ impl Actor {
                     self.acp_ready = false;
                     self.snap().acp_running = false;
                     self.mark_interrupted();
-                    self.emit_turn("interrupted", "cancelled");
+                    self.emit_turn("interrupted", "cancelled", None);
                     self.finish_reply();
                     self.user_stop = false;
                 }
@@ -826,6 +843,7 @@ impl Actor {
         // Assign before finish_reply so a drained queue starts on the NEW
         // agent (old code achieved this via a deferred drainQueue).
         self.agent = agent;
+        self.current_model = self.agent.model.clone();
 
         if self.busy {
             self.cancel_retry(false);
@@ -837,7 +855,7 @@ impl Actor {
             self.acp_ready = false;
             self.snap().acp_running = false;
             self.mark_interrupted();
-            self.emit_turn("interrupted", "cancelled");
+            self.emit_turn("interrupted", "cancelled", None);
             self.finish_reply();
             self.user_stop = false;
         } else if self.client.is_some() {
@@ -876,6 +894,66 @@ impl Actor {
         self.emit("store://sessions", json!({}));
     }
 
+    /// Chat-page model pick for a model the CLI's own picker does not
+    /// advertise (endpoint model from the agent's baseUrl /models list):
+    /// persist it onto the agent record and restart the CLI process so
+    /// build_launch injects it via the KIMI_MODEL_* env family. Picker
+    /// (alias) models go through SetConfigOption instead — no respawn.
+    /// Teardown mirrors on_switch_agent; the stored ACP session id is dropped
+    /// because a resumed session would keep the CLI-remembered model and the
+    /// env injection only applies on session/new.
+    async fn on_set_model(&mut self, model: String) {
+        let model = model.trim().to_string();
+        if model.is_empty() || model == self.agent.model.trim() {
+            return;
+        }
+        self.agent.model = model.clone();
+        self.current_model = model.clone();
+
+        if self.busy {
+            self.cancel_retry(false);
+            self.user_stop = true;
+            // A prompt waiting for the handshake must not fire into the NEW
+            // model's process when it comes up.
+            self.pending_prompt = None;
+            self.client = None;
+            self.acp_ready = false;
+            self.snap().acp_running = false;
+            self.mark_interrupted();
+            self.emit_turn("interrupted", "cancelled", None);
+            self.finish_reply();
+            self.user_stop = false;
+        } else if self.client.is_some() {
+            self.client = None;
+            self.acp_ready = false;
+            self.snap().acp_running = false;
+        }
+        // A pending permission request belongs to the dead process.
+        self.clear_permission();
+
+        {
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            // update_agent (not save_agent) so the in-memory record other
+            // sessions spawn from picks up the new model too.
+            let patch = crate::store::agents::AgentPatch {
+                model: Some(model.clone()),
+                ..Default::default()
+            };
+            if let Err(e) = stores.agents.update_agent(&paths, &self.agent.id, &patch) {
+                log::warn!("chat[{}] update_agent (model) failed: {e}", self.session_id);
+            }
+            if let Err(e) = stores.sessions.set_acp_session_id(&self.session_id, "") {
+                log::warn!("chat[{}] set_acp_session_id failed: {e}", self.session_id);
+            }
+        }
+        self.sync_snap();
+        // Warm the new connection (session/new with the env-injected model).
+        self.ensure_acp().await;
+        self.emit_status(Some(format!("已切换模型 · {model}")));
+        self.emit("store://sessions", json!({}));
+    }
+
     // ---- ACP events ----
 
     async fn handle_event(&mut self, ev: AcpEvent) {
@@ -883,6 +961,14 @@ impl Actor {
             AcpEvent::Started { session_id } => {
                 self.acp_ready = true;
                 self.snap().acp_running = true;
+                // kimi 不在 prompt 响应里报 usage；定位它的 wire.jsonl 作为
+                // 补源（跳过历史内容，见 chat/wire.rs）。
+                self.wire_usage = if self.agent.provider.trim().eq_ignore_ascii_case("kimi") {
+                    wire::kimi_home()
+                        .map(|h| (session_id.clone(), WireUsageReader::locate(&h, &session_id)))
+                } else {
+                    None
+                };
                 {
                     let mut stores = lock_ok(&self.stores);
                     if let Err(e) =
@@ -912,10 +998,10 @@ impl Actor {
                         // Restart-for-continue failed: keep the partial reply
                         // instead of overwriting it with the error text.
                         self.mark_interrupted();
-                        self.emit_turn("interrupted", "error");
+                        self.emit_turn("interrupted", "error", None);
                     } else {
                         self.update_last_assistant(&format!("ACP 启动失败: {error}"), "error");
-                        self.emit_turn("error", "error");
+                        self.emit_turn("error", "error", None);
                     }
                     self.finish_reply();
                 }
@@ -923,6 +1009,15 @@ impl Actor {
             }
             AcpEvent::ModeChanged { .. } => {}
             AcpEvent::ConfigOptions { options } => {
+                // Track the running model for usage records: the CLI's model
+                // picker currentValue is authoritative once seen.
+                if let Some(cur) = options
+                    .iter()
+                    .find(|o| o["id"].as_str() == Some("model"))
+                    .and_then(|p| p["currentValue"].as_str())
+                {
+                    self.current_model = cur.to_string();
+                }
                 // Apply the agent's default model once per fresh session:
                 // only when it appears in the CLI's own model picker (aliases
                 // come through here; non-alias models were injected via
@@ -985,7 +1080,9 @@ impl Actor {
                 self.emit("acp://permission", payload);
                 self.emit_status(None);
             }
-            AcpEvent::TurnFinished { stop_reason } => self.on_turn_finished(&stop_reason).await,
+            AcpEvent::TurnFinished { stop_reason, usage } => {
+                self.on_turn_finished(&stop_reason, usage).await
+            }
             AcpEvent::ProtocolError { error } => {
                 // Emitted BEFORE turnFinished("error") so the retry detector
                 // has the raw text in hand (acp-protocol.md §7).
@@ -1008,7 +1105,7 @@ impl Actor {
                         self.resume_interrupted_turn().await;
                     } else {
                         self.mark_interrupted();
-                        self.emit_turn("interrupted", "processExited");
+                        self.emit_turn("interrupted", "processExited", None);
                         self.finish_reply();
                     }
                 }
@@ -1035,9 +1132,11 @@ impl Actor {
     }
 
     /// turnFinished (ChatController.cpp:404-437).
-    async fn on_turn_finished(&mut self, stop: &str) {
+    async fn on_turn_finished(&mut self, stop: &str, usage: Option<TurnUsage>) {
         self.flush_stream_buffers();
         self.clear_permission();
+        // kimi 的 ACP 适配器不报 usage：从 wire.jsonl 增量补（见 chat/wire.rs）。
+        let usage = usage.or_else(|| self.read_wire_usage());
         // Phase 4: a rate-limited turn is not final — enter backoff and
         // resend the same prompt instead of closing with an error.
         if stop == "error"
@@ -1065,9 +1164,24 @@ impl Actor {
             let mut stores = lock_ok(&self.stores);
             if let Err(e) = stores
                 .sessions
-                .flush_last_assistant(&self.session_id, Some(status))
+                .flush_last_assistant(&self.session_id, Some(status), usage.clone())
             {
                 log::warn!("chat[{}] flush_last_assistant failed: {e}", self.session_id);
+            }
+        }
+        // Persist the turn's token usage (when the agent reported it).
+        if let Some(u) = &usage {
+            let rec = UsageRecord::new(
+                &self.session_id,
+                &self.agent.id,
+                &self.agent.name,
+                &self.current_model,
+                u,
+            );
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            if let Err(e) = stores.usage.append(&paths, rec) {
+                log::warn!("chat[{}] usage append failed: {e}", self.session_id);
             }
         }
         self.user_stop = false;
@@ -1075,7 +1189,7 @@ impl Actor {
         self.thinking_buf.clear();
         self.continue_retries = 0;
         self.finish_subagents(status == "interrupted");
-        self.emit_turn(status, stop);
+        self.emit_turn(status, stop, usage.as_ref());
         self.finish_reply();
     }
 
@@ -1146,7 +1260,7 @@ impl Actor {
                 ),
                 "error",
             );
-            self.emit_turn("error", "error");
+            self.emit_turn("error", "error", None);
             self.finish_reply();
             return;
         }
@@ -1360,7 +1474,7 @@ impl Actor {
             let mut stores = lock_ok(&self.stores);
             if let Err(e) = stores
                 .sessions
-                .flush_last_assistant(&self.session_id, Some("interrupted"))
+                .flush_last_assistant(&self.session_id, Some("interrupted"), None)
             {
                 log::warn!("chat[{}] flush interrupted failed: {e}", self.session_id);
             }
@@ -1529,7 +1643,7 @@ impl Actor {
             self.update_last_assistant("回合失败：请求被限流，已取消自动重试", "error");
             self.assistant_buf.clear();
             self.thinking_buf.clear();
-            self.emit_turn("error", "error");
+            self.emit_turn("error", "error", None);
             self.finish_reply();
         }
         self.emit_status(None);
@@ -1819,11 +1933,21 @@ impl Actor {
         );
     }
 
-    fn emit_turn(&self, status: &str, stop_reason: &str) {
-        self.emit(
-            "acp://turn",
-            json!({ "sessionId": self.session_id, "status": status, "stopReason": stop_reason }),
-        );
+    /// kimi wire.jsonl 补读（chat/wire.rs）：增量求和各 agent 的
+    /// usage.record；reader 未定位（非 kimi / 未 Started）或无新增返回 None。
+    fn read_wire_usage(&mut self) -> Option<TurnUsage> {
+        let (sid, reader) = self.wire_usage.as_mut()?;
+        let home = wire::kimi_home()?;
+        reader.read_new(&home, sid)
+    }
+
+    fn emit_turn(&self, status: &str, stop_reason: &str, usage: Option<&TurnUsage>) {
+        let mut payload =
+            json!({ "sessionId": self.session_id, "status": status, "stopReason": stop_reason });
+        if let Some(u) = usage {
+            payload["usage"] = json!(u);
+        }
+        self.emit("acp://turn", payload);
     }
 
     fn emit_retry(&self) {

@@ -90,7 +90,7 @@ fn append_line_has_no_segments_key_rewrite_has_it() {
         String::from_utf8(std::fs::read(paths.session_messages_path(&id)).unwrap()).unwrap();
     assert_eq!(before_flush, during_stream, "streaming must be zero disk I/O");
 
-    store.flush_last_assistant(&id, Some("done")).unwrap();
+    store.flush_last_assistant(&id, Some("done"), None).unwrap();
     let after_flush =
         String::from_utf8(std::fs::read(paths.session_messages_path(&id)).unwrap()).unwrap();
     assert!(after_flush.contains("\"segments\""), "rewrite must carry segments: {after_flush}");
@@ -231,7 +231,7 @@ fn flush_rewrites_empty_reply_placeholder() {
     store
         .append_message(&id, "assistant", "…", "kimi", "pending", &[])
         .unwrap();
-    store.flush_last_assistant(&id, Some("done")).unwrap();
+    store.flush_last_assistant(&id, Some("done"), None).unwrap();
     let msgs = store.messages(&id).unwrap();
     assert_eq!(msgs[0].content, "（空回复）");
 }

@@ -2,7 +2,7 @@
 // %AppData%/WarDex data (sessions/agents/projects/user_prefs) loads unchanged.
 // Formats: sessions/<uuid>/meta.json + messages.jsonl, agents/index.json +
 // agents/<id>.json, projects.json, user_prefs.json, todos.json, prompts.json,
-// media/ paste cache.
+// usage.json, media/ paste cache.
 // Ported from src/SessionStore.cpp / AgentStore.cpp / ProjectStore.cpp /
 // UserPrefs.cpp / TodoStore.cpp / PromptStore.cpp / ClipboardHelper.cpp /
 // AppPaths.cpp (see docs/data-formats.md for the authoritative spec).
@@ -27,6 +27,7 @@ pub mod projects;
 pub mod prompts;
 pub mod sessions;
 pub mod todos;
+pub mod usage;
 pub mod workspace;
 
 pub use agents::{mask_key, Agent, AgentPatch, AgentStore, AgentsError};
@@ -39,6 +40,7 @@ pub use sessions::{
     SessionIndexRow, SessionMeta, SessionStore, SessionsError,
 };
 pub use todos::{TodoRow, TodoStore, TodosError};
+pub use usage::{UsageRecord, UsageReport, UsageStore, UsageError};
 
 /// All singleton stores plus the startup initialization order
 /// (architecture.md §4): layout first, then each domain loads tolerantly.
@@ -52,6 +54,7 @@ pub struct StoreRegistry {
     pub prefs: UserPrefs,
     pub todos: TodoStore,
     pub prompts: PromptStore,
+    pub usage: UsageStore,
     pub search: SearchEngine,
 }
 
@@ -66,6 +69,7 @@ impl StoreRegistry {
             prefs: UserPrefs::load(&paths),
             todos: TodoStore::load(&paths),
             prompts: PromptStore::load(&paths),
+            usage: UsageStore::load(&paths),
             sessions,
             search: SearchEngine::new(),
             paths,
