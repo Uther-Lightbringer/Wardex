@@ -583,6 +583,9 @@ pub(crate) struct Actor {
     /// Last time any ACP data arrived (event or recv). Drives the stall
     /// watchdog; reset on every handle_event / handle_recv.
     last_activity: std::time::Instant,
+    /// When the current busy turn started (start_send); reported in the
+    /// stall bubble so the user sees how long the turn actually ran.
+    turn_started: Option<std::time::Instant>,
 }
 
 /// Spawn the per-session actor task; returns the command sender.
@@ -646,6 +649,7 @@ pub(crate) fn spawn_actor(
         guide_gen: 0,
         last_error: String::new(),
         last_activity: std::time::Instant::now(),
+        turn_started: None,
     };
     tokio::spawn(async move { actor.run().await });
     // 启动即 reload 一次提醒：重启恢复时过期的提醒会立即触发。
@@ -728,12 +732,27 @@ impl Actor {
             self.session_id
         );
         self.cancel_retry(false);
+        // Grab diagnostics BEFORE dropping the client (drop kills the CLI).
+        let silent_secs = self.last_activity.elapsed().as_secs();
+        let turn_secs = self
+            .turn_started
+            .map(|t| t.elapsed().as_secs())
+            .unwrap_or(silent_secs);
+        let stderr = self
+            .client
+            .as_ref()
+            .map(|c| c.stderr_tail())
+            .unwrap_or_default();
         self.client = None;
         self.acp_ready = false;
         self.snap().acp_running = false;
-        let msg = format!(
-            "回合失败：超过 {K_TURN_STALL_SECS} 秒没有收到模型端点的任何数据（连接已重置）。请检查网络/代理、Base URL 与 API Key 后重试"
+        let mut msg = format!(
+            "回合失败：超过 {K_TURN_STALL_SECS} 秒没有收到模型端点的任何数据（连接已重置）。实际静默 {silent_secs} 秒，回合已运行 {turn_secs} 秒。请检查网络/代理、Base URL 与 API Key 后重试"
         );
+        let stderr = stderr.trim();
+        if !stderr.is_empty() {
+            msg.push_str(&format!("\n\nCLI stderr 末尾输出：\n{stderr}"));
+        }
         self.set_error(msg.clone());
         self.flush_stream_buffers();
         if self.assistant_buf.trim().is_empty() {
@@ -1279,6 +1298,50 @@ impl Actor {
                 self.last_turn_error = error.clone();
                 self.set_error(error);
             }
+            AcpEvent::SessionLoadFallback { error } => {
+                // session/load failed and the client silently opened a fresh
+                // session: the resume LOOKS normal but the agent-side history
+                // is gone. Surface the real load error in the chat, or the
+                // user never learns the context was lost.
+                let notice = format!(
+                    "⚠ 原会话恢复失败（{error}），已自动开启新会话：历史上下文未恢复，agent 只能看到本会话之后的内容。"
+                );
+                self.set_error(notice.clone());
+                if self.busy {
+                    // Fold into the in-flight bubble: a standalone row would
+                    // divert the streamed reply (flushes always target the
+                    // LAST assistant row).
+                    self.assistant_buf.push_str(&notice);
+                    self.pending_content.push_str(&notice);
+                    self.schedule_flush();
+                } else {
+                    // Warm-up spawn outside any turn: a standalone error row.
+                    let provider = self.agent.provider.trim().to_lowercase();
+                    let row = {
+                        let mut stores = lock_ok(&self.stores);
+                        if let Err(e) = stores.sessions.append_message(
+                            &self.session_id,
+                            "assistant",
+                            &notice,
+                            &provider,
+                            "error",
+                            &[],
+                            "",
+                        ) {
+                            log::warn!(
+                                "chat[{}] load-fallback notice append failed: {e}",
+                                self.session_id
+                            );
+                        }
+                        last_row(&stores, &self.session_id)
+                    };
+                    if let Some(row) = row {
+                        self.emit("chat://messageAppended", row_json(&self.session_id, &row));
+                    }
+                    self.emit("store://sessions", json!({}));
+                }
+                self.emit_status(None);
+            }
             AcpEvent::ProcessExited { code } => {
                 log::info!("chat[{}] ACP process exited (code {code})", self.session_id);
                 self.acp_ready = false;
@@ -1463,6 +1526,7 @@ impl Actor {
         self.bg_wake_sent = false;
         self.turn_gen += 1;
         self.set_busy(true);
+        self.turn_started = Some(std::time::Instant::now());
         self.set_error(String::new());
         self.emit_status(None);
 
@@ -1499,6 +1563,7 @@ impl Actor {
     fn finish_reply(&mut self) {
         self.clear_permission();
         self.set_busy(false);
+        self.turn_started = None;
         // Background turn completion marks the session unread (runtime flag,
         // not persisted); opening the session clears it.
         let is_active = lock_ok(&self.shared).active_id == self.session_id;

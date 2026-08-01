@@ -36,6 +36,11 @@ pub trait ClientDriver: Send {
     ) -> BoxFuture<'a, Result<(), AcpError>>;
     /// From initialize -> promptCapabilities.image (attachment split rule).
     fn image_supported(&self) -> bool;
+    /// Tail of the child CLI's stderr, folded into failure bubbles; empty
+    /// for drivers without a captured stderr (tests).
+    fn stderr_tail(&self) -> String {
+        String::new()
+    }
 }
 
 impl<T: Transport + Sync + 'static> ClientDriver for AcpClient<T> {
@@ -74,6 +79,9 @@ impl<T: Transport + Sync + 'static> ClientDriver for AcpClient<T> {
     }
     fn image_supported(&self) -> bool {
         AcpClient::image_supported(self)
+    }
+    fn stderr_tail(&self) -> String {
+        AcpClient::stderr_tail(self)
     }
 }
 

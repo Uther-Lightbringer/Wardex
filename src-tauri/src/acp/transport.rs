@@ -97,6 +97,12 @@ pub trait Transport: Send {
     fn exit_code(&self) -> impl std::future::Future<Output = Option<i32>> + Send {
         async { None }
     }
+    /// Tail of the child's stderr (last K_STDERR_TAIL_CHARS chars), for
+    /// surfacing real diagnostics in failure bubbles. Transports without a
+    /// captured stderr return an empty string.
+    fn stderr_tail(&self) -> String {
+        String::new()
+    }
 }
 
 /// Everything needed to spawn the agent CLI subprocess
@@ -110,9 +116,15 @@ pub struct SpawnConfig {
     pub cwd: String,
 }
 
+/// stderr tail kept for failure diagnostics (stall/kill bubbles): the last
+/// this many chars of everything the child wrote to stderr.
+pub const K_STDERR_TAIL_CHARS: usize = 4000;
+
 /// tokio Child stdin/stdout transport. stderr is drained on a background
 /// task and only logged (truncated to 500 chars, AcpClient.cpp:79-83); it
-/// never participates in the protocol.
+/// never participates in the protocol. The last K_STDERR_TAIL_CHARS chars
+/// are kept in a tail buffer (stderr_tail()) so failure bubbles can carry
+/// the CLI's own dying words instead of a guess.
 ///
 /// Lifecycle: kill_on_drop replaces the old stop()'s kill+waitForFinished
 /// (1500ms) — dropping this transport kills the child; tokio reaps it via
@@ -123,6 +135,8 @@ pub struct StdioTransport {
     /// Held so Drop kills the child (kill_on_drop); taken by exit_code()
     /// once stdout hit EOF so the real exit code can be awaited.
     child: Mutex<Option<Child>>,
+    /// Ring tail of child stderr (chars, capped at K_STDERR_TAIL_CHARS).
+    stderr_tail: Arc<std::sync::Mutex<String>>,
 }
 
 struct ReadState {
@@ -207,7 +221,9 @@ impl StdioTransport {
                 "child stdout unavailable",
             ))
         })?;
+        let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
         if let Some(mut stderr) = child.stderr.take() {
+            let tail = Arc::clone(&stderr_tail);
             tokio::spawn(async move {
                 let mut chunk = [0u8; 4096];
                 loop {
@@ -215,6 +231,14 @@ impl StdioTransport {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             let text = String::from_utf8_lossy(&chunk[..n]);
+                            {
+                                let mut t = tail.lock().unwrap_or_else(|p| p.into_inner());
+                                t.push_str(&text);
+                                let count = t.chars().count();
+                                if count > K_STDERR_TAIL_CHARS {
+                                    *t = t.chars().skip(count - K_STDERR_TAIL_CHARS).collect();
+                                }
+                            }
                             let text: String = text.chars().take(500).collect();
                             let text = text.trim();
                             if !text.is_empty() {
@@ -234,6 +258,7 @@ impl StdioTransport {
                 pending: VecDeque::new(),
             }),
             child: Mutex::new(Some(child)),
+            stderr_tail,
         })
     }
 }
@@ -270,6 +295,13 @@ impl Transport for StdioTransport {
             Some(mut c) => Some(c.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1)),
             None => None,
         }
+    }
+
+    fn stderr_tail(&self) -> String {
+        self.stderr_tail
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

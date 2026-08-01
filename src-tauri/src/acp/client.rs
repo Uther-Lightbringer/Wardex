@@ -70,6 +70,18 @@ pub struct AcpClient<T: Transport> {
     mcp_servers: Vec<Value>,
 }
 
+/// JSON-RPC error object -> display text. The numeric code is kept alongside
+/// the message so bubbles show the agent's real failure class (HTTP status,
+/// RPC code) instead of free text alone; the rate-limit detector's
+/// substring matching is unaffected by the "[code] " prefix.
+fn rpc_error_text(err: &Value) -> String {
+    let msg = err.get("message").and_then(Value::as_str).unwrap_or_default();
+    match err.get("code").and_then(types::json_int) {
+        Some(code) if !msg.is_empty() => format!("[{code}] {msg}"),
+        _ => msg.to_string(),
+    }
+}
+
 impl<T: Transport> AcpClient<T> {
     pub fn new(transport: T, events: mpsc::Sender<AcpEvent>) -> Self {
         Self {
@@ -116,6 +128,12 @@ impl<T: Transport> AcpClient<T> {
 
     pub fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    /// Tail of the child CLI's stderr (empty for transports without one);
+    /// the chat layer folds it into failure bubbles for real diagnostics.
+    pub fn stderr_tail(&self) -> String {
+        self.transport.stderr_tail()
     }
 
     /// State reset half of the old stop() (AcpClient.cpp:28-47): session id,
@@ -329,12 +347,7 @@ impl<T: Transport> AcpClient<T> {
         if msg.get("id").is_some() && msg.get("method").is_none() {
             let id = msg.get("id").and_then(types::json_int).unwrap_or(-1);
             if let Some(err) = msg.get("error") {
-                let em = err
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                return self.handle_error_response(id, em).await;
+                return self.handle_error_response(id, rpc_error_text(err)).await;
             }
             let result = msg.get("result").cloned().unwrap_or(Value::Null);
             return self.handle_result_response(id, &result).await;
@@ -386,10 +399,12 @@ impl<T: Transport> AcpClient<T> {
         if self.load_session_id == Some(id) {
             // Stored session expired/unknown on the agent side — fall back
             // to a fresh one instead of failing the whole start
-            // (AcpClient.cpp:328-334).
+            // (AcpClient.cpp:328-334). The chat layer surfaces the real
+            // error in a bubble (context is silently lost otherwise).
             self.load_session_id = None;
             self.replaying = false;
             log::info!("AcpClient session/load failed, falling back to session/new: {em}");
+            self.emit(AcpEvent::SessionLoadFallback { error: em }).await;
             self.request_new_session().await
         } else if self.init_id == Some(id) || self.new_session_id == Some(id) {
             self.emit(AcpEvent::StartFailed {
@@ -900,7 +915,7 @@ async fn initialize_error_is_start_failed() {
     h.client.recv_once().await.expect("err");
     assert_eq!(
         events(&mut h),
-        vec![AcpEvent::StartFailed { error: "bad key".into() }]
+        vec![AcpEvent::StartFailed { error: "[-32000] bad key".into() }]
     );
 }
 
@@ -990,11 +1005,17 @@ async fn session_load_error_falls_back_to_session_new() {
                            "error": { "code": -32000, "message": "unknown session" } }))
         .await;
     h.client.recv_once().await.expect("load err");
-    // Fallback: session/new sent, NO startFailed, whole start still alive.
+    // Fallback: session/new sent, NO startFailed, whole start still alive;
+    // the chat layer is told WHY the resume failed (lost context surfaced).
     let sent = sent_requests(&h);
     assert_eq!(sent[2]["method"], "session/new");
     assert_eq!(sent[2]["id"], 3);
-    assert!(events(&mut h).is_empty());
+    assert_eq!(
+        events(&mut h),
+        vec![AcpEvent::SessionLoadFallback {
+            error: "[-32000] unknown session".into()
+        }]
+    );
 
     h.transport
         .feed_json(json!({ "jsonrpc": "2.0", "id": 3, "result": { "sessionId": "fresh-1" } }))
@@ -1229,8 +1250,8 @@ async fn prompt_error_path_order_is_protocol_error_chunk_turn_finished() {
     assert_eq!(
         events(&mut h),
         vec![
-            AcpEvent::ProtocolError { error: "rate limit exceeded".into() },
-            AcpEvent::MessageChunk { text: "回合失败：rate limit exceeded".into() },
+            AcpEvent::ProtocolError { error: "[429] rate limit exceeded".into() },
+            AcpEvent::MessageChunk { text: "回合失败：[429] rate limit exceeded".into() },
             AcpEvent::TurnFinished { stop_reason: "error".into(), usage: None },
         ]
     );

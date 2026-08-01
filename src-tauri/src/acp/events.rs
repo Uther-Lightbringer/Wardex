@@ -74,6 +74,10 @@ pub enum AcpEvent {
         usage: Option<TurnUsage>,
     },
     ProtocolError { error: String },
+    /// session/load failed and the client silently fell back to session/new:
+    /// the chat layer must surface this (with the load error verbatim) so a
+    /// lost-context resume is never invisible to the user.
+    SessionLoadFallback { error: String },
     /// Process died at any point; chat does resume/interrupt bookkeeping.
     /// -1 = exit code unavailable (e.g. killed, or a mock transport).
     ProcessExited { code: i32 },
