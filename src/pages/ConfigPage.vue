@@ -65,7 +65,7 @@ const isCustom = computed(() => draft.provider === 'custom');
 // field; the field stays free-text so any custom endpoint still works.
 const baseUrlPresets: { name: string; url: string }[] = [
   { name: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
-  { name: 'Kimi(Moonshot)', url: 'https://api.moonshot.cn/v1' },
+  { name: 'Kimi', url: 'https://api.kimi.com/coding/v1' },
   { name: 'OpenCode Zen', url: 'https://opencode.ai/zen/go/v1' },
 ];
 const baseUrlPresetNames = baseUrlPresets.map((p) => p.name);
