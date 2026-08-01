@@ -138,6 +138,9 @@ async function refresh(): Promise<void> {
 onMounted(refresh);
 watch(() => chat.sessionId, refresh); // sessionSwitch
 watch(() => chat.turnSeq, refresh); // turnEnd
+// meta loads async after the panel mounts on first project open; without
+// this the badge stays "（非 Git 目录）" until the first turn bumps turnSeq.
+watch(workDir, refresh);
 watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
 </script>
 
