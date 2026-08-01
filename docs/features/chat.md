@@ -39,7 +39,7 @@
 
 三栏 + 底部双框布局，全部装在 `ShellFrame` 下落入场动画容器里（动画见 main-menu-and-misc.md）：
 
-- **最左栏「本项目会话」rail**：宽 196px，贯穿全高，专用窄框贴图 `frame_rail.png`。
+- **最左栏「本项目会话」rail**：宽 196px，贯穿全高，九宫格框 `frame_fat_bar.png`（slice 28/32/28/32，hole 24/26/24/26，带玻璃底）。
 - **左中聊天面板**：`(width - railW - 2*gap) * 0.72`，上为标题行 + 消息列表，贴图 `frame_iron_panel.png`（带吊链）。
 - **右栏「会话简介」**：剩余宽度，上为信息/工作区文件树。
 - **底部左输入框** 与 **底部右操作湾**（两个主菜单尺寸按钮），贴图 `frame_iron_bar.png`。
@@ -71,7 +71,9 @@
 - **显示名**（`ui/ChatBubble.qml:59-65`）：assistant 用会话 meta `agentName`，空则 `"Agent"`；user 用 `userPrefs.userName`，空则 `"阿尔萨斯"`。头部行：`名字（蓝 #7eb6ff / 金 #f2cf6b）· HH:mm:ss · 状态`。
 - **状态标签**（`ui/ChatBubble.qml:151-163`）：`生成中…`（金）/ `错误`（红 `#d08070`）/ `已中断`（灰金 `#a09070`）；`done` 不显示。错误气泡正文变红、玻璃底改 `#882a1518`；流式中气泡描边 `#66f2cf6b`。
 - **segments 交错渲染**（`ui/ChatBubble.qml:379-517`）：
-  - `thinking` 段：暖色折叠块（底 `#44191510`、边 `#4a4232`、标题 `#c8b890`），标题行 `▶/▼ 思考过程`，**默认折叠**，点击切换；正文灰 `#908878`、小一号字。
+  - **流式中**：thinking/tool 段内嵌单行折叠块（见下），`text` 段纯文本增量展示。
+  - **回合结束后（含历史消息）**：所有 thinking/tool 段**移出气泡**，气泡里只留一行 `⚙ N 个步骤（思考×a · 工具×b）`（不带工具名列表），点击打开 `ProcessDialog` 过程明细弹框（frame_popup 720×540）：按到达顺序逐条单行（思考暖色块 / 工具冷色块），点击展开 payload，整体一条 WarScrollBar，Esc/遮罩/「关闭」关闭；`text` 段仍内嵌 markdown。流式行不走此逻辑——live-append 契约要求末尾段挂在 DOM 上。
+  - `thinking` 段（内嵌/弹框同式样）：暖色折叠块（底 `#44191510`、边 `#4a4232`、标题 `#c8b890`），标题行 `▶/▼ 思考过程`，**默认折叠**，点击切换；正文灰 `#908878`、小一号字。
   - `text` 段：正文，不可折叠，可选中。流式期间纯文本展示；**回合结束后 markdown 渲染一次**（新版：流式期向末尾文本节点增量 append DOM 文本；`status` 变为 done/error/interrupted 时用 markdown 渲染器整体替换该段为渲染结果，此后不再变）。
   - `tool` 段：单行 `▶/▼ · <名称>  [<status>]`（底 `#4412151c`、边 `#3a4a40`），**默认折叠**，点击展开 pretty-print 的 payload。名称取 `name || title || kind || "tool"`（`ui/ChatBubble.qml:192-195`）。payload 取 `rawInput || arguments || content || output`，对象则 `JSON.stringify(,,2)`（`ui/ChatBubble.qml:201-208`）。**新版变更：展开内容超过 64KB 时截断并追加 `…（已截断）`；完整 payload 只在磁盘 JSONL 中保留**（旧版不截断，长 payload 会撑爆 UI）。
 - **展开状态保持**：`segOpen` 是气泡级 map，以 segment 下标为键（`ui/ChatBubble.qml:113-123`）。segments 只增不改结构，下标稳定；流式增量 append 不重建段列表，用户中途展开的思考/工具块不会在下一个分片到达时自动合上。新版必须以同等机制保证：增量 append 不触发整段重渲染。
@@ -159,12 +161,14 @@
 - **发送规则**（`sendUserMessageWithAttachments`，`src/ChatController.cpp:961-1004`）：
   - 图片且当前 agent 声明了 `promptCapabilities.image` → ACP image block；否则（非图片，或 agent 不支持图片）→ 在 prompt 文本尾部追加 `\n[附件] <路径>`（agent 以 cwd 内工具自行读取）。
   - 文本为空但有图片 → 发送占位文本 `（图片）`。
-  - **busy 时附件消息不可入队**：拒绝并报错 `生成中不支持附件入队，请等待当前回复完成`（纯文本消息 busy 时可入队，见 4.1）。
+  - busy 时附件消息**同样入队**（新版改为支持）：附件路径在粘贴时已落盘（媒体目录），队列元素为 `{text, images, display}`，排队不会丢失/失效；出队、插队（guideAt）均带附件发送。队列快照中带附件的条目显示 `文本 📎n` 标注。
 - 气泡内的附件展示见 2.2。
 
-### 3.6 提示词模板
+### 3.6 提示词模板（已移除）
 
 旧: `ui/ChatPage.qml:363-390, 1506-1642`
+
+**Web 版已移除**：`模板`/`📎` 按钮与模板菜单均从 Composer 去掉（2026-07 按需求调整）；图片附件改由 Ctrl+V 粘贴进入。以下为旧 Qt 版行为存档：
 
 - `模板` 按钮（与附件钮同款的四方蓝钮）弹出模板菜单，锚在按钮上方、右缘对齐按钮右缘，列出 PromptStore 全部模板（最多显示 8 行，超出滚动）。
 - 点击模板 → 在**光标处**插入正文：前文非空且不以换行结尾时先补一个 `\n`，插入后走统一 64K 截断入口，焦点回输入框。
@@ -174,7 +178,7 @@
 
 旧: `ui/ChatPage.qml:1644-1660`、`src/ChatController.cpp:125-136, 908-916`
 
-- 向上展开的下拉，宽 96。模式 id 与中文文案映射：
+- 向上展开的下拉（`WarDropdown`），宽 140。模式 id 与中文文案映射：
   - `default` → `需批准`；`plan` → `计划`；`auto` → `自动`；`yolo` → `YOLO`
 - 持久化到 user_prefs（全局，非按会话）。切换后立即对活动会话进程生效（`session/set_config_option`），后台会话下次 prompt 时生效。
 - 发给 agent 前经 ProviderRegistry 映射（kimi 系 id 原样；claude：`auto→acceptEdits`、`yolo→bypassPermissions`；映射表见 sessions-and-config.md 附录与 ../acp-protocol.md）。
@@ -186,7 +190,7 @@
 
 旧: `ui/ChatPage.qml:1839-1969`、`src/ChatController.cpp:920-951, 1109-1180, 1386-1396`
 
-- busy 时发送纯文本消息 → 入队（**上限 10 条**，`kMaxQueueSize`，`src/ChatController.h:47`）；满则拒绝并报错 `队列已满（最多 10 条）`，输入框内容保留。
+- busy 时发送消息 → 入队（**上限 10 条**，`kMaxQueueSize`，`src/ChatController.h:47`；含附件消息，条目以 `📎n` 标注）；满则拒绝并报错 `队列已满（最多 10 条）`，输入框内容保留。
 - 回合结束后自动取出队首发送（`drainQueue`）。
 - 面板浮在输入框上方，`queueLength>0` 时可见。标题行 `▶/▼ 发送队列 (n/10)` 点击折叠/展开（展开最多 6 行高）+ `清空`（红）。发送后若队列非空自动展开；队列清空自动折叠。
 - 每行：`序号. 预览（空白压缩、截 48 字加…）` + 两个操作：
@@ -197,16 +201,19 @@
 
 旧: `ui/SubagentPanel.qml` 全文、`src/ChatController.cpp:485-652`
 
-- 展示当前会话**当前回合**的子 Agent 调用（只读，点击无行为）。`subagents.length > 0` 时可见，位于发送队列面板上方。
+- 展示当前会话**当前回合**的子 Agent 调用。`subagents.length > 0` 时可见，位于发送队列面板上方。
 - 头部 `▶/▼ 子 Agent (执行中 n / 共 m)`，点击折叠/展开（展开上限 160px）。
-- 条目字段：`{id, kind, title, status, children, childNames, summary, startedAt, finishedAt}`；`status ∈ pending | in_progress | completed | failed | interrupted`。
+- 条目字段：`{id, kind, title, status, children, childNames, summary, input, output, startedAt, finishedAt, lastUpdate}`；`status ∈ pending | in_progress | completed | failed | interrupted`。
 - 每行：状态圆点（in_progress 绿 / pending 金 / failed 红 / interrupted 金 / 其他灰；pending/in_progress 时 550ms 呼吸闪烁）+ 标题（`children>0` 时前缀 `[N 个子任务] `，completed 后标题变灰）+ 右侧 `状态中文 · summary · 耗时`（`执行中/等待/完成/失败/中断`；耗时 `<60s` 显示 `Ns`，否则 `NmNs`）。
 - **1s 心跳**：仅面板可见且有 pending/in_progress 条目时运行，驱动耗时每秒刷新。
+- **卡住提示**：live 条目距 `lastUpdate`（最后一次 tool_call/update 触碰）超过 120s 无更新 → 行尾红字 `可能卡住`。
+- **点击条目 → `SubagentDialog` 详情弹框**（frame_popup 760×680）：标题 + `kind · 状态 · 已用时 · 距上次更新`（卡住阈值同上面板，超时红字 `可能卡住 · 无更新 Ns`）+ swarm 子任务 chips + 「任务书」（`input`：单 Agent 的完整 `prompt`，否则整个参数 JSON，≤32KB）+「最终报告」（`output`：完成时的 `rawOutput`，≤64KB；执行中显示占位）+「执行过程」（见下）；各区带 WarScrollBar；底部「停止回合」（仅 live 且回合 busy 时显示，调 `session/cancel` 停整个回合——ACP 无法单独杀一个子 Agent，弹框内有说明）+「关闭」，Esc/遮罩关闭。弹框按 id 实时跟随 `chat.subagents` 更新。
+- **执行过程（kimi CLI 专属优化，读盘不经主 Agent）**：仅当会话 `provider === 'kimi'` 时弹框才显示此区；其他 ACP CLI 保持「任务书+最终报告」的通用视图（各自原生行为，不做私有适配）。kimi CLI（含 ACP 方式）把每个子代理的完整事件流写在 `~/.kimi-code/sessions/<项目目录>/<acpSessionId>/agents/<agentId>/wire.jsonl`；`agentId` 来自 rawOutput 的 `agent_id:` 行（后端提取存 `agentIds[]`，**完成后才有**）。`subagent_process` 命令（`inspect/subagent.rs`）按会话 meta 的 `acpSessionId` 定位 wire 文件（全项目目录 glob，id 白名单校验防穿越），解析 `context.append_loop_event`：`tool.call`（名称+description+参数）、`tool.result`（输出）、`content.part` 的 think（`think` 字段）/text；保留最后 400 步、每步 ≤4000 字。弹框自动加载首个 id（多 id 时显示切换 chips），可手动「刷新」。**脆弱点：kimi-code 私有格式，CLI 升级可能变**；文件被清理时显示错误占位。
 - **跟踪规则**（`trackSubagentCall`，`src/ChatController.cpp:534-628`）：
   - ACP 无专用子 Agent 事件，CLI 以普通工具调用上报。识别工具名（忽略大小写）：`agent` / `agentswarm` / `task` / `spawn_agent`。
   - `tool_call_update` 不携带名称——新条目必须来自带名的 `tool_call`；后续 update 仅按 `toolCallId` 匹配已跟踪条目。
-  - 输入参数流式到达：content 块是累积快照（kimi 末块为准）也可能是增量——先尝试解析最后一个块的 JSON，失败再试全部块拼接；可解析后取 `description` 作标题（否则 `prompt` 截 48 字），`items[]` 填充 `children/childNames`。
-  - 完成时从 `rawOutput` 提取摘要：swarm 结果 `<agent_swarm_result>` 统计 `outcome="completed"` 占比 → `完成 x/y`；单 Agent 结果取 `actual_subagent_type:` 行。
+  - 输入参数流式到达：content 块是累积快照（kimi 末块为准）也可能是增量——先尝试解析最后一个块的 JSON，失败再试全部块拼接；可解析后取 `description` 作标题（否则 `prompt` 截 48 字），`items[]` 填充 `children/childNames`；完整任务书存 `input`（`prompt` 全文或 pretty JSON，≤32KB）。每次触碰写 `lastUpdate`。
+  - 完成时从 `rawOutput` 提取摘要：swarm 结果 `<agent_swarm_result>` 统计 `outcome="completed"` 占比 → `完成 x/y`；单 Agent 结果取 `actual_subagent_type:` 行；`rawOutput` 全文存 `output`（≤64KB）；`agent_id:` 行提取存 `agentIds[]`（wire 目录名，执行过程用）。
   - 回合结束时仍 pending/in_progress 的条目：正常结束 → `completed`；被中断 → `interrupted`，并写 `finishedAt`。
   - 新回合开始时清空面板。
 
@@ -267,7 +274,9 @@
 
 旧: `ui/ChatPage.qml:792-849`、`src/ChatController.cpp:741-808`
 
-- 聊天面板顶部：会话标题（金）+ 状态行（`chatController.statusText`）+ Agent 芯片 `◆ <name> ▾`（蓝，悬停变金）。
+- 聊天面板顶部：会话标题（金）+ 状态行（`chatController.statusText`）+ **思考档位下拉**（见下）+ Agent 切换器（`WarDropdown` 下拉框样式，bar 显示 `◆ <name>`，列表项 `name · provider`）。
+- **思考档位下拉（kimi 专属，新版）**：ACP `session/new|load` 返回的 `configOptions[]` 里有 `id="thinking"` 的 picker 时才显示（kimi 总有，档位由模型 `support_efforts` 决定，如 Low/High/Max；DeepSeek 类布尔思考的模型为开/关式档位；其他 ACP CLI 不上报则不显示）。bar 显示 `思考 <当前档名>`；选择 → `set_config_option {configId:"thinking", value}`，刷新后的 options 经 `acp://configOptions` 回来更新 currentValue（`config_option_update` 通知也会刷新）。切会话/删会话清空。
+- **模型下拉（同机制）**：`configOptions[]` 里 `id="model"` 的 picker，bar 显示 `模型 <当前模型名>`，选择 → `set_config_option {configId:"model", value}`。Agent 配置了默认模型时，**新会话**（非 session/load 恢复的）在首个 configOptions 到达后自动应用一次（仅当该值在 picker 选项内且 ≠ currentValue）；恢复的老会话尊重 CLI 侧记忆，不覆盖。
 - 状态行组成（`refreshStatusLine`，`src/ChatController.cpp:1398-1427`）：`限流，N 秒后自动重试（第 x/3 次）…` / `等待批准…` / `连接 ACP…` / `生成中…` / `就绪`，后缀 `· 需批准|计划|自动|YOLO`，队列非空再后缀 `· 队列 n/10`。
 - 点击芯片弹出 Agent 菜单：全部 agent，每项 `✓/　 + name + · provider`；当前项与 `canUseForChat=false` 的项禁用。选择 → `switchAgent(agentId)`：
   - 同 id → no-op；agent 不存在/不可用 → 报错 `Agent 不可用，请在配置页检查`。
@@ -289,6 +298,7 @@
 - **分支徽标**：读 `.git/HEAD`（无进程开销；支持 worktree gitfile：`gitdir: <path>` 指向真实 HEAD）。`ref: refs/heads/x` → `x`；`ref: 其他` → 去 `ref: ` 前缀；detached → 短 SHA 前 7 位。非 git 目录时徽标与提交历史**整体隐藏**。显示 `⎇ Git <branch>`（分支名中部省略）。
 - 刷新时机：进页面、切会话、**回合结束**（agent 可能在回合里切换/新建分支或提交）。
 - **提交历史**（只读）：`git log` 拉取最近 200 条，列表最多显示约 4 行高（132px）超出内部滚动。每行：`subject` + `shortHash · author · date`。`刷新` 链接（加载中显示 `加载中…`）；错误红字；空显示 `暂无提交`。刷新时机同分支徽标（手动点刷新亦可）。新版用 Rust 侧执行 `git log --format` 或读 git 库，交互语义不变。
+- **提交详情弹框**：点击历史中的提交 → `GitCommitDialog`（`git_diff_commit` 一次取全提交 diff，前端按文件过滤）。左侧为该提交涉及的文件列表（含 +增/−删行数），点击文件 → 右侧 GitLab 风格 diff 视图（文件头、新旧双行号、+/− 标记列、增行绿底/删行红底、hunk 头蓝底）；两侧内容溢出时各带一条 WC3 滚动条（diff 区超长行另有原生横向滚动条）；鼠标移到弹框外圈石块边框上可八向拖拽改大小（最小 520×360）；Esc/点遮罩/底部「关闭」按钮关闭。工作区「更改」行的 diff 仍为面板内嵌视图。
 
 ### 6.4 工作区文件树
 
@@ -393,7 +403,7 @@
 ## 实现检查清单
 
 消息列表与气泡
-- [ ] segments 交错渲染：thinking 暖色折叠（默认折叠）、text、tool 行（默认折叠）按到达顺序排列
+- [ ] segments 交错渲染：流式中 thinking 暖色折叠（默认折叠）、text、tool 行（默认折叠）按到达顺序排列；回合结束后 thinking/tool 收成一行 `⚙ N 个步骤`，点击开 ProcessDialog
 - [ ] 流式增量 DOM append（50ms 合并、积压 >64KB 降频 250ms），绝不整段重绑定；markdown 回合结束后渲染一次
 - [ ] user 右 / agent 左气泡；头像槽 64×58 在框外贴顶；头像三级回退解析；改头像即时刷新
 - [ ] 头部行：显示名（阿尔萨斯兜底）· HH:mm:ss · 状态标签（生成中…/错误/已中断 + 对应配色）
@@ -411,7 +421,7 @@
 - [ ] 发送时展开为 `【引用文件：…】` 块；escape/missing/unreadable/binary/range 五种失败占位；200KB 注入上限；GBK 回退
 - [ ] Ctrl+V 图片 → 媒体缓存 + 附件条；附件条 ≤6 去重、缩略图/图标芯片、✕ 移除
 - [ ] 附件发送规则：图片 + imageSupported → image block，否则 `\n[附件] 路径` 内联；空文本纯图片发 `（图片）`；busy 拒收附件消息（报错文案）
-- [ ] 模板菜单：光标插入 + 换行守卫 + 插入后截断；保存当前输入为模板（首行 20 字命名）
+- [ ] ~~模板菜单~~（已移除，见 §3.6）
 - [ ] permission mode 下拉四态中文化、持久化、ProviderRegistry 映射、状态行后缀
 
 浮动件

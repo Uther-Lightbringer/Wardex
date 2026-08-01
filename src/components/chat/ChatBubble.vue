@@ -19,6 +19,7 @@ import { renderMarkdown } from '../../lib/markdown';
 import { copyText } from '../../lib/clipboard';
 import { usePrefsStore } from '../../stores/prefs';
 import { useChatStore, type ChatMessage, type ChatSegment } from '../../stores/chat';
+import ProcessDialog from './ProcessDialog.vue';
 
 const props = defineProps<{
   row: ChatMessage;
@@ -63,6 +64,24 @@ const segs = computed<ChatSegment[]>(() => props.row.segments ?? []);
 const hasStructSegs = computed(() => segs.value.some((s) => s.kind !== 'text'));
 /** Streaming or structured bubbles pin to max width (no frame-width jitter). */
 const pinWide = computed(() => props.streaming || hasStructSegs.value);
+
+// ---- process dialog (final rows: thinking/tool blocks move OUT of the bubble) ----
+// Final rows show a single "⚙ N 个步骤" line; clicking opens ProcessDialog
+// with the full step list. Streaming rows keep the inline one-line blocks —
+// the live-append contract (data-live-seg) needs the tail segment mounted.
+const structSegs = computed(() => segs.value.filter((s) => s.kind !== 'text'));
+const textSegs = computed(() =>
+  segs.value.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'text'),
+);
+const procOpen = ref(false);
+const procSummary = computed(() => {
+  const think = structSegs.value.filter((s) => s.kind === 'thinking').length;
+  const tools = structSegs.value.length - think;
+  const parts: string[] = [];
+  if (think > 0) parts.push(`思考×${think}`);
+  if (tools > 0) parts.push(`工具×${tools}`);
+  return `⚙ ${structSegs.value.length} 个步骤（${parts.join(' · ')}）`;
+});
 
 /** Placeholder "…" during streaming; treated as empty once final. */
 const displayBody = computed(() => {
@@ -245,6 +264,26 @@ function fileName(p: string): string {
 
         <!-- segments in arrival order -->
         <template v-if="segs.length > 0">
+          <!-- final rows: thinking/tool collapsed to ONE process line; the
+               dialog holds the full step list (text stays inline) -->
+          <template v-if="!streaming">
+            <div
+              v-if="structSegs.length > 0"
+              class="seg-proc"
+              :style="{ fontSize: fs(12) + 'px' }"
+              @click="procOpen = true"
+            >
+              {{ procSummary }}
+            </div>
+            <div v-for="{ s, i } in textSegs" :key="i" class="seg-text">
+              <span v-if="!mdEnabled" class="seg-text__plain">{{ s.text }}</span>
+              <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
+            </div>
+            <ProcessDialog v-model:open="procOpen" :segments="structSegs" :title="displayName + ' · ' + timeText" />
+          </template>
+
+          <!-- streaming: inline one-line blocks (live-append contract) -->
+          <template v-else>
           <template v-for="(s, i) in segs" :key="i">
             <!-- thinking: warm collapsible block, collapsed by default -->
             <div v-if="s.kind === 'thinking'" class="seg-thinking">
@@ -282,6 +321,7 @@ function fileName(p: string): string {
               </div>
               <pre v-if="segOpen[i]" class="seg-tool__payload" :style="{ fontSize: fs(11) + 'px' }">{{ toolPayload(s) }}</pre>
             </div>
+          </template>
           </template>
         </template>
 
@@ -401,8 +441,10 @@ function fileName(p: string): string {
 .bubble-body {
   flex: 1;
   min-width: 0;
-  border: 14px 16px solid transparent; /* T R B L (slice 14/16/14/16) */
-  border-image: url('/assets/ui/frames/frame_chat_bubble_body.png') 14 16 14 16 repeat;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 14px 16px; /* T/B R/L (slice 14/16/14/16) */
+  border-image: url('/assets/ui/frames/frame_chat_bubble_body.png') 14 16 14 16 fill repeat;
   box-sizing: border-box;
   background: var(--war-glass);
   background-clip: padding-box;
@@ -518,6 +560,23 @@ function fileName(p: string): string {
 .seg-text__md {
   user-select: text;
   overflow-wrap: break-word;
+}
+
+/* ---- process summary line (final rows; opens ProcessDialog) ---- */
+.seg-proc {
+  width: fit-content;
+  margin: 2px 0 6px;
+  padding: 2px 10px;
+  background: #12151c44;
+  border: 1px solid #3a4a40;
+  border-radius: 2px;
+  color: #d0d6e0;
+  user-select: none;
+}
+
+.seg-proc:hover {
+  color: var(--war-gold);
+  border-color: var(--war-gold-dim);
 }
 
 /* ---- thinking block ---- */

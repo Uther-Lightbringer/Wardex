@@ -27,6 +27,7 @@
 pub mod acp;
 pub mod chat;
 pub mod inspect;
+pub mod models;
 pub mod probe;
 pub mod provider;
 pub mod store;
@@ -176,17 +177,37 @@ async fn send_prompt(
     session_id: String,
     text: String,
     attachments: Vec<String>,
-) -> Result<bool, String> {
-    state
-        .chat
-        .send_prompt(&session_id, &text, &attachments)
-        .await
-        .map_err(err)
+) -> Result<String, String> {
+    use crate::chat::runtime::SendOutcome;
+    match state.chat.send_prompt(&session_id, &text, &attachments).await {
+        Ok(SendOutcome::Started) => Ok("sent".to_string()),
+        Ok(SendOutcome::Enqueued) => Ok("enqueued".to_string()),
+        Ok(SendOutcome::Rejected(reason)) => {
+            Err(if reason.is_empty() { "发送被拒绝".to_string() } else { reason })
+        }
+        Err(e) => Err(err(e)),
+    }
 }
 
 #[tauri::command]
 async fn cancel(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.cancel(&session_id).await.map_err(err)
+}
+
+/// ACP config option picker (kimi "thinking"/"model"); refreshed options come
+/// back via acp://configOptions.
+#[tauri::command]
+async fn set_config_option(
+    state: State<'_, AppState>,
+    session_id: String,
+    config_id: String,
+    value: String,
+) -> Result<(), String> {
+    state
+        .chat
+        .set_config_option(&session_id, &config_id, &value)
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -206,6 +227,14 @@ async fn answer_permission(
         .answer_permission(&session_id, &option_id, cancelled)
         .await
         .map_err(err)
+}
+
+/// Pending permission payload for a session (null when none). Pulled by the
+/// chat store after a session switch — the live acp://permission event only
+/// reached whichever session was active when it fired.
+#[tauri::command]
+fn pending_permission(state: State<'_, AppState>, session_id: String) -> Value {
+    state.chat.pending_permission(&session_id).unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -256,6 +285,7 @@ fn runtime_states(state: State<'_, AppState>) -> Value {
                 "busy": s.busy,
                 "acpRunning": s.acp_running,
                 "queueLength": s.queue_len,
+                "queue": s.queue,
                 "agentId": s.agent_id,
                 "imageSupported": s.image_supported,
                 "lastActivity": s.last_activity_ms,
@@ -443,6 +473,13 @@ async fn folder_list(dir: String) -> Result<Value, String> {
     Ok(serde_json::to_value(entries).unwrap_or(json!([])))
 }
 
+/// Address-bar validation for the folder browser: list_dirs silently returns
+/// [] for missing dirs, so the editable path bar probes this first.
+#[tauri::command]
+fn folder_exists(dir: String) -> bool {
+    std::path::Path::new(&dir).is_dir()
+}
+
 #[tauri::command]
 async fn folder_create(dir: String, name: String) -> Result<Value, String> {
     let entry = tauri::async_runtime::spawn_blocking(move || store::browse::create_dir(&dir, &name))
@@ -552,6 +589,25 @@ async fn git_diff_commit(dir: String, hash: String) -> Result<Value, String> {
     .map_err(err)?;
     let diff = result.map_err(err)?;
     Ok(serde_json::to_value(diff).unwrap_or(json!({})))
+}
+
+/// Sub-agent process steps from the CLI's on-disk wire.jsonl
+/// (inspect/subagent.rs; kimi-code only, degrades to an error string).
+#[tauri::command]
+async fn subagent_process(
+    state: State<'_, AppState>,
+    session_id: String,
+    agent_id: String,
+) -> Result<Value, String> {
+    let acp_session_id = {
+        let mut stores = lock(&state.stores);
+        stores.sessions.acp_session_id_for(&session_id)
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect::subagent::read_subagent_process(&acp_session_id, &agent_id)
+    })
+    .await
+    .map_err(err)?
 }
 
 /// One directory level of the workspace tree (inspect/files.rs; lazy expand).
@@ -763,6 +819,23 @@ fn set_panel_layout(
 }
 
 // ---------------------------------------------------------------------------
+// Model list probing (models.rs)
+// ---------------------------------------------------------------------------
+
+/// GET {baseUrl}/models (OpenAI-compatible); the /chat/completions suffix is
+/// stripped before appending /models. Returns sorted model ids.
+#[tauri::command]
+fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
+    crate::models::fetch_models(&base_url, &api_key)
+}
+
+/// Model aliases from the [models] table of ~/.kimi-code/config.toml.
+#[tauri::command]
+fn kimi_model_aliases() -> Vec<String> {
+    crate::models::kimi_model_aliases()
+}
+
+// ---------------------------------------------------------------------------
 // App entry
 // ---------------------------------------------------------------------------
 
@@ -811,8 +884,10 @@ pub fn run() {
             set_session_pinned,
             send_prompt,
             cancel,
+            set_config_option,
             retry_cancel,
             answer_permission,
+            pending_permission,
             set_permission_mode,
             switch_agent,
             guide_at,
@@ -843,6 +918,7 @@ pub fn run() {
             project_exists,
             folder_drives,
             folder_list,
+            folder_exists,
             folder_create,
             install_help,
             read_file_range,
@@ -854,6 +930,7 @@ pub fn run() {
             git_status,
             git_diff_file,
             git_diff_commit,
+            subagent_process,
             list_workspace_dir,
             save_clipboard_image,
             // todos / prompts / prefs
@@ -873,6 +950,9 @@ pub fn run() {
             set_font_scale,
             set_preview_size,
             set_panel_layout,
+            // model list probing
+            fetch_models,
+            kimi_model_aliases,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarDex");

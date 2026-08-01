@@ -176,8 +176,8 @@
 | 名称 | TextField | 占位 `例如：工作 Kimi` |
 | Provider | WarDropdown | `kimi` / `claude` / `codex` / `custom`，切换见 9.2 |
 | （接入提示） | 文本行 | 当前 provider 的 `installHint`（ProviderRegistry 提供），无则隐藏 |
-| Model | TextField | 自由文本 |
-| Base URL（可选） | TextField | 上方随 provider 联动的 `baseUrlHint` 提示行 |
+| Model | TextField + 「选择…」下拉 + 「刷新」按钮 | 自由文本兜底；点刷新按当前 Base URL 调 `fetch_models`（GET `{root}/models`，剥掉 `/chat/completions` 后缀，OpenAI 兼容）拉模型列表，kimi 另并入 `kimi_model_aliases`（`~/.kimi-code/config.toml` 的 `[models]` 表键）；拉到后「选择…」下拉列出候选，点选填入。kimi 侧生效路径：是 CLI 别名的走 ACP `set_config_option("model", …)`（新会话自动应用，chat.md §6.1）；非别名在 spawn 时注入 `KIMI_MODEL_NAME`/`KIMI_MODEL_API_KEY`/`KIMI_MODEL_BASE_URL`（有 baseUrl 时附带 `KIMI_MODEL_PROVIDER_TYPE=openai`） |
+| Base URL（可选） | TextField + 「预置…」下拉 | 上方随 provider 联动的 `baseUrlHint` 提示行；预置下拉（DeepSeek `https://api.deepseek.com/v1` / Kimi(Moonshot) `https://api.moonshot.cn/v1` / OpenCode Zen `https://opencode.ai/zen/go/v1`，前端常量 `baseUrlPresets`）点选即填入，仍可手改 |
 | CLI 路径 | TextField + 三按钮 | 占位：内置 provider `留空自动探测`，custom `CLI 可执行文件完整路径` |
 | API Key | TextField（Password echo） | 掩码显示规则见 9.5 |
 | 额外参数 | TextField | 说明 `额外参数（追加在 ACP 启动参数后；custom 时即为完整启动参数）` |

@@ -28,11 +28,11 @@
 | `ui/frames/frame_chat_bl.png` | 聊天左下角框 | 见 ui-design.md |
 | `ui/frames/frame_chat_bubble_body.png` | 消息气泡正文框 | **16/16/14/14** |
 | `ui/frames/frame_chat_bubble_slot.png` | 气泡头像槽 | 见 ui-design.md |
-| `ui/frames/frame_rail.png` | 左栏会话 rail | 见 ui-design.md |
+| `ui/frames/frame_rail.png` | ~~左栏会话 rail~~（**已弃用**，会话栏改用 frame_fat_bar） | 见 ui-design.md |
 | `ui/frames/frame_edge_left.png` / `frame_edge_right.png` / `frame_edge_top.png` / `frame_edge_bottom.png` | 永久铁轨边框（四边） | 拉伸平铺，非九宫格 |
 | `ui/frames/dialog_frame.png` | 模态对话框框（源约 863×602） | **56** |
 | `ui/frames/select_panel.png` | 选择面板 | 见 ui-design.md |
-| `ui/frames/frame_popup.png` / `frame_popup_small.png` | 弹出面板（最近项目用 small） | 见 ui-design.md |
+| `ui/frames/frame_popup.png` / `frame_popup_small.png` | 弹出面板（最近项目用 small） | 见 ui-design.md；**中心是画好的深蓝纹理（非镂空），使用时给 `WarFrame` 加 `fill` 把中心块作为背景** |
 | `ui/frames/frame_iron_panel.png` / `frame_iron_bar.png` | 铁面板/铁条 | 见 ui-design.md |
 
 ## buttons/ —— 三态按钮（6 张）
@@ -55,9 +55,9 @@
 |---|---|
 | `ui/scroll/scroll_up.png` / `scroll_down.png` | 上下箭头按钮 |
 | `ui/scroll/scroll_track.png` | 轨道（垂直拉伸） |
-| `ui/scroll/scroll_thumb.png` | 滑块 |
+| `ui/scroll/scroll_thumb.png` | 滑块（九宫格：slice 18 14，端帽固定、中段拉伸） |
 
-内容装得下时整条滚动条"置黑"禁用（还原 WC3 行为，见 ui-design.md）。
+内容装得下时滚动条隐藏轨道、只留置灰箭头（旧版"置黑"已弃用，见 ui-design.md §4.5）。
 
 ## avatars/ —— 头像（2 张）
 
@@ -71,8 +71,9 @@
 | 文件 | 用途 |
 |---|---|
 | `ui/misc/chain_link.png` | 吊链，垂直平铺（`background-repeat: repeat-y`），可伸出窗口顶 |
-| `ui/misc/cursor.png` | 默认光标（`cursor: url(...), auto`） |
-| `ui/misc/cursor_green.png` | 可交互元素光标（hand，`, pointer` 兜底） |
+| `ui/misc/cursor.png` | 默认光标原始素材（128×99） |
+| `ui/misc/cursor_green.png` | 可交互元素光标原始素材（128×99） |
+| `ui/misc/cursor_32.png` / `cursor_green_32.png` | 预缩放 32×25 光标（CSS 实际引用，热点 `1 0`） |
 
 ## wc3_extracted/ui/ —— WC3 提取图标（5 张，运行时必需）
 

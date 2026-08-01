@@ -41,19 +41,22 @@ body {
 }
 
 /* ---- Custom cursor (docs/ui-design.md §6) ----
- * cursor.png hot spot (5, 0) — the pointer tip. The fallback keyword after
- * the coordinates is mandatory or the whole declaration is invalid.
- * The whole app (including dialogs and masks) uses cursor.png; there is no
- * separate hand art. cursor_green.png is the interactive/resize variant. */
+ * Pre-scaled 32×25 variants (cursor_32.png) so the cursor renders at the
+ * intended 32px width — CSS cursor url() always uses the image's natural
+ * size, and the 128×99 originals looked huge. Hot spot (1, 0) is the
+ * original (5, 0) scaled by 32/128. The fallback keyword after the
+ * coordinates is mandatory or the whole declaration is invalid.
+ * The whole app (including dialogs and masks) uses the same cursor; there
+ * is no separate hand art. cursor_green is the interactive/resize variant. */
 html,
 body,
 * {
-  cursor: url('/assets/ui/misc/cursor.png') 5 0, auto;
+  cursor: url('/assets/ui/misc/cursor_32.png') 1 0, auto;
 }
 
 .war-cursor-green,
 .war-resize-handle {
-  cursor: url('/assets/ui/misc/cursor_green.png') 5 0, row-resize;
+  cursor: url('/assets/ui/misc/cursor_green_32.png') 1 0, row-resize;
 }
 
 /* ---- Font roles (docs/ui-design.md §1.3) ---- */

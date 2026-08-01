@@ -106,7 +106,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true));
   position: absolute;
   inset: 0;
   border: 56px solid transparent;
-  border-image: url('/assets/ui/frames/dialog_frame.png') 56 stretch;
+  border-image: url('/assets/ui/frames/dialog_frame.png') 56 fill stretch;
   box-sizing: border-box;
   pointer-events: none;
 }

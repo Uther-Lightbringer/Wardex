@@ -80,7 +80,7 @@ function onGripUp(): void {
 </script>
 
 <template>
-  <div class="war-panel">
+  <div class="war-panel" :class="{ 'war-panel--open': open }">
     <!-- title bar -->
     <div
       class="war-panel__bar"
@@ -137,6 +137,18 @@ function onGripUp(): void {
   user-select: none;
 }
 
+/* Open state: the title tucks INTO the panel frame — the bar overlaps the
+   frame's top rim (its own thin iron strip hides) so 版本控制/工作区文件
+   read as part of the iron panel instead of a separate floating strip. */
+.war-panel--open .war-panel__bar {
+  z-index: 6;
+  margin-bottom: -40px;
+}
+
+.war-panel--open .war-panel__bar-frame {
+  opacity: 0;
+}
+
 .war-panel__bar:not(.static):hover {
   filter: brightness(1.18);
 }
@@ -145,7 +157,9 @@ function onGripUp(): void {
   position: absolute;
   inset: 0;
   /* frame_iron_bar source slice 62/110/70/108 drawn as a thin title strip */
-  border: 4px 12px solid transparent;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 4px 12px;
   border-image: url('/assets/ui/frames/frame_iron_bar.png') 62 110 70 108 stretch;
   box-sizing: border-box;
   pointer-events: none;

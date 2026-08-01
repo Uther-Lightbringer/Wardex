@@ -166,9 +166,10 @@ border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
 | `ui/frames/frame_chat_bubble_body.png` | 1037×168 | 14 / 16 / 14 / 16 | **repeat** | ChatBubble 正文框（角固定、石边平铺） |
 | `ui/frames/frame_iron_panel.png` | 717×276 | 96 / 110 / 69 / 108 | stretch | FrameImage 页面主面板（Config/SessionSelect/Todo/Chat 顶部） |
 | `ui/frames/frame_iron_bar.png` | 717×243 | 62 / 110 / 70 / 108 | stretch | FrameImage 底部操作栏 |
-| `ui/frames/frame_rail.png` | 392×656 | 92 / 36 / 40 / 36 | stretch | ChatPage 左侧"本项目会话"栏（由 frame_panel_narrow 半尺寸缩放而来） |
+| `ui/frames/frame_rail.png` | 392×656 | 92 / 36 / 40 / 36 | stretch | ~~ChatPage 左侧"本项目会话"栏~~（**已弃用**，会话栏改用 frame_fat_bar） |
+| `ui/frames/frame_fat_bar.png` | 804×554 | 28 / 32 / 28 / 32 | stretch | ChatPage 左侧"本项目会话"栏（粗铆钉框，中心镂空） |
 | `ui/frames/frame_popup.png` | 1023×548 | 88 / 100 / 90 / 100 | stretch | FolderBrowserDialog 列表框、ChatPage 文件预览弹窗 |
-| `ui/frames/frame_popup_small.png` | 511×274 | 44 / 50 / 45 / 50 | stretch | RecentProjectsPanel（frame_popup 的半尺寸版，角块 50/50/44/45） |
+| `ui/frames/frame_popup_small.png` | 511×274 | 44 / 50 / 45 / 50 | stretch | RecentProjectsPanel（frame_popup 的半尺寸版，角块 50/50/44/45）；中心块是画好的深蓝纹理，**需加 `fill`** 才能作为背景显示 |
 | `ui/dropdown/dropdown_bar.png` | 109×36 | 12 / 46 / 12 / 29 | stretch | WarDropdown 关闭态条（右侧 46px 含金箭头帽） |
 | `ui/dropdown/dropdown_panel.png` | 100×75 | 14 / 16 / 13 / 20 | stretch | WarDropdown 展开列表、WarMenu 底、FolderBrowserDialog 标题牌/路径栏 |
 | `wc3_extracted/ui/GlueScreen-Profile-Stretch2.png` | 64×512 | 8 / 8 / 8 / 8 | stretch | ChatPage Git 分支徽标底 |
@@ -243,7 +244,8 @@ const frameStyle = computed(() => ({
 |---|---|---|---|---|
 | `frame_iron_panel.png` | 717×276 | 108/110/96/69 | **24/25/56/21** | `hasHangers: true`；左栏 `contentLeftExtra: 16`（避让铁轨），Chat 页用 `4/4`、`4/6` |
 | `frame_iron_bar.png` | 717×243 | 108/110/62/70 | **24/24/22/21** | `hasHangers: false`；Chat 页 `4/4`，Config 页 `0/0` |
-| `frame_rail.png` | 392×656 | 36/36/92/40 | **24/23/77/26** | 无 hangers、无 extras（ChatPage 会话栏专用） |
+| `frame_fat_bar.png` | 804×554 | 32/32/28/28 | **26/26/24/24** | 无 hangers、无 extras（ChatPage 会话栏） |
+| ~~`frame_rail.png`~~ | 392×656 | 36/36/92/40 | 24/23/77/26 | **已弃用**，会话栏改用 frame_fat_bar |
 
 > `hasHangers` 只影响旧版 fallback 模式的分数内嵌，像素模式下**无实际作用**，新版可忽略该参数。
 
@@ -380,9 +382,9 @@ const ironStyle = {
 
 四张贴图：`scroll_up.png` / `scroll_down.png`（82×82）、`scroll_track.png`（44×382）、`scroll_thumb.png`（68×79）。
 
-- 总宽 22；上箭头 22×22 置顶、下箭头 22×22 置底；track 区上下各让 22、左右各让 3 拉伸；thumb 拉伸，最小比例 0.08。
+- 总宽 22；上箭头 22×22 置顶、下箭头 22×22 置底；track 区上下各让 22、左右各让 3 拉伸；thumb 为九宫格（slice 18 14 fill，上下端帽+圆角固定、中间平段拉伸，永不变形），最小高度 40px、最小比例 0.08。
 - 箭头按下时 `transform: scale(0.92)`。
-- **禁用置黑**：内容装得下时（`size <= 0 || size >= 0.999`）thumb 隐藏、箭头禁点，整条盖一层 `#000` `opacity: 0.68` —— 与经典游戏列表框行为一致。
+- **禁用隐藏轨道**：内容装得下时（`size <= 0 || size >= 0.999`）thumb+track 隐藏（`visibility: hidden` 占位不抖动）、箭头禁点并降至 `opacity: 0.35` —— 替代旧版整条盖黑 0.68 的 WC3 置黑行为（黑条观感不佳，2026-08 改）。
 
 ```css
 .war-scroll { width: 22px; position: relative; }
@@ -516,8 +518,8 @@ ShellFrame 单独下落（页面内铁框从上方落入）用 **750ms ease-out-
 CSS 实现与注意点：
 
 ```css
-html, body, * { cursor: url('/assets/ui/misc/cursor.png') 5 0, auto; }
-.war-resize-handle { cursor: url('/assets/ui/misc/cursor_green.png') 5 0, auto; }
+html, body, * { cursor: url('/assets/ui/misc/cursor_32.png') 1 0, auto; }
+.war-resize-handle { cursor: url('/assets/ui/misc/cursor_green_32.png') 1 0, row-resize; }
 ```
 
 - `url()` 后的 `5 0` 是热点坐标，**必须**跟一个回退关键字（`auto`/`pointer`）否则整条声明无效。
@@ -649,7 +651,7 @@ export function play(name: keyof typeof files) {
 - **Banner 通知条**（Main.qml）：顶部居中顶 margin 24，高 40，底 `#201018c0`，边 `#f2cf6b`，文字 `#f2cf6b` 14px SimSun，3.5s 自动消失，`z-index: 50`。
 - **模态遮罩**：`#000000b0` 全屏。
 - **文字描边**：Qt `Text.Outline` → CSS 四向 `text-shadow`（见 §1.3）；金色文字描边色 `#241500`，Georgia 标题描边色 `#000`。
-- **禁用态**：WarButton `opacity: 0.38`；滚动条整体置黑 `opacity: 0.68` 黑层。
+- **禁用态**：WarButton `opacity: 0.38`；滚动条不可滚时隐藏轨道、箭头降至 `opacity: 0.35`。
 
 ---
 
@@ -663,7 +665,7 @@ export function play(name: keyof typeof files) {
 - [ ] WarButton 双皮肤（4.87 / 5.34）、宽驱动高、三态换图、禁用 0.38、标签字号公式
 - [ ] WarDialog 标题板 12/14.5/76/35.5% 与按钮区 10/56/80/30% 分数定位
 - [ ] WarDropdown（bar slice 12/46/12/29、右 margin 44、dropUp）与 WarMenu
-- [ ] WarScrollBar 四贴图组装 + 内容装得下时置黑 0.68
+- [ ] WarScrollBar 四贴图组装（thumb 九宫格 18/14）+ 内容装得下时隐藏轨道
 - [ ] SteelPanel 双链（0.2305/0.658、链宽 0.186、tall/short 分数开孔）
 - [ ] ChatBubble 槽外头像（64×58、用户镜像）、气泡最大宽 0.82、thinking/tool 折叠块配色
 - [ ] 窗口 1280×720 / min 960×600、uiScale 公式、永久铁轨 58px z40 常驻

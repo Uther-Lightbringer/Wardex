@@ -58,6 +58,8 @@ export interface RuntimeState {
   busy: boolean;
   acpRunning: boolean;
   queueLength: number;
+  /** Queue contents from the backend snapshot (mirror rebuild source). */
+  queue: string[];
   agentId: string;
   imageSupported: boolean;
   lastActivity: number;

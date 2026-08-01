@@ -46,7 +46,7 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 | 面板 id | 标题 | 来源功能（旧版参照） | refreshOn |
 |---|---|---|---|
 | `agent` | 会话信息 | agent 切换器（ChatPage.qml 右栏） | sessionSwitch |
-| `git` | 版本控制 | 分支徽标 + 只读提交历史 + 工作区更改列表 + diff 查看（`git_status`/`git_diff_file`/`git_diff_commit`，单 diff 64KB 截断） | turnEnd, sessionSwitch, expand, manual |
+| `git` | 版本控制 | 分支徽标 + 只读提交历史 + 工作区更改列表 + diff 查看（`git_status`/`git_diff_file` 内嵌视图；**点击提交 → `GitCommitDialog` 弹框**：左侧变更文件列表（+增/−删计数），右侧 GitLab 风格单文件 diff（新旧行号 +/− 列、增删行绿/红底） | turnEnd, sessionSwitch, expand, manual |
 | `files` | 工作区文件 | 文件树（点击预览/右键系统打开） | sessionSwitch, expand, manual |
 
 `agent` 面板固定置顶且不可折叠（或始终 open），其余按注册表机制。git 对比、数据库等为后续批次，按 §4 指南加入。
@@ -63,8 +63,8 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 
 `WarPanel` 统一外观规格（面板作者只写内容区，样式漂移锁死在这一处）：
 
-- **标题条**：`frame_iron_bar.png` 九宫格，固定高 28px；左起 图标(可选) + 中文标题 + 弹性空间 + 折叠箭头（▶/▼，旋转动画 200ms）；hover 微亮反馈。
-- **内容框**：`frame_iron_panel.png` 九宫格，内边距按贴图内嵌值；内容超高出 `WarScrollBar`（置黑禁用规则不变）。
+- **标题条**：`frame_iron_bar.png` 九宫格，固定高 28px；左起 图标(可选) + 中文标题 + 弹性空间 + 折叠箭头（▶/▼，旋转动画 200ms）；hover 微亮反馈。**展开时标题条压进内容框顶部**（`margin-bottom: -40px` 叠在铁框上沿，自身细铁条隐藏），折叠时恢复独立条。
+- **内容框**：`frame_iron_panel.png` 九宫格，内边距按贴图内嵌值；内容超高出 `WarScrollBar`（不可滚时隐藏轨道）。
 - **拖拽手柄**：内容框下沿 6px 高热区，视觉为铁框底沿加粗/三道横纹 grip，hover 时 `cursor: row-resize`（自定义光标体系内的等价处理，见 ui-design.md §光标）。
 - **面板间距**：垂直间隔 4px，露出版底背景。
 - **字号**：标题与内容文本按 `fontScale` 缩放，装饰符号不缩放（与全局规则一致）。

@@ -2,7 +2,7 @@
 // Context menu skinned with the dropdown expanded-panel nine-slice
 // (WarMenu.qml). Min width 160, item height 28; highlighted item gold+bold
 // over the KeyboardHighlight glow, disabled items #5a6272.
-import { onBeforeUnmount, watch } from 'vue';
+import { onBeforeUnmount, ref, watch } from 'vue';
 
 export interface WarMenuItem {
   label: string;
@@ -24,13 +24,19 @@ const emit = defineEmits<{
   (e: 'select', index: number): void;
 }>();
 
+const root = ref<HTMLElement | null>(null);
+
 function pick(i: number): void {
   if (props.items[i]?.disabled) return;
   emit('update:visible', false);
   emit('select', i);
 }
 
-function onDocDown(): void {
+function onDocDown(e: MouseEvent): void {
+  // Clicks inside the menu must not count as "outside" — the document
+  // listener is capture-phase, so it runs BEFORE the row's click and would
+  // otherwise unmount the menu and swallow every selection.
+  if (root.value?.contains(e.target as Node)) return;
   emit('update:visible', false);
 }
 
@@ -49,6 +55,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
   <Teleport to="body">
     <div
       v-if="visible"
+      ref="root"
       class="war-menu"
       :style="{ left: x + 'px', top: y + 'px' }"
       @mousedown.stop
@@ -74,8 +81,10 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
   position: fixed;
   z-index: 120;
   min-width: 160px;
-  border: 14px 16px 13px 20px solid transparent; /* T R B L (slice 14/16/13/20) */
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 14px 16px 13px 20px; /* T R B L (slice 14/16/13/20) */
+  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
   box-sizing: border-box;
 }
 

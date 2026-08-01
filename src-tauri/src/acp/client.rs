@@ -48,6 +48,8 @@ pub struct AcpClient<T: Transport> {
     load_session_id: Option<i64>,
     prompt_id: Option<i64>,
     set_mode_id: Option<i64>,
+    /// In-flight session/set_config_option request id (non-mode pickers).
+    set_option_id: Option<i64>,
 
     session_id: String,
     cwd: String,
@@ -57,6 +59,10 @@ pub struct AcpClient<T: Transport> {
     turn_busy: bool,
     can_load_session: bool,
     image_supported: bool,
+    /// Raw configOptions[] from session/new|load (kimi: model/thinking/mode
+    /// pickers), refreshed by set_config_option responses and
+    /// config_option_update notifications.
+    config_options: Vec<Value>,
     /// session/load replays the whole history as session/update
     /// notifications; WarDex keeps its own local history, so everything
     /// arriving while this is set is discarded (AcpClient.cpp:489-491).
@@ -75,6 +81,7 @@ impl<T: Transport> AcpClient<T> {
             load_session_id: None,
             prompt_id: None,
             set_mode_id: None,
+            set_option_id: None,
             session_id: String::new(),
             cwd: String::new(),
             pending_mode: String::new(),
@@ -83,6 +90,7 @@ impl<T: Transport> AcpClient<T> {
             turn_busy: false,
             can_load_session: false,
             image_supported: false,
+            config_options: Vec::new(),
             replaying: false,
             mcp_servers: Vec::new(),
         }
@@ -125,6 +133,8 @@ impl<T: Transport> AcpClient<T> {
         self.load_session_id = None;
         self.prompt_id = None;
         self.set_mode_id = None;
+        self.set_option_id = None;
+        self.config_options.clear();
     }
 
     /// Begin the handshake: sends initialize (AcpClient.cpp:119-135). The
@@ -165,6 +175,28 @@ impl<T: Transport> AcpClient<T> {
                 "sessionId": self.session_id,
                 "configId": "mode",
                 "value": mode_id,
+            }),
+            id,
+        )
+        .await
+    }
+
+    /// Generic session/set_config_option for NON-mode pickers (kimi exposes
+    /// "model" and "thinking" alongside "mode"; ACP method coverage table).
+    /// The response carries the refreshed configOptions[], which we store
+    /// and forward as AcpEvent::ConfigOptions.
+    pub async fn set_config_option(&mut self, config_id: &str, value: &str) -> Result<(), AcpError> {
+        if self.session_id.is_empty() {
+            return Ok(()); // session-less: nothing to apply it to
+        }
+        let id = self.alloc_id();
+        self.set_option_id = Some(id);
+        self.send_request(
+            "session/set_config_option",
+            json!({
+                "sessionId": self.session_id,
+                "configId": config_id,
+                "value": value,
             }),
             id,
         )
@@ -431,6 +463,9 @@ impl<T: Transport> AcpClient<T> {
             // No new sessionId in the result — the requested one sticks
             // (AcpClient.cpp:380-386).
             self.session_id = self.resume_session_id.clone();
+            if let Some(opts) = result.get("configOptions").and_then(Value::as_array) {
+                self.config_options = opts.clone();
+            }
             self.session_ready().await
         } else if self.new_session_id == Some(id) {
             self.session_id = result
@@ -446,7 +481,20 @@ impl<T: Transport> AcpClient<T> {
                 .await;
                 return Ok(());
             }
+            if let Some(opts) = result.get("configOptions").and_then(Value::as_array) {
+                self.config_options = opts.clone();
+            }
             self.session_ready().await
+        } else if self.set_option_id == Some(id) {
+            self.set_option_id = None;
+            if let Some(opts) = result.get("configOptions").and_then(Value::as_array) {
+                self.config_options = opts.clone();
+                self.emit(AcpEvent::ConfigOptions {
+                    options: self.config_options.clone(),
+                })
+                .await;
+            }
+            Ok(())
         } else if self.set_mode_id == Some(id) {
             self.set_mode_id = None;
             // result may include configOptions; never read (AcpClient.cpp:398-402).
@@ -515,7 +563,24 @@ impl<T: Transport> AcpClient<T> {
                 })
                 .await;
             }
-            // available_commands_update / plan / config_option_update / ... ignored.
+            // available_commands_update / plan / ... ignored.
+            "config_option_update" => {
+                // kimi sends the single changed option {configId, value};
+                // patch the stored list and forward the whole thing.
+                let cid = update.get("configId").and_then(Value::as_str).unwrap_or_default();
+                let val = update.get("value").and_then(Value::as_str).unwrap_or_default();
+                if !cid.is_empty() {
+                    for o in self.config_options.iter_mut() {
+                        if o.get("id").and_then(Value::as_str) == Some(cid) {
+                            o["currentValue"] = Value::String(val.to_string());
+                        }
+                    }
+                    self.emit(AcpEvent::ConfigOptions {
+                        options: self.config_options.clone(),
+                    })
+                    .await;
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -603,6 +668,10 @@ impl<T: Transport> AcpClient<T> {
         }
         self.emit(AcpEvent::Started {
             session_id: self.session_id.clone(),
+        })
+        .await;
+        self.emit(AcpEvent::ConfigOptions {
+            options: self.config_options.clone(),
         })
         .await;
         Ok(())
@@ -794,6 +863,7 @@ async fn handshake_sends_pinned_initialize_then_session_new() {
         vec![
             AcpEvent::ModeChanged { mode: "default".into() },
             AcpEvent::Started { session_id: "s-1".into() },
+            AcpEvent::ConfigOptions { options: vec![] },
         ]
     );
 }
@@ -885,6 +955,7 @@ async fn session_load_replay_is_discarded_then_resumed() {
         vec![
             AcpEvent::ModeChanged { mode: "default".into() },
             AcpEvent::Started { session_id: "old-42".into() },
+            AcpEvent::ConfigOptions { options: vec![] },
         ]
     );
 
@@ -930,6 +1001,7 @@ async fn session_load_error_falls_back_to_session_new() {
         vec![
             AcpEvent::ModeChanged { mode: "default".into() },
             AcpEvent::Started { session_id: "fresh-1".into() },
+            AcpEvent::ConfigOptions { options: vec![] },
         ]
     );
 }
@@ -958,7 +1030,10 @@ async fn non_default_pending_mode_is_applied_on_session_ready() {
     );
     assert_eq!(
         events(&mut h),
-        vec![AcpEvent::Started { session_id: "s-1".into() }]
+        vec![
+            AcpEvent::Started { session_id: "s-1".into() },
+            AcpEvent::ConfigOptions { options: vec![] },
+        ]
     );
 
     // Its response emits modeChanged with the pending mode; result ignored.

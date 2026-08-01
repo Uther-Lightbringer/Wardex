@@ -3,8 +3,8 @@
 // (docs/ui-design.md §2/§3). Slice order is [T, R, B, L] source pixels.
 //
 // Plain mode (no `hole`): border-image container, content sits inside the
-// border band (center slice of these sprites is a transparent hole, so no
-// `fill` keyword — visually identical to the Qt version).
+// border band (most sprites' center slice is a transparent hole, so no
+// `fill` keyword — pass `fill` only when the sprite's center is painted).
 //
 // Hole mode (`hole` given): the FrameImage pixel-mode three-layer structure:
 //   glass (z0, #0b0d12a6, tucked 8px under the rim so the ragged inner edge
@@ -28,10 +28,15 @@ const props = withDefaults(
      * nine-slice cut). Ignored in hole mode. */
     inset?: [number, number, number, number];
     repeat?: 'stretch' | 'repeat';
+    /** Add the `fill` keyword to border-image-slice: keep the center slice
+     * as the backdrop instead of discarding it. Only for sprites whose
+     * center is painted (e.g. frame_popup_small's dark navy texture);
+     * most sprites have a transparent hole there. */
+    fill?: boolean;
     contentLeftExtra?: number;
     contentRightExtra?: number;
   }>(),
-  { repeat: 'stretch', hole: undefined, inset: undefined, contentLeftExtra: 0, contentRightExtra: 0 },
+  { repeat: 'stretch', hole: undefined, inset: undefined, fill: false, contentLeftExtra: 0, contentRightExtra: 0 },
 );
 
 // FrameImage.qml constants
@@ -43,7 +48,7 @@ const ironStyle = computed<CSSProperties>(() => ({
   borderColor: 'transparent',
   borderWidth: props.slice.map((v) => `${v}px`).join(' '),
   borderImageSource: `url('${props.src}')`,
-  borderImageSlice: props.slice.join(' '),
+  borderImageSlice: props.slice.join(' ') + (props.fill ? ' fill' : ''),
   borderImageRepeat: props.repeat,
   boxSizing: 'border-box',
 }));

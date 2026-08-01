@@ -18,6 +18,11 @@ pub enum AcpEvent {
     /// session/new).
     StartFailed { error: String },
     ModeChanged { mode: String },
+    /// Available config options (model / thinking / mode pickers) from
+    /// session/new|load's result, refreshed on set_config_option responses
+    /// and config_option_update notifications. Raw ACP option objects
+    /// ({type, id, name, category, currentValue, options[]}) passed through.
+    ConfigOptions { options: Vec<Value> },
     ThoughtChunk { text: String },
     MessageChunk { text: String },
     /// Normalized tool_call payload (see types::normalize_tool_call).

@@ -58,6 +58,74 @@ const providerOptions = computed(() => agents.specs.map((s) => s.displayName));
 const providerIndex = computed(() => agents.specs.findIndex((s) => s.id === draft.provider));
 const isCustom = computed(() => draft.provider === 'custom');
 
+// Preset base URLs (OpenAI-compatible roots). Picking one fills the Base URL
+// field; the field stays free-text so any custom endpoint still works.
+const baseUrlPresets: { name: string; url: string }[] = [
+  { name: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
+  { name: 'Kimi(Moonshot)', url: 'https://api.moonshot.cn/v1' },
+  { name: 'OpenCode Zen', url: 'https://opencode.ai/zen/go/v1' },
+];
+const baseUrlPresetNames = baseUrlPresets.map((p) => p.name);
+
+function onBaseUrlPreset(i: number): void {
+  const p = baseUrlPresets[i];
+  if (!p) return;
+  draft.baseUrl = p.url;
+  markDirty();
+}
+
+// ---- model candidates (fetch_models / kimi aliases; see models.rs) ----
+const modelCandidates = ref<string[]>([]);
+const fetchingModels = ref(false);
+const modelFetchMsg = ref('');
+
+async function refreshModels(): Promise<void> {
+  fetchingModels.value = true;
+  modelFetchMsg.value = '';
+  const out = new Set<string>();
+  try {
+    if (draft.baseUrl.trim()) {
+      try {
+        // draft.apiKey holds the MASKED display value (maskKey) unless the
+        // user just typed a new one. Masked values must not be sent as the
+        // Bearer token — fall back to the store record's plaintext key.
+        const rec = selectedId.value ? agents.byId(selectedId.value) : undefined;
+        const apiKey = draft.apiKey.includes('****') ? (rec?.apiKey ?? '') : draft.apiKey;
+        const ids = await cmd<string[]>('fetch_models', {
+          baseUrl: draft.baseUrl.trim(),
+          apiKey,
+        });
+        ids.forEach((id) => out.add(id));
+      } catch (e) {
+        modelFetchMsg.value = String(e);
+      }
+    }
+    if (draft.provider === 'kimi') {
+      try {
+        const aliases = await cmd<string[]>('kimi_model_aliases');
+        aliases.forEach((a) => out.add(a));
+      } catch {
+        /* missing config.toml is fine */
+      }
+    }
+    modelCandidates.value = [...out].sort();
+    if (!modelFetchMsg.value && modelCandidates.value.length === 0) {
+      modelFetchMsg.value = draft.baseUrl.trim()
+        ? '没有拿到模型列表'
+        : '填写 Base URL 后点刷新，或使用本机配置别名';
+    }
+  } finally {
+    fetchingModels.value = false;
+  }
+}
+
+function onModelPick(i: number): void {
+  const m = modelCandidates.value[i];
+  if (!m) return;
+  draft.model = m;
+  markDirty();
+}
+
 const nameInput = ref<HTMLInputElement | null>(null);
 
 function markDirty(): void {
@@ -534,7 +602,33 @@ const pageKeysOn = computed(() => nav.page === 'config');
 
             <div class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Model</span>
-              <input v-model="draft.model" class="war-input cfg__input" :style="{ fontSize: prefs.fs(13) + 'px' }" @input="markDirty" />
+              <div class="cfg__baseurl-row">
+                <input
+                  v-model="draft.model"
+                  class="war-input cfg__input"
+                  placeholder="模型 id；kimi 可填 config.toml 别名"
+                  :style="{ fontSize: prefs.fs(13) + 'px' }"
+                  @input="markDirty"
+                />
+                <WarDropdown
+                  v-if="modelCandidates.length > 0"
+                  class="cfg__baseurl-presets"
+                  :options="modelCandidates"
+                  display-text="选择…"
+                  @activated="onModelPick"
+                />
+                <WarButton
+                  skin="dialog"
+                  :width="80"
+                  :art-aspect="5.34"
+                  :text="fetchingModels ? '刷新中…' : '刷新'"
+                  :enabled="!fetchingModels"
+                  @activated="refreshModels"
+                />
+              </div>
+            </div>
+            <div v-if="modelFetchMsg" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              {{ modelFetchMsg }}
             </div>
 
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
@@ -542,7 +636,15 @@ const pageKeysOn = computed(() => nav.page === 'config');
             </div>
             <div class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Base URL（可选）</span>
-              <input v-model="draft.baseUrl" class="war-input cfg__input" :style="{ fontSize: prefs.fs(13) + 'px' }" @input="markDirty" />
+              <div class="cfg__baseurl-row">
+                <input v-model="draft.baseUrl" class="war-input cfg__input" :style="{ fontSize: prefs.fs(13) + 'px' }" @input="markDirty" />
+                <WarDropdown
+                  class="cfg__baseurl-presets"
+                  :options="baseUrlPresetNames"
+                  display-text="预置…"
+                  @activated="onBaseUrlPreset"
+                />
+              </div>
             </div>
 
             <div class="cfg__field">
@@ -869,6 +971,20 @@ const pageKeysOn = computed(() => nav.page === 'config');
 
 .cfg__dropdown {
   width: 180px;
+  height: 30px;
+}
+
+.cfg__baseurl-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cfg__baseurl-presets {
+  flex: none;
+  width: 110px;
   height: 30px;
 }
 

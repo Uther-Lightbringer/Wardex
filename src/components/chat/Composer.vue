@@ -2,14 +2,13 @@
 // Composer (features/chat.md §3): 64K cap with the three truncation paths,
 // Enter/Shift+Enter with IME guard, @ file-reference picker with :from-to
 // line suffix, Ctrl+V image paste → media cache + attachment bar (≤6),
-// prompt template menu, permission-mode dropdown, send/enqueue button.
+// permission-mode dropdown, send/enqueue button.
 //
 // Send path: the draft keeps short @tokens; only at send time each token is
 // expanded through read_file_range into a 【引用文件：…】 block (§3.3) and the
 // expanded text + attachment paths go to send_prompt. The draft and
 // attachments are cleared ONLY when the backend accepts (§3.2).
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { open as openFileDialog } from '@tauri-apps/plugin-dialog';
 import { cmd, isTauri } from '../../lib/tauri';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
@@ -41,7 +40,7 @@ onBeforeUnmount(() => {
 
 const showCounter = computed(() => text.value.length > MAX_LEN * 0.75);
 
-/** Unified truncation entry (typing fallback + template insert). */
+/** Unified truncation entry (typing fallback + paste). */
 function truncateInput(): void {
   if (text.value.length > MAX_LEN) {
     text.value = text.value.slice(0, MAX_LEN);
@@ -139,26 +138,6 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
       el.focus();
     }
   });
-}
-
-// ---- attachment picker (the bar itself renders in ChatPage) ----
-const IMAGE_EXTS = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'];
-
-async function pickFiles(): Promise<void> {
-  if (!isTauri) return;
-  try {
-    const picked = await openFileDialog({
-      multiple: true,
-      filters: [
-        { name: '图片', extensions: IMAGE_EXTS },
-        { name: '所有文件', extensions: ['*'] },
-      ],
-    });
-    if (!picked) return;
-    chat.addAttachments(Array.isArray(picked) ? picked : [picked]);
-  } catch (e) {
-    console.warn('[composer] open dialog failed', e);
-  }
 }
 
 // ---- @ file-reference picker (§3.3) ----
@@ -348,59 +327,6 @@ async function expandReferences(input: string): Promise<string> {
   return out;
 }
 
-// ---- prompt templates (§3.6) ----
-interface PromptRow {
-  id: string;
-  name: string;
-  text: string;
-}
-const templates = ref<PromptRow[]>([]);
-const templateOpen = ref(false);
-
-async function loadTemplates(): Promise<void> {
-  if (!isTauri) return;
-  try {
-    templates.value = await cmd<PromptRow[]>('prompts_list', undefined, []);
-  } catch (e) {
-    console.warn('[composer] prompts_list failed', e);
-  }
-}
-
-function toggleTemplates(): void {
-  templateOpen.value = !templateOpen.value;
-  if (templateOpen.value) void loadTemplates();
-}
-
-function insertTemplate(body: string): void {
-  templateOpen.value = false;
-  const el = inputEl.value;
-  const s = el ? el.selectionStart : text.value.length;
-  const t = el ? el.selectionEnd : text.value.length;
-  // Newline guard: prepend \n when the preceding text doesn't end with one.
-  const prefix = s > 0 && !text.value.slice(0, s).endsWith('\n') ? '\n' : '';
-  text.value = text.value.slice(0, s) + prefix + body + text.value.slice(t);
-  truncateInput(); // unified 64K entry
-  void Promise.resolve().then(() => {
-    if (el) {
-      const pos = s + prefix.length + body.length;
-      el.selectionStart = el.selectionEnd = pos;
-      el.focus();
-    }
-  });
-}
-
-async function saveAsTemplate(): Promise<void> {
-  const body = text.value.trim();
-  if (!body) return;
-  templateOpen.value = false;
-  const name = body.split('\n')[0].slice(0, 20);
-  try {
-    await cmd('prompt_add', { name, text: body });
-  } catch (e) {
-    console.warn('[composer] prompt_add failed', e);
-  }
-}
-
 // ---- permission mode (§3.7) ----
 const MODE_IDS = ['default', 'plan', 'auto', 'yolo'];
 const MODE_LABELS = ['需批准', '计划', '自动', 'YOLO'];
@@ -481,32 +407,6 @@ onMounted(() => inputEl.value?.focus());
       </div>
     </div>
 
-    <!-- template menu (anchored above the button, right edges aligned) -->
-    <div v-if="templateOpen" class="composer__templates">
-      <div class="composer__templates-list">
-        <div
-          v-for="t in templates.slice(0, 8)"
-          :key="t.id"
-          class="composer__templates-row"
-          :style="{ fontSize: prefs.fs(12) + 'px' }"
-          @click="insertTemplate(t.text)"
-        >
-          {{ t.name }}
-        </div>
-        <div v-if="templates.length === 0" class="composer__templates-row dim" :style="{ fontSize: prefs.fs(12) + 'px' }">
-          （暂无模板）
-        </div>
-      </div>
-      <div
-        class="composer__templates-row composer__templates-save"
-        :class="{ dim: !text.trim() }"
-        :style="{ fontSize: prefs.fs(12) + 'px' }"
-        @click="text.trim() && saveAsTemplate()"
-      >
-        保存当前输入为模板
-      </div>
-    </div>
-
     <textarea
       ref="inputEl"
       v-model="text"
@@ -524,8 +424,6 @@ onMounted(() => inputEl.value?.focus());
 
     <div class="composer__side">
       <div class="composer__tools">
-        <button class="composer__tool" title="添加附件" @click="pickFiles">📎</button>
-        <button class="composer__tool" title="提示词模板" @click="toggleTemplates">模板</button>
         <WarDropdown
           class="composer__mode"
           :options="MODE_LABELS"
@@ -536,7 +434,7 @@ onMounted(() => inputEl.value?.focus());
         />
       </div>
       <WarButton
-        :width="120"
+        :width="150"
         :text="chat.sendLabel"
         :enabled="sendEnabled"
         @activated="send"
@@ -591,8 +489,10 @@ onMounted(() => inputEl.value?.focus());
   width: min(520px, 90%);
   max-height: 320px;
   overflow-y: auto;
-  border: 14px 16px 13px 20px solid transparent;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 14px 16px 13px 20px;
+  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
   box-sizing: border-box;
   background: #0d1116f0;
   padding: 8px;
@@ -619,50 +519,6 @@ onMounted(() => inputEl.value?.focus());
   border-top: 1px solid #2a3344;
   margin-top: 4px;
   font-family: SimSun, serif;
-}
-
-.composer__templates {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 4px);
-  z-index: 46;
-  width: 260px;
-  border: 14px 16px 13px 20px solid transparent;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
-  box-sizing: border-box;
-  background: #0d1116f0;
-  padding: 8px;
-}
-
-.composer__templates-list {
-  max-height: calc(8 * 26px);
-  overflow-y: auto;
-}
-
-.composer__templates-row {
-  padding: 4px 8px;
-  color: var(--war-text-dim);
-  font-family: SimSun, serif;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  user-select: none;
-}
-
-.composer__templates-row:hover:not(.dim) {
-  color: var(--war-gold);
-  background: #32509633;
-}
-
-.composer__templates-row.dim {
-  color: var(--war-text-faint);
-}
-
-.composer__templates-save {
-  border-top: 1px solid #2a3344;
-  margin-top: 4px;
-  padding-top: 6px;
-  color: var(--war-gold);
 }
 
 .composer__field {
@@ -701,24 +557,8 @@ onMounted(() => inputEl.value?.focus());
   gap: 6px;
 }
 
-.composer__tool {
-  height: 26px;
-  min-width: 40px;
-  padding: 0 8px;
-  background: #10141f;
-  border: 1px solid #2a3344;
-  border-radius: 2px;
-  color: var(--war-gold);
-  font-family: SimSun, serif;
-  font-size: 12px;
-}
-
-.composer__tool:hover {
-  border-color: var(--war-gold-input);
-  color: var(--war-gold-bright);
-}
-
 .composer__mode {
-  width: 96px;
+  width: 150px;
+  height: 30px;
 }
 </style>

@@ -29,6 +29,11 @@ pub trait ClientDriver: Send {
         cancelled: bool,
     ) -> BoxFuture<'a, Result<(), AcpError>>;
     fn set_mode<'a>(&'a mut self, mode_id: &'a str) -> BoxFuture<'a, Result<(), AcpError>>;
+    fn set_config_option<'a>(
+        &'a mut self,
+        config_id: &'a str,
+        value: &'a str,
+    ) -> BoxFuture<'a, Result<(), AcpError>>;
     /// From initialize -> promptCapabilities.image (attachment split rule).
     fn image_supported(&self) -> bool;
 }
@@ -59,6 +64,13 @@ impl<T: Transport + Sync + 'static> ClientDriver for AcpClient<T> {
     }
     fn set_mode<'a>(&'a mut self, mode_id: &'a str) -> BoxFuture<'a, Result<(), AcpError>> {
         Box::pin(AcpClient::set_mode(self, mode_id))
+    }
+    fn set_config_option<'a>(
+        &'a mut self,
+        config_id: &'a str,
+        value: &'a str,
+    ) -> BoxFuture<'a, Result<(), AcpError>> {
+        Box::pin(AcpClient::set_config_option(self, config_id, value))
     }
     fn image_supported(&self) -> bool {
         AcpClient::image_supported(self)

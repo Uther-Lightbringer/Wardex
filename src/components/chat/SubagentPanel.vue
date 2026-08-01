@@ -7,12 +7,25 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useChatStore, type Subagent } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
+import SubagentDialog from './SubagentDialog.vue';
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
 
 const open = ref(true);
 const now = ref(Date.now());
+
+// Detail dialog: the selected entry is looked up LIVE by id so the dialog
+// keeps tracking status/output updates while it is open.
+const dlgOpen = ref(false);
+const dlgId = ref('');
+const dlgEntry = computed<Subagent | null>(
+  () => chat.subagents.find((s) => s.id === dlgId.value) ?? null,
+);
+function openDetail(s: Subagent): void {
+  dlgId.value = s.id;
+  dlgOpen.value = true;
+}
 
 const activeCount = computed(
   () => chat.subagents.filter((s) => s.status === 'in_progress').length,
@@ -80,6 +93,14 @@ function meta(s: Subagent): string {
   if (d) parts.push(d);
   return parts.join(' · ');
 }
+
+/** No tool_call updates for 2min while live → suspected stuck. */
+const STUCK_MS = 120_000;
+function isStuck(s: Subagent): boolean {
+  void now.value;
+  if (s.status !== 'in_progress' && s.status !== 'pending') return false;
+  return s.lastUpdate > 0 && Date.now() - s.lastUpdate >= STUCK_MS;
+}
 </script>
 
 <template>
@@ -90,7 +111,7 @@ function meta(s: Subagent): string {
       </span>
     </div>
     <div v-if="open" class="subagent__list">
-      <div v-for="s in chat.subagents" :key="s.id" class="subagent__row">
+      <div v-for="s in chat.subagents" :key="s.id" class="subagent__row" title="点击查看任务书与报告" @click="openDetail(s)">
         <span class="subagent__dot" :class="[dotClass(s), { breath: breathing(s) }]"></span>
         <span
           class="subagent__title"
@@ -98,9 +119,15 @@ function meta(s: Subagent): string {
           :style="{ fontSize: prefs.fs(12) + 'px' }"
           >{{ s.children > 0 ? `[${s.children} 个子任务] ` : '' }}{{ s.title }}</span
         >
-        <span class="subagent__meta" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ meta(s) }}</span>
+        <span
+          class="subagent__meta"
+          :class="{ stuck: isStuck(s) }"
+          :style="{ fontSize: prefs.fs(10) + 'px' }"
+          >{{ isStuck(s) ? '可能卡住 · ' : '' }}{{ meta(s) }}</span
+        >
       </div>
     </div>
+    <SubagentDialog v-model:open="dlgOpen" :entry="dlgEntry" />
   </div>
 </template>
 
@@ -132,6 +159,14 @@ function meta(s: Subagent): string {
   align-items: center;
   gap: 8px;
   height: 24px;
+}
+
+.subagent__row:hover {
+  background: #1a2334;
+}
+
+.subagent__row:hover .subagent__title {
+  color: var(--war-gold);
 }
 
 .subagent__dot {
@@ -187,5 +222,10 @@ function meta(s: Subagent): string {
   flex: none;
   color: #6d7688;
   white-space: nowrap;
+}
+
+.subagent__meta.stuck {
+  color: var(--war-error);
+  font-weight: bold;
 }
 </style>

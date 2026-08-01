@@ -297,6 +297,12 @@ agent 可能忽略它——chat 层有 2500ms 强杀兜底（第 9.6 节）。
   （`AcpClient.cpp:140-142`）。
 - 响应忽略内容（result 里可能带 `configOptions`，不读），发 `modeChanged(pendingMode)`
   事件（`AcpClient.cpp:398-402`）。
+- **新版扩展（2026-08）**：mode 之外的 picker 走同一方法的不同 `configId`（kimi 上报
+  `model` / `thinking` / `mode` 三个 select）。`session/new|load` 的 result 里
+  `configOptions[]` 现在会被读取并作为 `AcpEvent::ConfigOptions` 转发（sessionReady 时
+  随 Started 之后发一次；`config_option_update` 通知按 `configId` 补丁式更新 currentValue
+  再发一次）；`AcpClient::set_config_option(configId, value)` 的响应若带 `configOptions`
+  则整体替换并转发。chat 层原样经 `acp://configOptions` 推给前端（见 chat.md §6.1 思考档位）。
 - mode 变更时机：每次 `session/prompt` 之前 chat 层都会先 `setMode` 保持同步
   （`ChatController.cpp:1066`）；UI 切 mode 时只对当前活动进程立即下发
   （`ChatController.cpp:28-38`）。

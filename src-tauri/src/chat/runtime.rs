@@ -168,6 +168,29 @@ pub fn subagent_summary(raw: &str) -> Option<String> {
     None
 }
 
+/// CLI-side agent id(s) from the Agent tool's rawOutput — the `agent_id:`
+/// line(s) (e.g. "agent-0"). This is the directory name of the sub-agent's
+/// on-disk wire transcript (~/.kimi-code/.../agents/<agentId>/wire.jsonl),
+/// used by the dialog's 执行过程 section. Swarm results may carry several.
+pub fn subagent_agent_ids(raw: &str) -> Vec<String> {
+    const KEY: &str = "agent_id:";
+    let mut ids = Vec::new();
+    for (i, line) in raw.lines().enumerate() {
+        // ids only appear in the small header block; stop scanning early
+        if i > 40 {
+            break;
+        }
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix(KEY) {
+            let id = rest.trim();
+            if !id.is_empty() && ids.iter().all(|x| x != &id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
 /// Truncate oversized string payload fields before they enter the in-memory
 /// model (performance.md §3). NOTE: with segments as the single source of
 /// truth the rewritten JSONL carries the same truncated form — this diverges
@@ -249,8 +272,18 @@ pub struct SubagentEntry {
     pub children: usize,
     pub child_names: Vec<String>,
     pub summary: String,
+    /// Full task brief (the prompt / swarm template+items as pretty JSON),
+    /// shown in the detail dialog. Capped at 32KB.
+    pub input: String,
+    /// Final report (rawOutput), filled on completion. Capped at 64KB.
+    pub output: String,
+    /// CLI-side agent id(s) from rawOutput (`agent_id:` lines) — names of the
+    /// on-disk wire transcript dirs, for the dialog's 执行过程 section.
+    pub agent_ids: Vec<String>,
     pub started_at: i64,
     pub finished_at: i64,
+    /// Last time any tool_call(_update) touched this entry — stuck detection.
+    pub last_update: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -264,9 +297,16 @@ pub struct RuntimeSnap {
     pub busy: bool,
     pub acp_running: bool,
     pub queue_len: usize,
+    /// Queue contents — the frontend mirror rebuilds from this after a
+    /// session switch (its local mirror does not survive switching away).
+    pub queue: Vec<String>,
     pub agent_id: String,
     pub image_supported: bool,
     pub last_activity_ms: i64,
+    /// Full acp://permission payload while a request awaits an answer — the
+    /// dialog survives a session switch by re-pulling this (the live event
+    /// only reaches whichever session was active when it fired).
+    pub perm_pending: Option<Value>,
 }
 
 pub struct RuntimeEntry {
@@ -322,14 +362,37 @@ pub fn enforce_process_cap(registry: &SharedRegistry, exempt: &str) {
 // Runtime commands (manager / Tauri -> actor, plus self-posted timer ticks)
 // ---------------------------------------------------------------------------
 
+/// Result of a user-initiated send, reported back through the oneshot ack so
+/// the caller (and therefore the composer) knows whether the message started
+/// a turn, landed in the queue, or was rejected.
+#[derive(Debug)]
+pub enum SendOutcome {
+    Started,
+    Enqueued,
+    Rejected(String),
+}
+
+/// A queued user message. Attachments ride along as already-persisted media
+/// paths (the composer saves them before send), so waiting in the queue
+/// cannot stale or lose them.
+#[derive(Clone, Debug, Default)]
+struct QueuedItem {
+    text: String,
+    images: Vec<String>,
+    display: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum RuntimeCmd {
     /// Already attachment-split: text to send (inline "[附件]" lines folded
     /// in by the manager), image block paths, display-only attachment list.
+    /// `ack` is Some only for user-initiated sends (internal drain/guide
+    /// re-sends pass None).
     SendPrompt {
         text: String,
         images: Vec<String>,
         display: Vec<String>,
+        ack: Option<tokio::sync::oneshot::Sender<SendOutcome>>,
     },
     Cancel,
     RetryCancel,
@@ -339,6 +402,8 @@ pub enum RuntimeCmd {
     AnswerPermission { option_id: String, cancelled: bool },
     /// Raw WarDex mode id; the actor maps it through the provider registry.
     SetMode(String),
+    /// ACP config option picker (kimi: "thinking" / "model"); passthrough.
+    SetConfigOption { config_id: String, value: String },
     /// New agent snapshot; the actor persists meta and handles the
     /// same/cross-provider acpSessionId rule itself (it owns the old agent).
     SwitchAgent(Box<Agent>),
@@ -377,8 +442,15 @@ pub(crate) struct Actor {
     user_stop: bool,
     acp_ready: bool,
     pending_prompt: Option<(String, Vec<String>)>,
-    pending_guide: Option<String>,
-    queue: VecDeque<String>,
+    pending_guide: Option<QueuedItem>,
+    queue: VecDeque<QueuedItem>,
+    /// The in-flight spawn started a brand-new agent-side session (no
+    /// session/load resume id). The agent's default model is only applied to
+    /// fresh sessions; resumed ones keep their remembered model.
+    fresh_launch: bool,
+    /// Default-model application happens once per spawn, on the first
+    /// ConfigOptions batch after Started.
+    model_applied: bool,
     assistant_buf: String,
     thinking_buf: String,
     pending_content: String,
@@ -430,6 +502,8 @@ pub(crate) fn spawn_actor(
         busy: false,
         user_stop: false,
         acp_ready: false,
+        fresh_launch: false,
+        model_applied: false,
         pending_prompt: None,
         pending_guide: None,
         queue: VecDeque::new(),
@@ -526,7 +600,8 @@ impl Actor {
                 text,
                 images,
                 display,
-            } => self.on_send_prompt(text, images, display).await,
+                ack,
+            } => self.on_send_prompt(text, images, display, ack).await,
             RuntimeCmd::Cancel => self.on_cancel().await,
             RuntimeCmd::RetryCancel => self.cancel_retry(true),
             RuntimeCmd::GuideAt(index) => self.on_guide_at(index).await,
@@ -553,6 +628,13 @@ impl Actor {
                 if let Some(c) = self.client.as_mut() {
                     if let Err(e) = c.set_mode(&mapped).await {
                         log::warn!("chat[{}] set_mode failed: {e}", self.session_id);
+                    }
+                }
+            }
+            RuntimeCmd::SetConfigOption { config_id, value } => {
+                if let Some(c) = self.client.as_mut() {
+                    if let Err(e) = c.set_config_option(&config_id, &value).await {
+                        log::warn!("chat[{}] set_config_option failed: {e}", self.session_id);
                     }
                 }
             }
@@ -589,9 +671,18 @@ impl Actor {
 
     /// sendUserMessage / sendUserMessageWithAttachments post-split
     /// (ChatController.cpp:920-1004).
-    async fn on_send_prompt(&mut self, text: String, images: Vec<String>, display: Vec<String>) {
+    async fn on_send_prompt(
+        &mut self,
+        text: String,
+        images: Vec<String>,
+        display: Vec<String>,
+        ack: Option<tokio::sync::oneshot::Sender<SendOutcome>>,
+    ) {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() && display.is_empty() {
+            if let Some(ack) = ack {
+                let _ = ack.send(SendOutcome::Rejected(String::new()));
+            }
             return;
         }
         // A new user message supersedes a pending rate-limit retry (Phase 4).
@@ -599,24 +690,30 @@ impl Actor {
             self.cancel_retry(true);
         }
         if self.busy {
-            if !display.is_empty() {
-                self.set_error("生成中不支持附件入队，请等待当前回复完成".to_string());
-                self.emit_status(None);
-                return;
-            }
             if self.queue.len() >= K_MAX_QUEUE_SIZE {
                 self.set_error(format!("队列已满（最多 {K_MAX_QUEUE_SIZE} 条）"));
                 self.emit_status(None);
+                if let Some(ack) = ack {
+                    let _ = ack.send(SendOutcome::Rejected(format!(
+                        "队列已满（最多 {K_MAX_QUEUE_SIZE} 条）"
+                    )));
+                }
                 return;
             }
-            self.queue.push_back(trimmed);
+            self.queue.push_back(QueuedItem { text: trimmed, images, display });
             self.set_error(String::new());
             self.sync_snap();
             self.emit_status(None);
+            if let Some(ack) = ack {
+                let _ = ack.send(SendOutcome::Enqueued);
+            }
             return;
         }
         self.set_error(String::new());
         self.start_send(trimmed, images, display).await;
+        if let Some(ack) = ack {
+            let _ = ack.send(SendOutcome::Started);
+        }
     }
 
     /// cancel() (ChatController.cpp:1070-1107).
@@ -656,9 +753,11 @@ impl Actor {
         if index >= self.queue.len() {
             return;
         }
-        let Some(text) = self.queue.remove(index) else {
+        let Some(item) = self.queue.remove(index) else {
             return;
         };
+        self.sync_snap();
+        self.emit_status(None);
         self.set_error(String::new());
         // A pending permission request blocks the agent's turn — settle it
         // as cancelled first, or session/cancel never lands and the stale
@@ -671,10 +770,10 @@ impl Actor {
             self.cancel_retry(true);
         }
         if !self.busy {
-            self.start_send(text, Vec::new(), Vec::new()).await;
+            self.start_send(item.text, item.images, item.display).await;
             return;
         }
-        self.pending_guide = Some(text);
+        self.pending_guide = Some(item);
         self.user_stop = true;
         if let Some(c) = self.client.as_mut() {
             if let Err(e) = c.cancel_turn().await {
@@ -699,7 +798,7 @@ impl Actor {
         };
         if !self.busy {
             self.pending_guide = None;
-            self.start_send(guide, Vec::new(), Vec::new()).await;
+            self.start_send(guide.text, guide.images, guide.display).await;
         } else {
             // Old turn still alive inside AcpClient — kill it, or its
             // remaining chunks would stream into the guide's new bubble and
@@ -711,7 +810,7 @@ impl Actor {
             self.set_busy(false);
             self.pending_guide = None;
             self.user_stop = false;
-            self.start_send(guide, Vec::new(), Vec::new()).await;
+            self.start_send(guide.text, guide.images, guide.display).await;
         }
     }
 
@@ -823,6 +922,40 @@ impl Actor {
                 self.emit_status(None);
             }
             AcpEvent::ModeChanged { .. } => {}
+            AcpEvent::ConfigOptions { options } => {
+                // Apply the agent's default model once per fresh session:
+                // only when it appears in the CLI's own model picker (aliases
+                // come through here; non-alias models were injected via
+                // KIMI_MODEL_* at spawn). Resumed sessions keep whatever the
+                // CLI remembers.
+                if self.fresh_launch && !self.model_applied {
+                    self.model_applied = true;
+                    let want = self.agent.model.trim();
+                    if !want.is_empty() {
+                        let picker = options.iter().find(|o| o["id"].as_str() == Some("model"));
+                        let applicable = picker.is_some_and(|p| {
+                            p["currentValue"].as_str() != Some(want)
+                                && p["options"].as_array().is_some_and(|list| {
+                                    list.iter().any(|o| o["value"].as_str() == Some(want))
+                                })
+                        });
+                        if applicable {
+                            if let Some(c) = self.client.as_mut() {
+                                if let Err(e) = c.set_config_option("model", want).await {
+                                    log::warn!(
+                                        "chat[{}] default model '{want}' apply failed: {e}",
+                                        self.session_id
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                self.emit(
+                    "acp://configOptions",
+                    json!({ "sessionId": self.session_id, "options": options }),
+                );
+            }
             AcpEvent::ThoughtChunk { text } => {
                 self.thinking_buf.push_str(&text);
                 self.pending_thinking.push_str(&text);
@@ -842,15 +975,14 @@ impl Actor {
                 // params so the dialog can render EVERY question (nothing
                 // dropped client-side; see acp/types.rs).
                 let questions = crate::acp::types::parse_question_request(&params);
-                self.emit(
-                    "acp://permission",
-                    json!({
-                        "sessionId": self.session_id,
-                        "requestId": request_id,
-                        "params": params,
-                        "questions": questions,
-                    }),
-                );
+                let payload = json!({
+                    "sessionId": self.session_id,
+                    "requestId": request_id,
+                    "params": params,
+                    "questions": questions,
+                });
+                self.snap().perm_pending = Some(payload.clone());
+                self.emit("acp://permission", payload);
                 self.emit_status(None);
             }
             AcpEvent::TurnFinished { stop_reason } => self.on_turn_finished(&stop_reason).await,
@@ -1058,9 +1190,10 @@ impl Actor {
             tokio::spawn(async move {
                 let _ = tx
                     .send(RuntimeCmd::SendPrompt {
-                        text: guide,
-                        images: Vec::new(),
-                        display: Vec::new(),
+                        text: guide.text,
+                        images: guide.images,
+                        display: guide.display,
+                        ack: None,
                     })
                     .await;
             });
@@ -1074,9 +1207,10 @@ impl Actor {
                 tokio::spawn(async move {
                     let _ = tx
                         .send(RuntimeCmd::SendPrompt {
-                            text: next,
-                            images: Vec::new(),
-                            display: Vec::new(),
+                            text: next.text,
+                            images: next.images,
+                            display: next.display,
+                            ack: None,
                         })
                         .await;
                 });
@@ -1097,6 +1231,8 @@ impl Actor {
         self.snap().acp_running = false;
 
         let launch = self.build_launch();
+        self.fresh_launch = launch.start.resume_session_id.is_empty();
+        self.model_applied = false;
         enforce_process_cap(&self.registry, &self.session_id);
         self.emit_status(None); // 连接 ACP…
 
@@ -1118,10 +1254,27 @@ impl Actor {
     fn build_launch(&self) -> SessionLaunch {
         let provider = self.agent.provider.trim().to_lowercase();
         let spec = provider::spec(&provider);
-        let env = match spec {
+        let mut env = match spec {
             Some(s) => provider::env_overrides(s, &self.agent.api_key, &self.agent.base_url, true),
             None => Vec::new(),
         };
+        // Per-agent model for kimi: a model that is NOT one of the CLI's own
+        // config.toml aliases cannot be picked via ACP configOptions, so we
+        // synthesize it through the KIMI_MODEL_* env family (kimi CLI docs,
+        // env-vars). Aliases are applied at runtime via set_config_option
+        // once the session's configOptions arrive.
+        let model = self.agent.model.trim();
+        if provider == "kimi" && !model.is_empty() && !crate::models::kimi_model_aliases().iter().any(|a| a == model) {
+            env.push(("KIMI_MODEL_NAME".to_string(), Some(model.to_string())));
+            if !self.agent.api_key.trim().is_empty() {
+                env.push(("KIMI_MODEL_API_KEY".to_string(), Some(self.agent.api_key.trim().to_string())));
+            }
+            if !self.agent.base_url.trim().is_empty() {
+                env.push(("KIMI_MODEL_BASE_URL".to_string(), Some(self.agent.base_url.trim().to_string())));
+                // A custom baseUrl is an OpenAI-compatible endpoint.
+                env.push(("KIMI_MODEL_PROVIDER_TYPE".to_string(), Some("openai".to_string())));
+            }
+        }
         let cli = provider::resolve_command(spec, &self.agent.cli_path);
         let args = provider::resolve_args(spec, &self.agent.extra_args);
         // Per-agent MCP servers: the config page stores raw JSON-array text;
@@ -1420,6 +1573,7 @@ impl Actor {
                 entry.status = status.to_string();
             }
         }
+        entry.last_update = now_ms();
         // Input args stream in while the call runs — fill title/children as
         // soon as the JSON becomes parseable.
         if let Some(input) = parse_tool_input(tool) {
@@ -1429,6 +1583,21 @@ impl Actor {
                 entry.title = desc.to_string();
             } else if !prompt.is_empty() {
                 entry.title = elide(prompt, 48);
+            }
+            // Task brief for the detail dialog: the plain prompt when there
+            // is one, otherwise the full args JSON (swarm template+items).
+            let brief = if !prompt.is_empty() {
+                prompt.to_string()
+            } else {
+                serde_json::to_string_pretty(&input).unwrap_or_default()
+            };
+            if !brief.is_empty() {
+                entry.input = if brief.len() > 32 * 1024 {
+                    let cut: String = brief.chars().take(32 * 1024).collect();
+                    format!("{cut}\n…（已截断）")
+                } else {
+                    brief
+                };
             }
             if let Some(Value::Array(items)) = input.get("items") {
                 if !items.is_empty() {
@@ -1448,6 +1617,14 @@ impl Actor {
                 if let Some(summary) = subagent_summary(raw) {
                     entry.summary = summary;
                 }
+                entry.agent_ids = subagent_agent_ids(raw);
+                // Final report for the detail dialog (already ≤64KB upstream).
+                entry.output = if raw.len() > 64 * 1024 {
+                    let cut: String = raw.chars().take(64 * 1024).collect();
+                    format!("{cut}\n…（已截断）")
+                } else {
+                    raw.to_string()
+                };
             }
         }
         match idx {
@@ -1480,6 +1657,7 @@ impl Actor {
         let Some(id) = self.perm_request_id.take() else {
             return;
         };
+        self.snap().perm_pending = None;
         self.emit(
             "acp://permissionCleared",
             json!({ "sessionId": self.session_id }),
@@ -1496,6 +1674,7 @@ impl Actor {
     /// the dying turn on the agent side; ChatController.cpp:654-662).
     fn clear_permission(&mut self) {
         if self.perm_request_id.take().is_some() {
+            self.snap().perm_pending = None;
             self.emit(
                 "acp://permissionCleared",
                 json!({ "sessionId": self.session_id }),
@@ -1559,6 +1738,17 @@ impl Actor {
         let mut s = self.snap();
         s.busy = self.busy;
         s.queue_len = self.queue.len();
+        s.queue = self
+            .queue
+            .iter()
+            .map(|i| {
+                if i.display.is_empty() {
+                    i.text.clone()
+                } else {
+                    format!("{} 📎{}", i.text, i.display.len())
+                }
+            })
+            .collect();
         s.agent_id = self.agent.id.clone();
         if let Some(c) = self.client.as_ref() {
             s.image_supported = c.image_supported();

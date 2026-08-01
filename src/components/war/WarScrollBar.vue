@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // WC3-style vertical scrollbar (WarScrollBar.qml): scroll_up/down arrows
-// (22×22), stretched track and thumb art. When the content fits, the whole
-// bar blacks out (opacity 0.68) and stops responding — classic WC3 list box.
+// (22×22), stretched track, 9-slice thumb (fixed end caps, stretched flat
+// middle so the art never distorts). When the content fits, the track+thumb
+// hide and only the dimmed arrows remain — no more WC3 blackout bar.
 //
 // Unlike the Qt attached ScrollBar, the web version is given the scrollable
 // element via the `target` prop (a plain div with overflow-y: auto +
@@ -23,10 +24,11 @@ const trackH = ref(0);
 const barEl = ref<HTMLElement | null>(null);
 
 const MIN_THUMB = 0.08; // ScrollBar minimumSize
+const MIN_THUMB_PX = 40; // 9-slice caps are 18px top + 18px bottom — never go shorter
 
 const thumbH = computed(() => {
   if (!scrollable.value || trackH.value <= 0) return 0;
-  return Math.max(MIN_THUMB, size.value) * trackH.value;
+  return Math.min(trackH.value, Math.max(MIN_THUMB_PX, Math.max(MIN_THUMB, size.value) * trackH.value));
 });
 const thumbY = computed(() => {
   if (!scrollable.value || scrollH.value <= clientH.value) return 0;
@@ -119,15 +121,13 @@ function onThumbMove(e: PointerEvent): void {
       @click="step(-1)"
     />
     <div class="war-scroll__track">
-      <img
+      <div
         v-if="scrollable"
         class="war-scroll__thumb"
-        src="/assets/ui/scroll/scroll_thumb.png"
         :style="{ height: thumbH + 'px', top: thumbY + 'px' }"
-        draggable="false"
         @pointerdown="onThumbDown"
         @pointermove="onThumbMove"
-      />
+      ></div>
     </div>
     <img
       class="war-scroll__arrow war-scroll__arrow--down"
@@ -135,7 +135,6 @@ function onThumbMove(e: PointerEvent): void {
       draggable="false"
       @click="step(1)"
     />
-    <div v-if="!scrollable" class="war-scroll__blackout"></div>
   </div>
 </template>
 
@@ -175,17 +174,27 @@ function onThumbMove(e: PointerEvent): void {
   background: url('/assets/ui/scroll/scroll_track.png') 0 0 / 100% 100% no-repeat;
 }
 
+/* 内容装得下 → 隐藏轨道（只留一对置灰箭头占位，不再盖黑条） */
+.war-scroll.off .war-scroll__track {
+  visibility: hidden;
+}
+
+.war-scroll.off .war-scroll__arrow {
+  opacity: 0.35;
+}
+
+/* thumb: 9-slice (18px caps + 14px sides fixed, flat middle stretches) so the
+   end caps and rounded corners never distort no matter how long it gets */
 .war-scroll__thumb {
   position: absolute;
   left: -2px; /* thumb art (68px wide source) slightly overlaps the track */
   width: calc(100% + 4px);
-}
-
-.war-scroll__blackout {
-  position: absolute;
-  inset: 0;
-  background: #000;
-  opacity: 0.68;
-  pointer-events: none;
+  box-sizing: border-box;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 18px 14px;
+  border-image: url('/assets/ui/scroll/scroll_thumb.png') 18 14 fill stretch;
+  user-select: none;
+  touch-action: none;
 }
 </style>

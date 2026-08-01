@@ -40,6 +40,11 @@ log = "0.4"
 # File + stderr logger behind the log facade (phase 1d observability:
 # logs/wardex-<date>.log with phased startup marks).
 fern = "0.7"
+# Blocking HTTP for the OpenAI-compatible GET {baseUrl}/models probe
+# (models.rs). Lightweight: rustls TLS, no tokio runtime needed.
+ureq = { version = "2", features = ["tls", "json"] }
+# Parse ~/.kimi-code/config.toml [models] aliases (models.rs).
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"

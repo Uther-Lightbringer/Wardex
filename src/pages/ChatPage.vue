@@ -9,7 +9,7 @@ import PageShell from '../components/PageShell.vue';
 import WarFrame from '../components/war/WarFrame.vue';
 import WarButton from '../components/war/WarButton.vue';
 import WarDock from '../components/war/WarDock.vue';
-import WarMenu from '../components/war/WarMenu.vue';
+import WarDropdown from '../components/war/WarDropdown.vue';
 import SessionRail from '../components/chat/SessionRail.vue';
 import MessageList from '../components/chat/MessageList.vue';
 import Composer from '../components/chat/Composer.vue';
@@ -53,7 +53,7 @@ const actionBay = ref<HTMLElement | null>(null);
 const { width: bayW } = useElementSize(actionBay);
 const MENU_BTN_W = 276;
 const actionBtnW = computed(() =>
-  bayW.value > 0 ? Math.min(MENU_BTN_W, Math.floor(bayW.value * 0.92)) : MENU_BTN_W,
+  bayW.value > 0 ? Math.min(MENU_BTN_W, Math.floor(bayW.value * 0.98)) : MENU_BTN_W,
 );
 
 // ---- rail inline-rename ref: Esc belongs to the input while renaming ----
@@ -70,37 +70,65 @@ function onPageKey(e: KeyboardEvent): void {
 onMounted(() => window.addEventListener('keydown', onPageKey));
 onBeforeUnmount(() => window.removeEventListener('keydown', onPageKey));
 
-// ---- title row: agent chip + switcher menu (features/chat.md §6.1) ----
-const agentMenuVisible = ref(false);
-const agentMenuX = ref(0);
-const agentMenuY = ref(0);
-
+// ---- title row: agent switcher dropdown (features/chat.md §6.1) ----
 const CHAT_PROVIDERS = ['kimi', 'claude', 'codex', 'custom'];
 function agentUsable(enabled: boolean, provider: string): boolean {
   return enabled && CHAT_PROVIDERS.includes(provider.trim().toLowerCase());
 }
 
-const agentItems = computed(() =>
-  sessions.agents.map((a) => {
-    const current = a.id === (chat.meta?.agentId ?? sessions.runtimeStates[chat.sessionId]?.agentId);
-    const usable = agentUsable(a.enabled, a.provider);
-    return {
-      label: `${current ? '✓' : '　'} ${a.name} · ${a.provider}`,
-      disabled: current || !usable,
-    };
-  }),
-);
+const agentOptions = computed(() => sessions.agents.map((a) => `${a.name} · ${a.provider}`));
 
-function openAgentMenu(e: MouseEvent): void {
-  agentMenuX.value = e.clientX;
-  agentMenuY.value = e.clientY;
-  agentMenuVisible.value = true;
-}
+const agentIndex = computed(() => {
+  const cur = chat.meta?.agentId ?? sessions.runtimeStates[chat.sessionId]?.agentId;
+  return sessions.agents.findIndex((a) => a.id === cur);
+});
+
+const agentDisplay = computed(() => `◆ ${chat.meta?.agentName || 'Agent'}`);
 
 function onAgentPick(i: number): void {
   const a = sessions.agents[i];
-  if (!a) return;
+  if (!a || i === agentIndex.value) return;
+  if (!agentUsable(a.enabled, a.provider)) return;
   void chat.switchAgent(a.id);
+}
+
+// ---- title row: thinking-effort dropdown (ACP configOptions, kimi) ----
+// Shown only when the CLI advertised a "thinking" picker for this session
+// (kimi always does; per-model support_efforts decide the choices — e.g.
+// deepseek-reasoner exposes on/off style levels). Other ACP CLIs that do
+// not advertise it simply never see the dropdown.
+const thinkingOpt = computed(() => chat.configOptions.find((o) => o.id === 'thinking'));
+const thinkingOptions = computed(() => (thinkingOpt.value?.options ?? []).map((o) => o.name));
+const thinkingIndex = computed(() =>
+  (thinkingOpt.value?.options ?? []).findIndex((o) => o.value === thinkingOpt.value?.currentValue),
+);
+const thinkingDisplay = computed(() => {
+  const cur = thinkingOpt.value?.options.find((o) => o.value === thinkingOpt.value?.currentValue);
+  return `思考 ${cur?.name ?? thinkingOpt.value?.currentValue ?? ''}`;
+});
+
+function onThinkingPick(i: number): void {
+  const o = thinkingOpt.value?.options[i];
+  if (!o || o.value === thinkingOpt.value?.currentValue) return;
+  void chat.setConfigOption('thinking', o.value);
+}
+
+// ---- title row: model dropdown (ACP configOptions "model" picker) ----
+// Same mechanics as the thinking dropdown; kimi always advertises it.
+const modelOpt = computed(() => chat.configOptions.find((o) => o.id === 'model'));
+const modelOptions = computed(() => (modelOpt.value?.options ?? []).map((o) => o.name));
+const modelIndex = computed(() =>
+  (modelOpt.value?.options ?? []).findIndex((o) => o.value === modelOpt.value?.currentValue),
+);
+const modelDisplay = computed(() => {
+  const cur = modelOpt.value?.options.find((o) => o.value === modelOpt.value?.currentValue);
+  return `模型 ${cur?.name ?? modelOpt.value?.currentValue ?? ''}`;
+});
+
+function onModelPick(i: number): void {
+  const o = modelOpt.value?.options[i];
+  if (!o || o.value === modelOpt.value?.currentValue) return;
+  void chat.setConfigOption('model', o.value);
 }
 
 // ---- action bay: 刷新工作区 / 停止生成 dual state (§6.4, §8) ----
@@ -119,9 +147,9 @@ function onRefreshOrStop(): void {
       <!-- far left: sessions of this project -->
       <WarFrame
         class="chat__rail"
-        src="/assets/ui/frames/frame_rail.png"
-        :slice="[92, 36, 40, 36]"
-        :hole="[77, 23, 26, 24]"
+        src="/assets/ui/frames/frame_fat_bar.png"
+        :slice="[28, 32, 28, 32]"
+        :hole="[24, 26, 24, 26]"
       >
         <SessionRail ref="rail" />
       </WarFrame>
@@ -151,14 +179,33 @@ function onRefreshOrStop(): void {
                 @click="chat.setAllSegsOpen(!chat.segCollapseOpen)"
                 >{{ chat.segCollapseOpen ? '⊟ 全部折叠' : '⊞ 全部展开' }}</span
               >
-              <span
+              <WarDropdown
+                v-if="chat.sessionId && modelOpt"
+                class="chat__model-dd"
+                :options="modelOptions"
+                :model-value="modelIndex"
+                :display-text="modelDisplay"
+                :text-size="prefs.fs(12)"
+                @update:model-value="onModelPick"
+              />
+              <WarDropdown
+                v-if="chat.sessionId && thinkingOpt"
+                class="chat__thinking-dd"
+                :options="thinkingOptions"
+                :model-value="thinkingIndex"
+                :display-text="thinkingDisplay"
+                :text-size="prefs.fs(12)"
+                @update:model-value="onThinkingPick"
+              />
+              <WarDropdown
                 v-if="chat.sessionId"
-                class="chat__agent-chip"
-                :style="{ fontSize: prefs.fs(12) + 'px' }"
-                @click="openAgentMenu"
-              >
-                ◆ {{ chat.meta?.agentName || 'Agent' }} ▾
-              </span>
+                class="chat__agent-dd"
+                :options="agentOptions"
+                :model-value="agentIndex"
+                :display-text="agentDisplay"
+                :text-size="prefs.fs(12)"
+                @update:model-value="onAgentPick"
+              />
             </div>
             <div class="chat__list">
               <MessageList v-if="chat.sessionId" />
@@ -205,8 +252,6 @@ function onRefreshOrStop(): void {
         src="/assets/ui/frames/frame_iron_bar.png"
         :slice="[62, 110, 70, 108]"
         :hole="[22, 24, 21, 24]"
-        :content-left-extra="4"
-        :content-right-extra="4"
       >
         <div ref="actionBay" class="chat__actions-col">
           <WarButton
@@ -226,15 +271,6 @@ function onRefreshOrStop(): void {
         </div>
       </WarFrame>
     </div>
-
-    <!-- agent switcher menu -->
-    <WarMenu
-      v-model:visible="agentMenuVisible"
-      :x="agentMenuX"
-      :y="agentMenuY"
-      :items="agentItems"
-      @select="onAgentPick"
-    />
 
     <!-- modals -->
     <PermissionDialog />
@@ -338,15 +374,22 @@ function onRefreshOrStop(): void {
   color: var(--war-gold);
 }
 
-.chat__agent-chip {
+.chat__agent-dd {
   flex: none;
-  color: var(--war-user-blue);
-  font-family: SimSun, serif;
-  user-select: none;
+  width: 180px;
+  height: 30px;
 }
 
-.chat__agent-chip:hover {
-  color: var(--war-gold);
+.chat__thinking-dd {
+  flex: none;
+  width: 130px;
+  height: 30px;
+}
+
+.chat__model-dd {
+  flex: none;
+  width: 210px; /* model ids run long (kimi-code/kimi-for-coding); text ellipsizes */
+  height: 30px;
 }
 
 .chat__list {
@@ -414,7 +457,7 @@ function onRefreshOrStop(): void {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 8px;
   overflow: hidden;
 }
 </style>

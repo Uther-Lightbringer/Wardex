@@ -65,6 +65,7 @@ function formatDate(ms: number): string {
     src="/assets/ui/frames/frame_popup_small.png"
     :slice="[44, 50, 45, 50]"
     :inset="[23, 33, 24, 31]"
+    fill
   >
     <div class="recent__col">
       <div class="recent__title war-font-title war-outline-black">最近项目</div>

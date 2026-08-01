@@ -3,7 +3,7 @@
 // arrow baked into the right cap), dropdown_panel.png nine-slice list.
 // Click the bar to toggle; selecting an option closes and emits.
 // dropUp opens the list above the bar (for bars near the window bottom).
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 
 const props = withDefaults(
   defineProps<{
@@ -24,6 +24,10 @@ const emit = defineEmits<{
 
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
+const pop = ref<HTMLElement | null>(null);
+// Fixed-position popup coords (teleported to body so no ancestor's
+// overflow:hidden — e.g. WarFrame content — can clip the list).
+const popStyle = ref<Record<string, string>>({});
 
 const shownText = computed(() => {
   if (props.displayText !== undefined) return props.displayText;
@@ -42,15 +46,45 @@ function select(index: number): void {
   emit('activated', index);
 }
 
+function measure(): void {
+  const r = root.value?.getBoundingClientRect();
+  if (!r) return;
+  popStyle.value = {
+    left: `${r.left}px`,
+    width: `${Math.max(r.width, 120)}px`,
+    ...(props.dropUp
+      ? { bottom: `${window.innerHeight - r.top + 2}px` }
+      : { top: `${r.bottom + 2}px` }),
+  };
+}
+
 function onDocDown(e: MouseEvent): void {
-  if (root.value && !root.value.contains(e.target as Node)) open.value = false;
+  const t = e.target as Node;
+  if (root.value?.contains(t) || pop.value?.contains(t)) return;
+  open.value = false;
+}
+
+function closeOnShift(): void {
+  open.value = false;
 }
 
 watch(open, (v) => {
-  if (v) document.addEventListener('mousedown', onDocDown, true);
-  else document.removeEventListener('mousedown', onDocDown, true);
+  if (v) {
+    void nextTick(measure);
+    document.addEventListener('mousedown', onDocDown, true);
+    window.addEventListener('resize', closeOnShift);
+    window.addEventListener('scroll', closeOnShift, true);
+  } else {
+    document.removeEventListener('mousedown', onDocDown, true);
+    window.removeEventListener('resize', closeOnShift);
+    window.removeEventListener('scroll', closeOnShift, true);
+  }
 });
-onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true));
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', onDocDown, true);
+  window.removeEventListener('resize', closeOnShift);
+  window.removeEventListener('scroll', closeOnShift, true);
+});
 </script>
 
 <template>
@@ -61,30 +95,28 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
       <span class="war-dd__bar-text" :style="{ fontSize: textSize + 'px' }">{{ shownText }}</span>
     </div>
 
-    <!-- expanded list -->
-    <div
-      v-if="open"
-      class="war-dd__pop"
-      :class="{ 'war-dd__pop--up': dropUp }"
-    >
-      <div class="war-dd__pop-inner">
-        <div
-          v-for="(opt, i) in options"
-          :key="i"
-          class="war-dd__row"
-          :style="{ height: rowHeight + 'px' }"
-          @click="select(i)"
-        >
-          <span class="war-highlight war-dd__row-glow"></span>
-          <span
-            class="war-dd__row-text"
-            :class="{ current: i === modelValue }"
-            :style="{ fontSize: textSize + 'px' }"
-            >{{ opt }}</span
+    <!-- expanded list (teleported: fixed coords from the bar's rect) -->
+    <Teleport to="body">
+      <div v-if="open" ref="pop" class="war-dd__pop" :style="popStyle">
+        <div class="war-dd__pop-inner">
+          <div
+            v-for="(opt, i) in options"
+            :key="i"
+            class="war-dd__row"
+            :style="{ height: rowHeight + 'px' }"
+            @click="select(i)"
           >
+            <span class="war-highlight war-dd__row-glow"></span>
+            <span
+              class="war-dd__row-text"
+              :class="{ current: i === modelValue }"
+              :style="{ fontSize: textSize + 'px' }"
+              >{{ opt }}</span
+            >
+          </div>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -103,8 +135,13 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
 .war-dd__bar-frame {
   position: absolute;
   inset: 0;
-  border: 12px 46px 12px 29px solid transparent; /* T R B L (slice 12/46/12/29) */
-  border-image: url('/assets/ui/dropdown/dropdown_bar.png') 12 46 12 29 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 12px 46px 12px 29px; /* T R B L (slice 12/46/12/29) */
+  border-image: url('/assets/ui/dropdown/dropdown_bar.png') 12 46 12 29 fill stretch;
+  /* Solid navy fallback: WebView2 does not always paint the border-image
+     center slice (fill), leaving the middle see-through without this. */
+  background: #060d33;
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -124,19 +161,14 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
 }
 
 .war-dd__pop {
-  position: absolute;
-  left: 0;
-  top: calc(100% + 2px);
-  width: max(100%, 120px);
-  z-index: 60;
-  border: 14px 16px 13px 20px solid transparent; /* T R B L (slice 14/16/13/20) */
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
+  position: fixed; /* coords come from popStyle (teleported to body) */
+  z-index: 2000;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 14px 16px 13px 20px; /* T R B L (slice 14/16/13/20) */
+  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
+  background: #060d33; /* same fill fallback as the bar (center slice may not paint) */
   box-sizing: border-box;
-}
-
-.war-dd__pop--up {
-  top: auto;
-  bottom: calc(100% + 2px);
 }
 
 .war-dd__pop-inner {

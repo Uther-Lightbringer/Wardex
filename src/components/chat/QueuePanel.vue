@@ -5,8 +5,8 @@
 // Rows: index + 48-char preview; 引导 (gold, guideAt — cancel the current
 // turn and send this entry now) and 移除 (red). 清空 wipes the queue.
 //
-// NOTE: the backend exposes only the queue LENGTH; previews come from the
-// frontend mirror of what this process enqueued (chat.queueMirror).
+// NOTE: previews come from chat.queueMirror, which is rebuilt from the
+// backend snapshot (runtime_states.queue) after a session switch.
 import { computed } from 'vue';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';

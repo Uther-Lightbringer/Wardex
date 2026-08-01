@@ -376,6 +376,11 @@ watch(
         <div v-else class="pv__body pv__body--image">
           <img :src="convertFileSrc(path)" draggable="false" />
         </div>
+
+        <!-- footer -->
+        <div class="pv__footer">
+          <WarButton skin="dialog" :width="150" text="关闭" @activated="close" />
+        </div>
       </div>
     </div>
   </div>
@@ -396,8 +401,10 @@ watch(
 .pv__frame {
   position: absolute;
   inset: 0;
-  border: 88px 100px 90px 100px solid transparent; /* T R B L (slice 88/100/90/100) */
-  border-image: url('/assets/ui/frames/frame_popup.png') 88 100 90 100 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 88px 100px 90px 100px; /* T R B L (slice 88/100/90/100) */
+  border-image: url('/assets/ui/frames/frame_popup.png') 88 100 90 100 fill stretch;
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -528,5 +535,12 @@ watch(
 .pv__body--image img {
   max-width: 100%;
   object-fit: contain;
+}
+
+.pv__footer {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  padding-top: 2px;
 }
 </style>

@@ -71,6 +71,8 @@ pub struct ProviderSpec {
 
 补充说明：
 
+- **kimi 的每-Agent 模型注入**（`chat/runtime.rs` build_launch）：agent.model 非空且**不在** `~/.kimi-code/config.toml` `[models]` 别名内时，spawn 环境追加 `KIMI_MODEL_NAME`=模型 id、`KIMI_MODEL_API_KEY`=apiKey（若有）、`KIMI_MODEL_BASE_URL`=baseUrl（若有，且附带 `KIMI_MODEL_PROVIDER_TYPE=openai`）——即 kimi CLI 文档的临时模型 env 族。是别名的走 ACP `set_config_option`（chat.md §6.1）。
+
 - **claude 的 clearEnvs**（`ProviderRegistry.cpp:34-38`）：Zed 的 claude-code-acp adapter
   拒绝"在另一个 Claude Code 会话内"运行；父进程（claude 或 WarDex 自身）泄漏进来的
   这三个会话标记变量必须删除。删除语义由 ACP 传输层的"null = 删除环境变量"约定实现

@@ -2,52 +2,24 @@
 // Version-control panel (features/chat.md §6.3, panels.md §2): branch badge
 // read from .git/HEAD (hidden entirely outside git repos), a working-tree
 // 更改 list (git_status) and a read-only commit list (git_log, 200-entry
-// cap). Both rows open a read-only diff view (git_diff_file / git_diff_commit,
-// R4 64KB-capped with a truncated marker) — no stage/unstage, no editing.
+// cap). 更改 rows open an inline read-only diff (git_diff_file); commit rows
+// open the GitLab-style GitCommitDialog (git_diff_commit — file list + per-
+// file diff, R4 64KB-capped with a truncated marker). No stage/unstage.
 // refreshOn: turnEnd | sessionSwitch | expand | manual — the agent may have
 // committed or switched branches during the turn.
 import { computed, onMounted, ref, watch } from 'vue';
 import { cmd } from '../lib/tauri';
 import { useChatStore } from '../stores/chat';
 import { usePrefsStore } from '../stores/prefs';
+import GitCommitDialog from './GitCommitDialog.vue';
+import type { GitCommit, GitDiff, GitStatusEntry } from './git-types';
 
-interface GitCommit {
-  hash: string;
-  short: string;
-  author: string;
-  date: string;
-  subject: string;
-}
-
-interface GitStatusEntry {
-  path: string;
-  index: string; // staged column (' ' = clean, '?' = untracked)
-  worktree: string; // unstaged column
-  orig_path: string; // renames only
-}
-
-interface DiffLine {
-  kind: 'meta' | 'hunk' | 'add' | 'del' | 'ctx' | 'eof';
-  old_lineno: number | null;
-  new_lineno: number | null;
-  text: string;
-}
-
-interface FileDiff {
-  path: string;
-  binary: boolean;
-  lines: DiffLine[];
-}
-
-interface GitDiff {
-  files: FileDiff[];
-  truncated: boolean;
-}
-
-/** What the open diff view shows; re-fetched on refresh (generation-guarded). */
+/** What the open diff view shows; re-fetched on refresh (generation-guarded).
+ * kind 'file' renders inline (更改 tab); kind 'commit' opens the
+ * GitLab-style GitCommitDialog. */
 type DiffSpec =
   | { kind: 'file'; path: string; mode: 'worktree' | 'staged' | 'untracked'; label: string }
-  | { kind: 'commit'; hash: string; label: string };
+  | { kind: 'commit'; hash: string; subject: string; meta: string };
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
@@ -176,8 +148,9 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
         </span>
       </div>
 
-      <!-- diff view (replaces the lists while open) -->
-      <template v-if="diffSpec">
+      <!-- diff view (replaces the lists while open; file diffs only — commits
+           open the GitCommitDialog instead) -->
+      <template v-if="diffSpec && diffSpec.kind === 'file'">
         <div class="gitp__diff-head">
           <span class="gitp__back" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="closeDiff">← 返回</span>
           <span class="gitp__diff-title" :style="{ fontSize: prefs.fs(11) + 'px' }" :title="diffSpec.label">
@@ -271,7 +244,7 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
               v-for="c in commits"
               :key="c.hash"
               class="gitp__row"
-              @click="openDiff({ kind: 'commit', hash: c.hash, label: `${c.short} ${c.subject}` })"
+              @click="openDiff({ kind: 'commit', hash: c.hash, subject: c.subject, meta: `${c.short} · ${c.author} · ${c.date}` })"
             >
               <div class="gitp__subject" :style="{ fontSize: prefs.fs(12) + 'px' }" :title="c.subject">
                 {{ c.subject }}
@@ -285,6 +258,17 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
       </template>
     </template>
     <div v-else class="gitp__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">{{ noRepoText }}</div>
+
+    <!-- commit detail dialog (GitLab-style file list + per-file diff) -->
+    <GitCommitDialog
+      :open="diffSpec?.kind === 'commit'"
+      :subject="diffSpec?.kind === 'commit' ? diffSpec.subject : ''"
+      :meta="diffSpec?.kind === 'commit' ? diffSpec.meta : ''"
+      :diff="diff"
+      :loading="diffLoading"
+      :error="diffError"
+      @update:open="(v) => !v && closeDiff()"
+    />
   </div>
 </template>
 
@@ -316,7 +300,7 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
   text-overflow: ellipsis;
   /* GlueScreen-Profile-Stretch2 (ui-design.md §2.2: slice 8) */
   border: 8px solid transparent;
-  border-image: url('/assets/wc3_extracted/ui/GlueScreen-Profile-Stretch2.png') 8 stretch;
+  border-image: url('/assets/wc3_extracted/ui/GlueScreen-Profile-Stretch2.png') 8 fill stretch;
   box-sizing: border-box;
 }
 

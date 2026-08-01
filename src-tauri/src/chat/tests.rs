@@ -472,7 +472,124 @@ async fn subagent_tracked_from_tool_call_through_turn_end() {
     assert!(entry["finishedAt"].as_i64().unwrap_or(0) > 0);
 }
 
+#[tokio::test]
+async fn queue_drains_head_first_until_empty() {
+    let h = harness();
+    let id = ready_session(&h, "").await;
+    let mock = mock_at(&h, 0);
+    h.manager.send_prompt(&id, "task-1", &[]).await.expect("send");
+    assert!(wait_for(|| !prompt_msgs(&mock_at(&h, 0)).is_empty()).await);
+    h.manager.send_prompt(&id, "task-2", &[]).await.expect("q2");
+    h.manager.send_prompt(&id, "task-3", &[]).await.expect("q3");
+    assert!(wait_for(|| {
+        h.manager.runtime_states().get(&id).map(|s| s.queue_len) == Some(2)
+    })
+    .await);
+
+    // Each turn finish must send the NEXT queued prompt, in FIFO order.
+    for (text, remaining) in [("task-2", 1), ("task-3", 0)] {
+        let pid = prompt_msgs(&mock_at(&h, 0))
+            .last()
+            .and_then(|m| m.get("id").and_then(Value::as_u64))
+            .expect("prompt id");
+        mock.feed_json(json!({ "jsonrpc": "2.0", "id": pid,
+                               "result": { "stopReason": "end_turn" } }))
+            .await;
+        assert!(
+            wait_for(|| {
+                prompt_msgs(&mock_at(&h, 0)).iter().any(|m| {
+                    m.pointer("/params/prompt/0/text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t == text)
+                })
+            })
+            .await,
+            "queued prompt {text} is sent after the previous turn finishes"
+        );
+        assert!(wait_for(|| {
+            h.manager.runtime_states().get(&id).map(|s| s.queue_len) == Some(remaining)
+        })
+        .await);
+    }
+    // Finishing the last drained turn leaves the queue empty.
+    let pid = prompt_msgs(&mock_at(&h, 0))
+        .last()
+        .and_then(|m| m.get("id").and_then(Value::as_u64))
+        .expect("prompt id");
+    mock.feed_json(json!({ "jsonrpc": "2.0", "id": pid,
+                           "result": { "stopReason": "end_turn" } }))
+        .await;
+    assert!(wait_for(|| {
+        h.manager.runtime_states().get(&id).map(|s| s.queue_len) == Some(0)
+    })
+    .await);
+    // Exactly three prompts went out: task-1, task-2, task-3.
+    assert_eq!(prompt_msgs(&mock_at(&h, 0)).len(), 3);
+}
+
+#[tokio::test]
+async fn attachments_enqueue_while_busy_and_drain_with_image_block() {
+    use crate::chat::runtime::SendOutcome;
+
+    let h = harness();
+    let id = ready_session(&h, "").await;
+    let mock = mock_at(&h, 0);
+    h.manager.send_prompt(&id, "task-1", &[]).await.expect("send");
+    assert!(wait_for(|| !prompt_msgs(&mock_at(&h, 0)).is_empty()).await);
+
+    // Attachment must exist on disk (the manager drops missing paths); the
+    // mock advertises promptCapabilities.image so this rides as an image
+    // block rather than an inline "[附件]" line.
+    let png = h.tmp.path().join("queued.png");
+    std::fs::write(&png, b"png").expect("write png");
+    let png_str = png.to_string_lossy().into_owned();
+    let outcome = h
+        .manager
+        .send_prompt(&id, "with-img", &[png_str])
+        .await
+        .expect("enqueue");
+    assert!(
+        matches!(outcome, SendOutcome::Enqueued),
+        "attachments may queue while busy"
+    );
+    // Snapshot annotates the entry with 📎1.
+    assert!(wait_for(|| {
+        h.manager
+            .runtime_states()
+            .get(&id)
+            .and_then(|s| s.queue.first())
+            .is_some_and(|q| q.contains("with-img") && q.contains("📎1"))
+    })
+    .await);
+
+    // Finishing the turn drains the queued message WITH its image block.
+    let pid = prompt_msgs(&mock_at(&h, 0))
+        .last()
+        .and_then(|m| m.get("id").and_then(Value::as_u64))
+        .expect("prompt id");
+    mock.feed_json(json!({ "jsonrpc": "2.0", "id": pid,
+                           "result": { "stopReason": "end_turn" } }))
+        .await;
+    assert!(wait_for(|| {
+        prompt_msgs(&mock_at(&h, 0)).iter().any(|m| {
+            m.pointer("/params/prompt/0/text").and_then(Value::as_str) == Some("with-img")
+                && m
+                    .pointer("/params/prompt/1/type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t == "image" || t == "image_url")
+        })
+    })
+    .await);
+}
+
 // ---- small helpers ----
+
+fn prompt_msgs(mock: &MockTransport) -> Vec<Value> {
+    mock.sent_json()
+        .into_iter()
+        .filter(|m| m.get("method").and_then(Value::as_str) == Some("session/prompt"))
+        .collect()
+}
 
 impl Harness {
     fn stores_paths(&self) -> Paths {

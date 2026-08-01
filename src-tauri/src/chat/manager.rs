@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use crate::chat::driver::{stdio_spawner, Spawner};
 use crate::chat::runtime::{
     enforce_process_cap, is_image_path, lock_ok, spawn_actor, EventSink, ManagerShared,
-    RuntimeCmd, RuntimeEntry, RuntimeSnap, SharedRegistry,
+    RuntimeCmd, RuntimeEntry, RuntimeSnap, SendOutcome, SharedRegistry,
 };
 use crate::provider;
 use crate::store::agents::Agent;
@@ -276,30 +276,18 @@ impl ChatManager {
     }
 
     /// sendUserMessage / sendUserMessageWithAttachments
-    /// (ChatController.cpp:920-1004). Returns false for silent rejections
-    /// (empty input), Err for user-visible failures.
+    /// (ChatController.cpp:920-1004). The ack oneshot reports the runtime's
+    /// decision: Started / Enqueued / Rejected(reason) — the composer keeps
+    /// its draft unless the send was accepted.
     pub async fn send_prompt(
         &self,
         session_id: &str,
         text: &str,
         attachments: &[String],
-    ) -> Result<bool, ChatError> {
+    ) -> Result<SendOutcome, ChatError> {
         let Some(tx) = self.entry_tx(session_id) else {
             return Err(ChatError::NoSession);
         };
-        if attachments.is_empty() {
-            if text.trim().is_empty() {
-                return Ok(false);
-            }
-            let _ = tx
-                .send(RuntimeCmd::SendPrompt {
-                    text: text.to_string(),
-                    images: Vec::new(),
-                    display: Vec::new(),
-                })
-                .await;
-            return Ok(true);
-        }
 
         // Attachment split (ChatController.cpp:961-1004): image + agent
         // support -> image block; otherwise inline a "[附件] path" line.
@@ -323,20 +311,26 @@ impl ChatManager {
                 send_text += &format!("\n[附件] {}", f.replace('/', "\\"));
             }
         }
-        if send_text.is_empty() && images.is_empty() {
-            return Ok(false);
+        if send_text.is_empty() && display.is_empty() {
+            return Ok(SendOutcome::Rejected(String::new()));
         }
         if send_text.is_empty() {
             send_text = "（图片）".to_string();
         }
-        let _ = tx
-            .send(RuntimeCmd::SendPrompt {
-                text: send_text,
-                images,
-                display,
-            })
-            .await;
-        Ok(true)
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        tx.send(RuntimeCmd::SendPrompt {
+            text: send_text,
+            images,
+            display,
+            ack: Some(ack_tx),
+        })
+        .await
+        .map_err(|_| ChatError::Message("会话已关闭".to_string()))?;
+        match tokio::time::timeout(std::time::Duration::from_secs(10), ack_rx).await {
+            Ok(Ok(outcome)) => Ok(outcome),
+            _ => Err(ChatError::Message("发送超时，请重试".to_string())),
+        }
     }
 
     pub async fn cancel(&self, session_id: &str) -> Result<(), ChatError> {
@@ -361,6 +355,15 @@ impl ChatManager {
             },
         )
         .await
+    }
+
+    /// Stored acp://permission payload while a request awaits an answer
+    /// (None when idle or the runtime is gone). Read from the snap — no
+    /// round-trip into the actor needed.
+    pub fn pending_permission(&self, session_id: &str) -> Option<Value> {
+        lock_ok(&self.registry)
+            .get(session_id)
+            .and_then(|e| lock_ok(&e.snap).perm_pending.clone())
     }
 
     pub async fn guide_at(&self, session_id: &str, index: usize) -> Result<(), ChatError> {
@@ -424,6 +427,27 @@ impl ChatManager {
             }
         }
         self.sink.emit("store://prefs", json!({}));
+        Ok(())
+    }
+
+    /// ACP config option picker passthrough (kimi "thinking"/"model"): the
+    /// runtime applies it to the session and the refreshed configOptions come
+    /// back as acp://configOptions.
+    pub async fn set_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), ChatError> {
+        let Some(tx) = self.entry_tx(session_id) else {
+            return Err(ChatError::NoSession);
+        };
+        let _ = tx
+            .send(RuntimeCmd::SetConfigOption {
+                config_id: config_id.to_string(),
+                value: value.to_string(),
+            })
+            .await;
         Ok(())
     }
 

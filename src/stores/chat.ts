@@ -57,6 +57,22 @@ export interface ChatStatus {
   imageSupported: boolean;
 }
 
+export interface ConfigOptionChoice {
+  value: string;
+  name: string;
+  description?: string;
+}
+
+/** ACP session config option picker (kimi: model / thinking / mode). */
+export interface ConfigOption {
+  type: string;
+  id: string;
+  name: string;
+  category?: string;
+  currentValue: string;
+  options: ConfigOptionChoice[];
+}
+
 export interface Subagent {
   id: string;
   kind: string;
@@ -65,8 +81,16 @@ export interface Subagent {
   children: number;
   childNames: string[];
   summary: string;
+  /** Task brief (prompt / swarm args JSON) for the detail dialog. */
+  input: string;
+  /** Final report (rawOutput), filled on completion. */
+  output: string;
+  /** CLI-side agent ids (wire transcript dir names), from rawOutput. */
+  agentIds: string[];
   startedAt: number;
   finishedAt: number;
+  /** Last tool_call(_update) touch — stuck detection. */
+  lastUpdate: number;
 }
 
 export interface QuestionOption {
@@ -151,9 +175,12 @@ export const useChatStore = defineStore('chat', {
     rows: [] as ChatMessage[],
     status: { ...IDLE_STATUS } as ChatStatus,
     subagents: [] as Subagent[],
+    /** ACP config option pickers for the active session (kimi: model /
+     * thinking / mode); refreshed by acp://configOptions. */
+    configOptions: [] as ConfigOption[],
     permission: null as PermissionRequest | null,
     retry: { active: false, countdown: 0, attempt: 0, maxAttempts: 3 },
-    /** Frontend mirror of the send queue (backend exposes only the length). */
+    /** Mirror of the send queue; rebuilt from the backend snapshot on switch. */
     queueMirror: [] as string[],
     queueOpen: false,
     /** Bumped on acp://turn — panels with refreshOn turnEnd watch this. */
@@ -217,6 +244,9 @@ export const useChatStore = defineStore('chat', {
         }),
         await listen<{ sessionId: string; subagents: Subagent[] }>('acp://subagent', (e) => {
           if (e.payload.sessionId === this.sessionId) this.subagents = e.payload.subagents;
+        }),
+        await listen<{ sessionId: string; options: ConfigOption[] }>('acp://configOptions', (e) => {
+          if (e.payload.sessionId === this.sessionId) this.configOptions = e.payload.options;
         }),
         await listen<{ sessionId: string; row: ChatMessage }>('chat://messageAppended', (e) => {
           if (e.payload.sessionId !== this.sessionId) return;
@@ -409,9 +439,12 @@ export const useChatStore = defineStore('chat', {
         statusText:
           (rt?.busy ? '生成中…' : '就绪') + suffix + (queue > 0 ? ` · 队列 ${queue}/10` : ''),
       };
-      this.queueMirror = [];
+      // Rebuild the mirror from the backend snapshot: the queue survives a
+      // session switch, so its previews must too.
+      this.queueMirror = [...(rt?.queue ?? [])];
       this.permission = null;
       this.subagents = [];
+      this.configOptions = [];
       this.retry = { active: false, countdown: 0, attempt: 0, maxAttempts: 3 };
     },
 
@@ -433,6 +466,14 @@ export const useChatStore = defineStore('chat', {
       await sessions.refresh(this.projectDir);
       this.syncStatusFromRuntime();
       await this.loadMessages();
+      // A permission requested while this session was in the background only
+      // fired the live event for the then-active session; re-pull the stored
+      // payload so the dialog reappears after switching here.
+      this.permission = await cmd<PermissionRequest | null>(
+        'pending_permission',
+        { sessionId: id },
+        null,
+      );
       this.scrollSeq += 1; // force scroll-to-end after a switch
       return true;
     },
@@ -478,6 +519,7 @@ export const useChatStore = defineStore('chat', {
         this.rows = [];
         this.status = { ...IDLE_STATUS, statusText: '就绪' + (MODE_SUFFIX[usePrefsStore().permissionMode] ?? '') };
         this.subagents = [];
+        this.configOptions = [];
         this.permission = null;
         this.queueMirror = [];
       }
@@ -489,7 +531,10 @@ export const useChatStore = defineStore('chat', {
     /**
      * sendUserMessage[WithAttachments]. Text must already be @-reference
      * expanded by the composer. Returns true only when the backend accepted
-     * (sent or enqueued) — the composer clears its draft only then.
+     * (sent or enqueued) — the composer clears its draft only then. The
+     * backend's ack is authoritative for the queue mirror: 'enqueued' means
+     * the runtime actually pushed the entry (no reliance on a possibly
+     * stale status.busy).
      */
     async send(text: string, attachments: string[]): Promise<boolean> {
       if (!this.sessionId) {
@@ -497,19 +542,19 @@ export const useChatStore = defineStore('chat', {
         return false;
       }
       try {
-        const ok = await cmd<boolean>('send_prompt', {
+        const outcome = await cmd<'sent' | 'enqueued'>('send_prompt', {
           sessionId: this.sessionId,
           text,
           attachments,
         });
-        if (ok) {
-          if (this.status.busy) {
-            this.queueMirror = [...this.queueMirror, text.trim()];
-            this.queueOpen = true; // 发送后若队列非空自动展开
-          }
-          this.scrollSeq += 1;
+        if (outcome === 'enqueued') {
+          // Mirror the backend snapshot's annotation (runtime.rs sync_snap).
+          const label = attachments.length > 0 ? `${text.trim()} 📎${attachments.length}` : text.trim();
+          this.queueMirror = [...this.queueMirror, label];
+          this.queueOpen = true; // 发送后若队列非空自动展开
         }
-        return ok;
+        this.scrollSeq += 1;
+        return true;
       } catch (e) {
         // User-visible failures (queue full / attachments while busy) also
         // arrive via chat://status lastError; keep the draft either way.
@@ -524,6 +569,17 @@ export const useChatStore = defineStore('chat', {
         await cmd('cancel', { sessionId: this.sessionId });
       } catch (e) {
         console.warn('[chat] cancel failed', e);
+      }
+    },
+
+    /** ACP config option picker (kimi "thinking"/"model"); refreshed options
+     * arrive via acp://configOptions. */
+    async setConfigOption(configId: string, value: string): Promise<void> {
+      if (!this.sessionId) return;
+      try {
+        await cmd('set_config_option', { sessionId: this.sessionId, configId, value });
+      } catch (e) {
+        console.warn('[chat] set_config_option failed', e);
       }
     },
 

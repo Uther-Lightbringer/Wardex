@@ -49,11 +49,72 @@ const createInput = ref<HTMLInputElement | null>(null);
 
 const canGoUp = computed(() => parentOf(currentPath.value) !== null);
 
+// ---- editable address bar ----
+const pathEditing = ref(false);
+const pathDraft = ref('');
+const pathError = ref('');
+const pathInput = ref<HTMLInputElement | null>(null);
+
+/** Normalize a typed path: C:/a/b/ → C:\a\b, c:\ → C:\. Returns '' when the
+ * shape is not a drive-rooted path at all. */
+function normalizePath(raw: string): string {
+  let d = raw.trim().replace(/\//g, '\\').replace(/\\+$/, '');
+  const m = /^([A-Za-z]):($|\\)/.exec(d);
+  if (!m) return '';
+  d = m[1].toUpperCase() + ':' + d.slice(2);
+  return d === m[1].toUpperCase() + ':' ? d + '\\' : d;
+}
+
+function startPathEdit(): void {
+  pathError.value = '';
+  pathDraft.value = currentPath.value;
+  pathEditing.value = true;
+  void nextTick(() => {
+    pathInput.value?.focus();
+    pathInput.value?.select();
+  });
+}
+
+function cancelPathEdit(): void {
+  pathEditing.value = false;
+  pathError.value = '';
+  listEl.value?.focus();
+}
+
+async function confirmPathEdit(): Promise<void> {
+  const target = normalizePath(pathDraft.value);
+  if (!target) {
+    pathError.value = '路径格式无效（示例：C:\\workspace）';
+    pathInput.value?.focus();
+    return;
+  }
+  // Probe with folder_exists: folder_list silently returns [] for missing
+  // dirs, so existence must be checked separately.
+  if (!(await cmd<boolean>('folder_exists', { dir: target }, false))) {
+    pathError.value = '目录不存在或不可访问';
+    pathInput.value?.focus();
+    return;
+  }
+  const probe = await cmd<FolderEntry[]>('folder_list', { dir: target }, []);
+  entries.value = probe;
+  selectedRow.value = -1;
+  creating.value = false;
+  createError.value = '';
+  pathEditing.value = false;
+  pathError.value = '';
+  currentPath.value = target;
+  const drive = target.slice(0, 1).toUpperCase() + ':\\';
+  if (drives.value.includes(drive)) currentDrive.value = drive;
+  void nextTick(() => listEl.value?.focus());
+}
+
 async function refresh(): Promise<void> {
   entries.value = await cmd<FolderEntry[]>('folder_list', { dir: currentPath.value }, []);
   selectedRow.value = -1;
   creating.value = false;
   createError.value = '';
+  pathEditing.value = false;
+  pathError.value = '';
 }
 
 function setDrive(d: string): void {
@@ -147,7 +208,7 @@ function onListKey(e: KeyboardEvent): void {
 }
 
 function onDialogKey(e: KeyboardEvent): void {
-  if (e.key === 'Escape' && !creating.value) close();
+  if (e.key === 'Escape' && !creating.value && !pathEditing.value) close();
 }
 
 watch(
@@ -182,20 +243,36 @@ watch(
           <span class="fb__title war-outline-gold">打 开 项 目</span>
         </div>
 
-        <!-- path bar + drive dropdown -->
+        <!-- drive dropdown + path bar (editable) -->
         <div class="fb__pathbar">
           <div class="fb__pathbar-frame"></div>
-          <span class="fb__path">{{ currentPath }}</span>
           <WarDropdown
             class="fb__drive"
             :options="drives"
             :model-value="drives.indexOf(currentDrive)"
             @activated="(i: number) => setDrive(drives[i])"
           />
+          <input
+            v-if="pathEditing"
+            ref="pathInput"
+            v-model="pathDraft"
+            class="war-inline-input fb__path-input"
+            spellcheck="false"
+            @input="pathError = ''"
+            @keydown.enter.prevent="confirmPathEdit"
+            @keydown.esc.stop="cancelPathEdit"
+            @keydown.stop
+          />
+          <span
+            v-else
+            class="fb__path"
+            title="点击输入路径"
+            @click="startPathEdit"
+          >{{ currentPath }}</span>
         </div>
 
-        <!-- create error row -->
-        <div v-if="createError" class="fb__error">{{ createError }}</div>
+        <!-- create/path error row -->
+        <div v-if="createError || pathError" class="fb__error">{{ createError || pathError }}</div>
 
         <!-- folder list -->
         <div class="fb__list-frame">
@@ -280,8 +357,10 @@ watch(
   padding: 0 36px;
   display: flex;
   align-items: center;
-  border: 14px 16px 13px 20px solid transparent;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 14px 16px 13px 20px;
+  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
   box-sizing: border-box;
 }
 
@@ -307,8 +386,10 @@ watch(
 .fb__pathbar-frame {
   position: absolute;
   inset: 0;
-  border: 14px 16px 13px 20px solid transparent;
-  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 14px 16px 13px 20px;
+  border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 fill stretch;
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -316,6 +397,8 @@ watch(
 .fb__path {
   position: relative;
   flex: 1;
+  height: 30px;
+  line-height: 30px;
   color: var(--war-text);
   font-size: 14px;
   font-family: SimSun, serif;
@@ -324,6 +407,21 @@ watch(
   text-overflow: ellipsis;
   direction: rtl;
   text-align: left;
+  cursor: text;
+  border-radius: 3px;
+}
+
+.fb__path:hover {
+  background: #32509640;
+  color: var(--war-gold);
+}
+
+.fb__path-input {
+  position: relative;
+  flex: 1;
+  height: 30px;
+  font-size: 14px;
+  font-family: SimSun, serif;
 }
 
 .fb__drive {
@@ -350,8 +448,10 @@ watch(
 .fb__list-iron {
   position: absolute;
   inset: 0;
-  border: 88px 100px 90px 100px solid transparent; /* T R B L (frame_popup) */
-  border-image: url('/assets/ui/frames/frame_popup.png') 88 100 90 100 stretch;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 88px 100px 90px 100px; /* T R B L (frame_popup) */
+  border-image: url('/assets/ui/frames/frame_popup.png') 88 100 90 100 fill stretch;
   box-sizing: border-box;
   pointer-events: none;
 }
