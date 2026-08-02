@@ -15,7 +15,7 @@
 // hint (思考中… / last tool) and a random flavor line (FLAVOR_LINES).
 import { computed, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue';
 import { fileSrc, openPath } from '../../lib/tauri';
-import { renderMarkdown, renderUserMarkdown } from '../../lib/markdown';
+import { renderMarkdown, renderUserMarkdown, handleMdLinkClick } from '../../lib/markdown';
 import { copyText } from '../../lib/clipboard';
 import { usePrefsStore } from '../../stores/prefs';
 import { useChatStore, type ChatMessage, type ChatSegment } from '../../stores/chat';
@@ -308,7 +308,11 @@ function onBodyClick(e: MouseEvent): void {
       btn.textContent = '已复制';
       setTimeout(() => (btn.textContent = '复制'), 1200);
     });
+    return;
   }
+  // links (rendered by markdown.ts): never let the webview navigate — open
+  // http(s) in the system browser, local paths with the OS handler.
+  if (t.closest('.md-body') && handleMdLinkClick(e)) return;
 }
 
 function onLightboxKey(e: KeyboardEvent): void {

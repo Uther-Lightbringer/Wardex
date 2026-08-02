@@ -38,20 +38,38 @@ pub struct BuildStatus {
     pub state: BuildState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Tail of the last build output (shown in the overlay's building/error
+    /// cards so the user can see what codegraph is doing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
 }
 
 impl BuildStatus {
     fn idle() -> Self {
-        Self { state: BuildState::Idle, error: None }
+        Self { state: BuildState::Idle, error: None, output: None }
     }
     fn building() -> Self {
-        Self { state: BuildState::Building, error: None }
+        Self { state: BuildState::Building, error: None, output: None }
     }
-    fn done() -> Self {
-        Self { state: BuildState::Done, error: None }
+    fn done_with(output: &str) -> Self {
+        Self {
+            state: BuildState::Done,
+            error: None,
+            output: Some(tail(output, 1600)),
+        }
     }
     fn error(e: String) -> Self {
-        Self { state: BuildState::Error, error: Some(e) }
+        Self { state: BuildState::Error, error: Some(e), output: None }
+    }
+}
+
+/// Keep the tail of a CLI output blob (the head is usually banner noise).
+fn tail(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        s.trim().to_string()
+    } else {
+        s.chars().skip(n - max).collect::<String>().trim_start().to_string()
     }
 }
 
@@ -138,9 +156,19 @@ impl CodegraphRunner {
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
             let args = format!("{} build \"{}\"", path.to_string_lossy(), project_dir);
+            log::info!("[codegraph] build start: {project_dir}");
             let status = match run_cli_capture(&args).await {
-                Ok(_) => BuildStatus::done(),
-                Err(e) => BuildStatus::error(e),
+                Ok(out) => {
+                    log::info!(
+                        "[codegraph] build ok: {project_dir} ({})",
+                        out.combined().lines().count()
+                    );
+                    BuildStatus::done_with(&out.combined())
+                }
+                Err(e) => {
+                    log::warn!("[codegraph] build failed {project_dir}: {e}");
+                    BuildStatus::error(e)
+                }
             };
             let ok = matches!(status.state, BuildState::Done);
             this.set_build(&project_dir, status);
@@ -174,7 +202,10 @@ impl CodegraphRunner {
             quote_arg(q),
             db.to_string_lossy(),
         );
-        let stdout = run_cli_capture(&args).await.map_err(|e| format!("codegraph 查询失败：{e}"))?;
+        let stdout = run_cli_capture(&args)
+            .await
+            .map_err(|e| format!("codegraph 查询失败：{e}"))?
+            .stdout;
         #[derive(serde::Deserialize)]
         struct Raw {
             results: Vec<RawHit>,
@@ -236,10 +267,29 @@ fn quote_arg(s: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-/// Run a cmd.exe-wrapped codegraph command; returns stdout on success,
-/// stderr (fallback stdout) on failure. 600s ceiling so a hung build can
-/// never wedge the app.
-async fn run_cli_capture(args: &str) -> Result<String, String> {
+/// Captured CLI output; the query path parses `stdout` only (JSON), the
+/// build path shows `combined()` so progress lines land in the overlay.
+struct CaptureOut {
+    stdout: String,
+    stderr: String,
+}
+
+impl CaptureOut {
+    fn combined(&self) -> String {
+        if self.stderr.trim().is_empty() {
+            self.stdout.clone()
+        } else if self.stdout.trim().is_empty() {
+            self.stderr.clone()
+        } else {
+            format!("{}\n{}", self.stdout.trim_end(), self.stderr.trim())
+        }
+    }
+}
+
+/// Run a cmd.exe-wrapped codegraph command; returns captured output on
+/// success, stderr (fallback stdout) on failure. 600s ceiling so a hung
+/// build can never wedge the app.
+async fn run_cli_capture(args: &str) -> Result<CaptureOut, String> {
     let mut c = tokio::process::Command::new("cmd.exe");
     c.args(["/d", "/s", "/c"])
         .arg(args)
@@ -256,15 +306,15 @@ async fn run_cli_capture(args: &str) -> Result<String, String> {
         Ok(Err(e)) => return Err(format!("codegraph 执行失败：{e}")),
         Err(_) => return Err("codegraph 执行超时（10 分钟）".to_string()),
     };
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+        Ok(CaptureOut { stdout, stderr })
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
         let err = stderr.trim();
         if !err.is_empty() {
             Err(err.to_string())
         } else {
-            let stdout = String::from_utf8_lossy(&out.stdout);
             let e = stdout.trim();
             if !e.is_empty() {
                 Err(e.to_string())

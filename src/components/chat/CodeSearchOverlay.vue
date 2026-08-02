@@ -56,6 +56,7 @@ interface CodegraphStatus {
   path?: string | null;
   build: 'idle' | 'building' | 'done' | 'error';
   buildError?: string;
+  buildOutput?: string | null;
   indexExists: boolean;
 }
 
@@ -90,11 +91,18 @@ async function loadCgStatus(): Promise<void> {
   if (!isIface.value || !chat.projectDir) return;
   cgLoading.value = true;
   try {
+    const prevBuild = cgStatus.value?.build;
     const s = await cmd<CodegraphStatus>('codegraph_status', { projectDir: chat.projectDir });
     cgStatus.value = s;
     if (s.installed) usingFallback.value = false; // now usable via codegraph
-    if (s.installed && s.build === 'building') startCgPoll();
-    else stopCgPoll();
+    // Guard: never kill an active poll with a stale read — a build started
+    // locally (build === 'building') must keep polling even if this response
+    // was captured before the backend registered the build.
+    if (s.installed && (s.build === 'building' || prevBuild === 'building')) {
+      startCgPoll();
+    } else {
+      stopCgPoll();
+    }
   } catch (e) {
     cgStatus.value = null;
     error.value = String(e);
@@ -420,6 +428,13 @@ onBeforeUnmount(() => {
 
         <!-- iface: codegraph status gates (install / build) -->
         <template v-if="isIface && !showSearch">
+          <div
+            v-if="error"
+            class="cs-card cs-card--err"
+            :style="{ fontSize: prefs.fs(12) + 'px' }"
+          >
+            {{ error }}
+          </div>
           <div class="cs__hint" v-if="!chat.projectDir" :style="{ fontSize: prefs.fs(12) + 'px' }">
             当前会话未绑定项目，无法搜索
           </div>
@@ -452,6 +467,9 @@ onBeforeUnmount(() => {
               codegraph 正在分析项目文件，首次构建大项目可能需要数十秒。
               可以关闭此窗口，完成后会自动可用。
             </div>
+            <pre class="cs-card__out" :style="{ fontSize: prefs.fs(11) + 'px' }">{{
+              cgStatus.buildOutput || '等待输出…'
+            }}</pre>
           </div>
 
           <div v-else-if="cgStatus.build === 'error'" class="cs-card">
@@ -461,6 +479,9 @@ onBeforeUnmount(() => {
             <div class="cs-card__body" :style="{ fontSize: prefs.fs(12) + 'px' }">
               {{ cgStatus.buildError || '未知错误' }}
             </div>
+            <pre v-if="cgStatus.buildOutput" class="cs-card__out" :style="{ fontSize: prefs.fs(11) + 'px' }">{{
+              cgStatus.buildOutput
+            }}</pre>
             <div class="cs-card__row">
               <button class="cs-card__btn on" @click="startBuild">重试</button>
             </div>
@@ -604,7 +625,8 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="cs__foot" :style="{ fontSize: prefs.fs(11) + 'px' }">
-            ↑/↓ 选择 · Enter 预览 · Esc 关闭
+            <span>↑/↓ 选择 · Enter 预览 · Esc 关闭</span>
+            <button class="cs-card__btn" @click="emit('close')">关闭</button>
           </div>
         </template>
       </div>
@@ -853,6 +875,13 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+.cs-card--err {
+  flex: none;
+  color: #f08080;
+  font-family: SimSun, serif;
+  padding: 8px 12px;
+}
+
 .cs-card__title {
   color: var(--war-gold);
   font-family: SimSun, serif;
@@ -868,6 +897,21 @@ onBeforeUnmount(() => {
   font-family: SimSun, serif;
   max-width: 440px;
   line-height: 1.6;
+}
+
+.cs-card__out {
+  max-width: 480px;
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid #2a3344;
+  background: #0b0d12cc;
+  color: var(--war-text-muted);
+  font-family: Consolas, monospace;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .cs-card__row {
@@ -919,9 +963,12 @@ onBeforeUnmount(() => {
 
 .cs__foot {
   flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   color: var(--war-text-faint);
   font-family: SimSun, serif;
-  text-align: center;
   user-select: none;
 }
 </style>

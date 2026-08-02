@@ -15,7 +15,7 @@ import type { EditorView as CmEditorView } from 'codemirror';
 import type { Compartment } from '@codemirror/state';
 import { cmd, openPath } from '../../lib/tauri';
 import { copyText } from '../../lib/clipboard';
-import { renderMarkdown } from '../../lib/markdown';
+import { renderMarkdown, handleMdLinkClick } from '../../lib/markdown';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
 import WarDialog from '../war/WarDialog.vue';
@@ -594,6 +594,12 @@ function onCtxMd(e: MouseEvent): void {
   openCtxMenu(e, items);
 }
 
+/** Markdown pane link clicks: never let the webview navigate — open
+ * http(s) in the system browser, local paths with the OS handler. */
+function onMdClick(e: MouseEvent): void {
+  handleMdLinkClick(e);
+}
+
 function onAnyDown(e: MouseEvent): void {
   // Clicks inside the context menu itself must not close it before the
   // item's click handler runs (mousedown → menu removal → no click).
@@ -677,7 +683,7 @@ function onAnyDown(e: MouseEvent): void {
             @input="onEdit"
             @contextmenu.prevent="onCtxRaw"
           ></textarea>
-          <div v-else class="pv__md md-body" v-html="mdHtml" @contextmenu.prevent="onCtxMd"></div>
+          <div v-else class="pv__md md-body" v-html="mdHtml" @contextmenu.prevent="onCtxMd" @click="onMdClick"></div>
         </div>
 
         <!-- image body -->

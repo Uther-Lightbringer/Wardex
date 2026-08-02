@@ -8,6 +8,7 @@
 // asset protocol can load them; real URLs pass through untouched.
 import MarkdownIt from 'markdown-it';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { openPath, openUrl } from './tauri';
 
 const URL_SCHEME = /^(https?|asset|data|blob|tauri):/i;
 
@@ -71,4 +72,36 @@ export function renderMarkdown(text: string): string {
  * image embed; plain user text never goes through markdown. */
 export function renderUserMarkdown(text: string): string {
   return mdUser.render(text);
+}
+
+/** Click delegation for v-html markdown bodies — a plain <a href> click
+ * would make the Tauri webview navigate to the URL and REPLACE the whole
+ * app, so every anchor click is intercepted here instead:
+ *  - http(s)/mailto/tel → system browser (tauri-plugin-opener)
+ *  - local paths (Windows C:\…, /home/…, relative) → OS default handler
+ *  - `#` fragments, asset:/data:/blob: → ignored (no app navigation)
+ * The callers (bubble / preview dialog) pass their own delegated click
+ * events; returns true when a link was consumed. */
+export function handleMdLinkClick(e: MouseEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  const a = t?.closest?.('a');
+  if (!a) return false;
+  const rawHref = a.getAttribute('href') ?? '';
+  const href = rawHref.trim();
+  if (!href) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  if (/^(https?|mailto|tel):/i.test(href)) {
+    void openUrl(href);
+    return true;
+  }
+  if (href.startsWith('#') || /^(asset|data|blob|tauri):/i.test(href)) {
+    return true; // no app navigation, nothing to open
+  }
+  try {
+    void openPath(decodeURIComponent(href));
+  } catch {
+    void openPath(href);
+  }
+  return true;
 }

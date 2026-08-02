@@ -79,7 +79,10 @@ function onPageKey(e: KeyboardEvent): void {
     if (!chat.previewPath) codeSearchKind.value = 'code';
     return;
   }
-  if (e.ctrlKey && e.key === '\\') {
+  if (
+    e.ctrlKey &&
+    (e.key === '\\' || e.code === 'Backslash')
+  ) {
     // Ctrl+\ → Java interface lookup (V1: heuristic declaration scan).
     e.preventDefault();
     if (!chat.previewPath) codeSearchKind.value = 'iface';
@@ -356,6 +359,7 @@ const sessionUsage = computed(() => {
     <!-- modals -->
     <PermissionDialog />
     <FilePreviewDialog />
+    <CodeSearchOverlay v-if="codeSearchKind" :kind="codeSearchKind" @close="codeSearchKind = null" />
     <DueTodoOverlay />
   </PageShell>
 </template>
