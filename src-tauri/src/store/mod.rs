@@ -19,6 +19,7 @@
 
 pub mod agents;
 pub mod browse;
+pub mod db;
 pub mod json;
 pub mod media;
 pub mod paths;
@@ -31,6 +32,7 @@ pub mod usage;
 pub mod workspace;
 
 pub use agents::{mask_key, Agent, AgentPatch, AgentStore, AgentsError};
+pub use db::{DbConnStore, DbConnsError, NamedConn, ProjectDbConns};
 pub use paths::{canonical_dir, Paths};
 pub use prefs::{PanelLayoutEntry, PrefsError, UserPrefs};
 pub use projects::{ProjectStore, ProjectsError, RecentEntry};
@@ -55,6 +57,7 @@ pub struct StoreRegistry {
     pub todos: TodoStore,
     pub prompts: PromptStore,
     pub usage: UsageStore,
+    pub db_conns: DbConnStore,
     pub search: SearchEngine,
 }
 
@@ -70,6 +73,7 @@ impl StoreRegistry {
             todos: TodoStore::load(&paths),
             prompts: PromptStore::load(&paths),
             usage: UsageStore::load(&paths),
+            db_conns: DbConnStore::load(&paths),
             sessions,
             search: SearchEngine::new(),
             paths,

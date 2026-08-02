@@ -14,8 +14,21 @@ export interface RailSession {
   sessionId: string;
   title: string;
   updatedAt: number;
+  createdAt: number;
   messageCount: number;
   pinned: boolean;
+  /** 子会话的父会话 id；顶层会话为 ''。 */
+  parentId: string;
+  /** 所在组 id；'' = 默认会话组。 */
+  groupId: string;
+}
+
+/** One rail group (groups.json table); "默认会话" is implicit. */
+export interface SessionGroup {
+  id: string;
+  name: string;
+  projectDir: string;
+  createdAt: number;
 }
 
 /** One row of the sessions index (list_sessions; SessionIndexRow in Rust). */
@@ -31,6 +44,10 @@ export interface SessionIndexRow {
   summary: string;
   projectDir: string;
   pinned: boolean;
+  /** 子会话的父会话 id；顶层会话为 ''。 */
+  parentId: string;
+  /** 所在组 id；'' = 默认会话组。 */
+  groupId: string;
 }
 
 /** Full-text search hit (SearchHit in Rust; ≤3 per session, ≤50 total). */
@@ -94,6 +111,8 @@ export function visibleText(row: StoredMessage): string {
 export const useSessionsStore = defineStore('sessions', {
   state: () => ({
     rail: [] as RailSession[],
+    /** 当前项目的自定义组（默认会话组是隐式的，不在此列表）。 */
+    groups: [] as SessionGroup[],
     agents: [] as AgentInfo[],
     defaultAgentId: '',
     unreadIds: [] as string[],
@@ -125,14 +144,16 @@ export const useSessionsStore = defineStore('sessions', {
     async refresh(projectDir: string): Promise<void> {
       if (!isTauri) return;
       try {
-        const [rail, states, unread] = await Promise.all([
+        const [rail, states, unread, groups] = await Promise.all([
           cmd<RailSession[]>('sessions_for_project', { projectDir }, []),
           cmd<Record<string, RuntimeState>>('runtime_states', undefined, {}),
           cmd<string[]>('unread_sessions', undefined, []),
+          cmd<SessionGroup[]>('list_groups', { projectDir }, []),
         ]);
         // Pinned first (stable within each group by updatedAt desc — the
         // backend list is already updatedAt-desc).
         this.rail = [...rail].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+        this.groups = groups;
         this.runtimeStates = states;
         this.unreadIds = unread;
       } catch (e) {
@@ -192,6 +213,45 @@ export const useSessionsStore = defineStore('sessions', {
 
     async setPinned(id: string, pinned: boolean): Promise<void> {
       await cmd('set_session_pinned', { sessionId: id, pinned });
+    },
+
+    // ---- rail groups ----
+
+    /** Create a group in the current project; re-pulls the group list. */
+    async createGroup(projectDir: string, name: string): Promise<SessionGroup | null> {
+      if (!isTauri) return null;
+      try {
+        const g = await cmd<SessionGroup>('create_group', { projectDir, name });
+        await this.refresh(projectDir);
+        return g;
+      } catch (e) {
+        console.warn('[sessions] create_group failed', e);
+        return null;
+      }
+    },
+
+    async renameGroup(groupId: string, name: string, projectDir: string): Promise<void> {
+      if (!isTauri) return;
+      try {
+        await cmd('rename_group', { groupId, name });
+        await this.refresh(projectDir);
+      } catch (e) {
+        console.warn('[sessions] rename_group failed', e);
+      }
+    },
+
+    /** Delete a group + cascade-delete its sessions (backend). Returns the
+     * number of removed sessions; -1 on failure. */
+    async deleteGroup(groupId: string, projectDir: string): Promise<number> {
+      if (!isTauri) return -1;
+      try {
+        const removed = await cmd<number>('delete_group', { groupId });
+        await this.refresh(projectDir);
+        return removed;
+      } catch (e) {
+        console.warn('[sessions] delete_group failed', e);
+        return -1;
+      }
     },
 
     markPermPending(id: string, pending: boolean): void {

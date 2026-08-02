@@ -104,6 +104,11 @@ impl Paths {
         self.root.join("projects.json")
     }
 
+    /// Session-group definitions (store/sessions.rs SessionGroup table).
+    pub fn groups_path(&self) -> PathBuf {
+        self.root.join("groups.json")
+    }
+
     pub fn user_prefs_path(&self) -> PathBuf {
         self.root.join("user_prefs.json")
     }
@@ -128,6 +133,11 @@ impl Paths {
 
     pub fn prompts_path(&self) -> PathBuf {
         self.root.join("prompts.json")
+    }
+
+    /// Project-scoped database connections + aliases (store/db.rs).
+    pub fn db_conns_path(&self) -> PathBuf {
+        self.root.join("db_conns.json")
     }
 
     /// Startup layout (data-formats.md §1.2): create every directory and run

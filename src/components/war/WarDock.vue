@@ -2,17 +2,15 @@
 // Info panel dock (docs/panels.md §1.2): drawer-style dock — a narrow button
 // rail (~44px) on the right edge plus ONE slide-in drawer (mutually
 // exclusive). Open state is TRANSIENT (in-memory only, never persisted):
-// every app start all panels are collapsed. Owns openId + width state
-// (defaults from PanelDef, width overridden by user_prefs panelLayout) and
-// persists width via the prefs store with a 300ms debounce after pointerup.
-//
-// Open/close animation: the dock width animates 44 ↔ 44+panelWidth (420ms
-// ease) and the drawer content animates translateX(100%) → 0 with the same
-// duration/easing, so the two look synchronized. On open the panel is
-// mounted closed first and flipped open two frames later so the transition
-// actually runs; on close it stays mounted (visibleId) for the slide-out.
+// every app start all panels are collapsed. Width is SHARED by all dock
+// tabs (one prefs.panelWidth, persisted via set_panel_width) — dragging
+// 会话信息 applies the same width to 后台任务/待办/版本控制/工作区文件/
+// 数据库. The open/close animation animates the dock width 44 ↔ 44+w
+// (420ms ease) in sync with the drawer's translateX; while the user is
+// DRAGGING the width the transition is disabled so the dock tracks the
+// pointer freely (no lag), re-enabled on release.
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { panelRegistry, PANEL_MAX_W, type PanelDef } from '../../panels/registry';
+import { panelRegistry, PANEL_MAX_W, PANEL_DEFAULT_W, type PanelDef } from '../../panels/registry';
 import { usePrefsStore } from '../../stores/prefs';
 import WarPanel from './WarPanel.vue';
 
@@ -55,12 +53,17 @@ let openRaf = 0;
 const visibleDef = computed(() => defs.value.find((d) => d.id === visibleId.value) ?? null);
 const openDef = computed(() => defs.value.find((d) => d.id === openId.value) ?? null);
 
-function widthOf(def: PanelDef): number {
-  // clamp: persisted widths from before PANEL_MAX_W may exceed the cap
-  return Math.min(prefs.panelLayout[def.id]?.width ?? def.defaultWidth, PANEL_MAX_W);
+// One SHARED width for every dock tab (clamped by PANEL_MAX_W; stored
+// values from before the cap may exceed it).
+function widthOf(): number {
+  return Math.min(prefs.panelWidth, PANEL_MAX_W);
 }
 
-const dockW = computed(() => RAIL_W + (openDef.value ? widthOf(openDef.value) : 0));
+const dockW = computed(() => RAIL_W + (openDef.value ? widthOf() : 0));
+
+// True while the user is dragging the drawer width → disables the dock
+// width transition so it follows the pointer with zero lag.
+const dockDragging = ref(false);
 
 function openPanel(def: PanelDef): void {
   if (closeTimer) {
@@ -115,31 +118,37 @@ function onRailClick(def: PanelDef): void {
   else openPanel(def);
 }
 
-function onResize(def: PanelDef, w: number): void {
-  prefs.setPanelLayoutLocal(def.id, { width: Math.round(w) });
+// ---- width drag (shared across all panels, persisted on release) ----
+function onResizeStart(): void {
+  dockDragging.value = true;
 }
 
-// 300ms debounce after pointerup before writing user_prefs.json
-const persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
-function onResizeEnd(def: PanelDef, w: number): void {
-  prefs.setPanelLayoutLocal(def.id, { width: Math.round(w) });
-  const prev = persistTimers.get(def.id);
-  if (prev) clearTimeout(prev);
-  persistTimers.set(
-    def.id,
-    setTimeout(() => void prefs.persistPanelLayout(def.id), 300),
-  );
+function onResize(w: number): void {
+  prefs.setPanelWidthLocal(w);
 }
-onBeforeUnmount(() => {
-  persistTimers.forEach((t) => clearTimeout(t));
-  if (closeTimer) clearTimeout(closeTimer);
-  if (switchTimer) clearTimeout(switchTimer);
-  cancelAnimationFrame(openRaf);
-});
+
+// `prefs.panelWidth` is already current (set live during the drag) — don't
+// trust a possibly stale emitted value here.
+function onResizeEnd(): void {
+  dockDragging.value = false;
+  prefs.setPanelWidthLocal(prefs.panelWidth);
+  void prefs.setPanelWidth(prefs.panelWidth);
+}
+
+// Double-click the grip → back to the canonical default (like the rail).
+function onResizeReset(): void {
+  prefs.setPanelWidthLocal(PANEL_DEFAULT_W);
+  void prefs.setPanelWidth(PANEL_DEFAULT_W);
+}
 </script>
 
 <template>
-  <div ref="root" class="war-dock" :style="{ width: dockW + 'px' }">
+  <div
+    ref="root"
+    class="war-dock"
+    :class="{ 'war-dock--drag': dockDragging }"
+    :style="{ width: dockW + 'px' }"
+  >
     <!-- drawer (slides in from the right, pushes the chat area narrower) -->
     <div class="war-dock__drawer">
       <WarPanel
@@ -147,11 +156,13 @@ onBeforeUnmount(() => {
         :key="visibleDef.id"
         :def="visibleDef"
         :open="openId === visibleDef.id"
-        :width="widthOf(visibleDef)"
+        :width="widthOf()"
         :dock-width="chatWidth"
         @toggle="closePanel()"
-        @resize="(w: number) => onResize(visibleDef!, w)"
-        @resize-end="(w: number) => onResizeEnd(visibleDef!, w)"
+        @resize-start="onResizeStart()"
+        @resize="(w: number) => onResize(w)"
+        @resize-end="onResizeEnd()"
+        @reset="onResizeReset()"
       />
     </div>
 
@@ -181,6 +192,11 @@ onBeforeUnmount(() => {
   height: 100%;
   /* dock width animation — synchronized with the drawer's translateX */
   transition: width 420ms ease;
+}
+
+/* while the user drags the width, follow the pointer with zero lag */
+.war-dock--drag {
+  transition: none;
 }
 
 .war-dock__drawer {

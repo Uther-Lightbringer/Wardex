@@ -6,9 +6,11 @@
 //   content:   frame_fat_bar nine-slice (plain rivet rectangle, no top
 //     crest — measured T23/R26/B22/L25, hole clean) with hole glass, 250ms
 //     drawer slide (translateX), lazily mounted (closed = unmounted)
-//   grip:      6px hot zone on the LEFT edge, three-stripe iron grip,
-//     drag to resize (min 200px / max 60% of the chat area width); content
-//     gets pointer-events: none while dragging
+//   grip:      6px hot zone on the LEFT edge, three-stripe grip (green on
+//     hover/drag), drag to resize (min 200px / max 60% of the chat area
+//     width, capped by PANEL_MAX_W); the width is SHARED across all dock
+//     tabs. Double-click resets to the default. Content gets
+//     pointer-events: none while dragging
 import { defineAsyncComponent, ref, watch } from 'vue';
 import { PANEL_MAX_W, type PanelDef } from '../../panels/registry';
 import WarFrame from './WarFrame.vue';
@@ -24,8 +26,10 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'toggle'): void;
+  (e: 'resizeStart'): void;
   (e: 'resize', w: number): void;
   (e: 'resizeEnd', w: number): void;
+  (e: 'reset'): void;
 }>();
 
 // Lazy mount: the component code is only imported after the first expand;
@@ -51,7 +55,7 @@ let dragStartX = 0;
 let dragStartW = 0;
 
 function clampW(w: number): number {
-  // PANEL_MAX_W keeps the whole right column ≤ the 300px action bay, so the
+  // PANEL_MAX_W keeps the whole right column ≤ the 354px action bay, so the
   // chat area is never squeezed; the 60% rule still applies on narrow windows.
   const max = props.dockWidth > 0 ? Math.min(props.dockWidth * 0.6, PANEL_MAX_W) : PANEL_MAX_W;
   return Math.max(MIN_W, Math.min(max, w));
@@ -62,6 +66,7 @@ function onGripDown(e: PointerEvent): void {
   dragStartX = e.clientX;
   dragStartW = props.width;
   (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  emit('resizeStart');
 }
 
 function onGripMove(e: PointerEvent): void {
@@ -78,6 +83,11 @@ function onGripUp(): void {
   if (!dragging.value) return;
   dragging.value = false;
   emit('resizeEnd', props.width);
+}
+
+// Double-click the grip → back to the canonical default (like the rail).
+function onGripReset(): void {
+  emit('reset');
 }
 </script>
 
@@ -114,9 +124,13 @@ function onGripUp(): void {
     <div
       v-if="open"
       class="war-panel__grip war-resize-handle"
+      :class="{ active: dragging }"
+      title="拖动调整宽度（双击恢复默认 240）"
       @pointerdown="onGripDown"
       @pointermove="onGripMove"
       @pointerup="onGripUp"
+      @pointercancel="onGripUp"
+      @dblclick="onGripReset"
     >
       <span></span><span></span><span></span>
     </div>
@@ -233,17 +247,25 @@ function onGripUp(): void {
   cursor: col-resize;
   touch-action: none;
   z-index: 5;
+  border-radius: 3px;
 }
 
 .war-panel__grip span {
   width: 1px;
   height: 36px;
-  background: #6a5a3f;
-  opacity: 0;
+  background: #5cb380;
+  opacity: 0.3;
   transition: opacity 120ms;
 }
 
-.war-panel__grip:hover span {
+.war-panel__grip:hover,
+.war-panel__grip.active {
+  background: #5cb380;
+  box-shadow: 0 0 4px #5cb38088;
+}
+
+.war-panel__grip:hover span,
+.war-panel__grip.active span {
   opacity: 1;
 }
 </style>

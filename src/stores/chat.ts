@@ -161,6 +161,10 @@ export interface SessionMeta {
   model: string;
   status: string;
   pinned?: boolean;
+  /** 子会话的父会话 id；顶层会话无此字段。 */
+  parentId?: string;
+  /** 子会话的分支点消息 id（从父会话哪条消息 fork 出来的）。 */
+  sourceMessageId?: string;
   summary: string;
 }
 
@@ -176,6 +180,9 @@ const IDLE_STATUS: ChatStatus = {
   acpReady: false,
   imageSupported: false,
 };
+
+/** 引用块长度上限：超出截断并提示（对齐 @文件 的 REF_INJECT_NOTE）。 */
+const SELECTION_QUOTE_MAX = 8000;
 
 const MODE_SUFFIX: Record<string, string> = {
   default: ' · 需批准',
@@ -677,12 +684,17 @@ export const useChatStore = defineStore('chat', {
       return true;
     },
 
-    /** create_session for the current project and make it active.
-     * Returns false when the backend refused (e.g. no default agent). */
-    async newSession(): Promise<boolean> {
+    /** create_session for the current project and make it active. `groupId`
+     * '' (default) lands the session in the 默认会话 group; a group id drops
+     * it straight into that group. Returns false when the backend refused
+     * (e.g. no default agent). */
+    async newSession(groupId?: string): Promise<boolean> {
       const sessions = useSessionsStore();
       try {
-        const id = await cmd<string>('create_session', { projectDir: this.projectDir });
+        const id = await cmd<string>('create_session', {
+          projectDir: this.projectDir,
+          groupId: groupId ?? '',
+        });
         this.sessionId = id;
         await this.refreshMeta();
         await sessions.refresh(this.projectDir);
@@ -690,6 +702,24 @@ export const useChatStore = defineStore('chat', {
         await this.loadMessages();
         this.scrollSeq += 1;
         return true;
+      } catch (e) {
+        this.status = { ...this.status, lastError: String(e) };
+        return false;
+      }
+    },
+
+    /** Move a session (and its whole sub-session tree) to a rail group;
+     * groupId '' = the default group. The backend re-anchors the top-level
+     * ancestor and emits store://sessions. */
+    async moveSessionGroup(sessionId: string, groupId: string): Promise<boolean> {
+      const sessions = useSessionsStore();
+      try {
+        const ok = await cmd<boolean>('move_session_group', { sessionId, groupId });
+        if (ok) {
+          if (sessionId === this.sessionId) await this.refreshMeta();
+          await sessions.refresh(this.projectDir);
+        }
+        return ok;
       } catch (e) {
         this.status = { ...this.status, lastError: String(e) };
         return false;
@@ -757,6 +787,55 @@ export const useChatStore = defineStore('chat', {
       if (!meta?.id) return;
       const ok = await this.openSession(meta.id);
       if (ok && draft) sessions.pendingComposerText = draft;
+    },
+
+    // ---- sub-session ("基于选中文本提问") ----
+
+    /** 子会话标题：选区压缩空白后截取前 24 个字符。 */
+    summarizeSelection(sel: string): string {
+      const t = sel.replace(/\s+/g, ' ').trim();
+      const chars = [...t];
+      return chars.length <= 24 ? t : chars.slice(0, 24).join('') + '…';
+    },
+
+    /** <selection>…</selection> 引用块，预填给子会话的输入框；输入框
+     * overlay 会把块高亮并把尖括号标签隐去。 */
+    quoteSelection(sel: string): string {
+      const body =
+        sel.length <= SELECTION_QUOTE_MAX
+          ? sel
+          : sel.slice(0, SELECTION_QUOTE_MAX) + '\n…（超出 8000 字，已截断）';
+      return `<selection>\n${body}\n</selection>`;
+    },
+
+    /** 基于选中文本提问：fork 一个继承到该气泡为止上下文的子会话
+     * （branch_session 写入 parentId/sourceMessageId），标题取选区摘要，
+     * 切换过去并在输入框预填【引用选中内容】块，由用户补充问题（不自动发）。 */
+    async askOnSelection(messageId: string, selection: string): Promise<boolean> {
+      if (!this.sessionId) return false;
+      const sessions = useSessionsStore();
+      const title = this.summarizeSelection(selection);
+      let meta: { id?: string } | null;
+      try {
+        meta = await cmd<{ id?: string } | null>('branch_session', {
+          sessionId: this.sessionId,
+          upToMessageId: messageId,
+          title,
+        });
+      } catch (e) {
+        this.status = { ...this.status, lastError: String(e) };
+        return false;
+      }
+      if (!meta?.id) return false;
+      const ok = await this.openSession(meta.id);
+      if (ok) sessions.pendingComposerText = this.quoteSelection(selection);
+      return ok;
+    },
+
+    /** 跳回父会话（当前会话是子会话时，聊天页「父会话 ▸」）。 */
+    async jumpToParent(): Promise<void> {
+      const pid = this.meta?.parentId;
+      if (pid) await this.openSession(pid);
     },
 
     // ---- turn actions ----

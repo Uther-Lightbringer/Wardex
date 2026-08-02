@@ -12,6 +12,8 @@
 //                      <root>/user_avatar.png if that exists
 //   - panelLayout    → NEW field (old files lack it — must load fine):
 //                      per-panel dock layout memory, see panels.md §1.2
+//   - panelWidth     → shared drawer width for ALL dock panels (dragged
+//                      once, applies to every tab), 200..276
 
 use std::fs;
 
@@ -56,12 +58,16 @@ pub struct UserPrefs {
     font_scale: f64,
     #[serde(rename = "panelLayout")]
     panel_layout: Map<String, Value>,
+    #[serde(rename = "panelWidth", skip_serializing_if = "Option::is_none")]
+    panel_width: Option<i64>,
     #[serde(rename = "permissionMode")]
     permission_mode: String,
     #[serde(rename = "previewHeight")]
     preview_height: i64,
     #[serde(rename = "previewWidth")]
     preview_width: i64,
+    #[serde(rename = "railWidth", skip_serializing_if = "Option::is_none")]
+    rail_width: Option<i64>,
     #[serde(rename = "userAvatarPath")]
     user_avatar_path: String,
     #[serde(rename = "userName")]
@@ -83,10 +89,14 @@ struct PrefsFile {
     preview_width: i64,
     #[serde(rename = "previewHeight")]
     preview_height: i64,
+    #[serde(rename = "railWidth")]
+    rail_width: Option<i64>,
     #[serde(rename = "fontScale", default = "default_font_scale")]
     font_scale: f64,
     #[serde(rename = "panelLayout")]
     panel_layout: Map<String, Value>,
+    #[serde(rename = "panelWidth")]
+    panel_width: Option<i64>,
 }
 
 impl Default for PrefsFile {
@@ -98,8 +108,10 @@ impl Default for PrefsFile {
             user_name: String::new(),
             preview_width: 0,
             preview_height: 0,
+            rail_width: None,
             font_scale: default_font_scale(),
             panel_layout: Map::new(),
+            panel_width: None,
         }
     }
 }
@@ -121,8 +133,10 @@ impl Default for UserPrefs {
             user_name: String::new(),
             preview_width: 0,
             preview_height: 0,
+            rail_width: None,
             font_scale: 1.0,
             panel_layout: Map::new(),
+            panel_width: None,
         }
     }
 }
@@ -133,6 +147,34 @@ fn clamp_preview_size(v: i64) -> i64 {
         0
     } else {
         v.clamp(320, 4096)
+    }
+}
+
+/// Chat-page rail column width: tight enough that the tree stays readable,
+/// wide enough that the chat panel never gets squeezed out (default 240).
+const DEFAULT_RAIL_WIDTH: i64 = 240;
+const RAIL_WIDTH_MIN: i64 = 180;
+const RAIL_WIDTH_MAX: i64 = 340;
+
+fn clamp_rail_width(v: i64) -> i64 {
+    if v <= 0 {
+        DEFAULT_RAIL_WIDTH
+    } else {
+        v.clamp(RAIL_WIDTH_MIN, RAIL_WIDTH_MAX)
+    }
+}
+
+/// Shared right-dock drawer width (all panels). Bounds match the frontend
+/// (PANEL_MIN_W / PANEL_MAX_W in src/panels/registry.ts).
+const DEFAULT_PANEL_WIDTH: i64 = 240;
+const PANEL_WIDTH_MIN: i64 = 200;
+const PANEL_WIDTH_MAX: i64 = 276;
+
+fn clamp_panel_width(v: i64) -> i64 {
+    if v <= 0 {
+        DEFAULT_PANEL_WIDTH
+    } else {
+        v.clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX)
     }
 }
 
@@ -150,6 +192,9 @@ impl UserPrefs {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        // Old files only had per-panel widths → migrate the widest one
+        // into the shared panelWidth so the tuned width is preserved.
+        let legacy_width = legacy_panel_width(&file.panel_layout);
         let mut prefs = Self {
             // NOTE: no whitelist here — the old load() took the raw string.
             permission_mode: file.permission_mode,
@@ -158,8 +203,10 @@ impl UserPrefs {
             user_name: file.user_name,
             preview_width: clamp_preview_size(file.preview_width),
             preview_height: clamp_preview_size(file.preview_height),
+            rail_width: file.rail_width.map(clamp_rail_width),
             font_scale: clamp_font_scale(file.font_scale),
             panel_layout: file.panel_layout,
+            panel_width: file.panel_width.map(clamp_panel_width).or(legacy_width),
         };
         // Avatar existence check, with fallback to the fixed path.
         if !file.user_avatar_path.is_empty() && fs::metadata(&file.user_avatar_path).is_ok() {
@@ -259,6 +306,36 @@ impl UserPrefs {
         self.save(paths)
     }
 
+    // ---- rail width (chat-page left rail, draggable) ----
+
+    pub fn rail_width(&self) -> i64 {
+        self.rail_width.unwrap_or(DEFAULT_RAIL_WIDTH)
+    }
+
+    pub fn set_rail_width(&mut self, paths: &Paths, w: i64) -> Result<(), PrefsError> {
+        let w = clamp_rail_width(w);
+        if self.rail_width == Some(w) {
+            return Ok(());
+        }
+        self.rail_width = Some(w);
+        self.save(paths)
+    }
+
+    // ---- shared dock panel width (dragged once, applies to all tabs) ----
+
+    pub fn panel_width(&self) -> i64 {
+        self.panel_width.unwrap_or(DEFAULT_PANEL_WIDTH)
+    }
+
+    pub fn set_panel_width(&mut self, paths: &Paths, w: i64) -> Result<(), PrefsError> {
+        let w = clamp_panel_width(w);
+        if self.panel_width == Some(w) {
+            return Ok(());
+        }
+        self.panel_width = Some(w);
+        self.save(paths)
+    }
+
     // ---- fontScale ----
 
     pub fn font_scale(&self) -> f64 {
@@ -351,6 +428,20 @@ impl UserPrefs {
     }
 }
 
+/// Old per-panel `panelLayout.<id>.width` → the shared panelWidth, taking
+/// the widest persisted width so existing users keep their tuned value on
+/// first launch after switching to one shared dock width.
+fn legacy_panel_width(panel_layout: &Map<String, Value>) -> Option<i64> {
+    let mut best: Option<i64> = None;
+    for v in panel_layout.values() {
+        let entry: PanelLayoutEntry = serde_json::from_value(v.clone()).unwrap_or_default();
+        if let Some(w) = entry.extra.get("width").and_then(Value::as_i64) {
+            best = Some(best.map_or(w, |b| b.max(w)));
+        }
+    }
+    best.map(clamp_panel_width)
+}
+
 /// `file:` URL → local path (old code used QUrl(path).toLocalFile()).
 /// Handles file:///C:/…, file://C:/… and plain paths passed through.
 fn file_url_to_local(input: &str) -> String {
@@ -363,4 +454,70 @@ fn file_url_to_local(input: &str) -> String {
         rest = stripped.to_string();
     }
     rest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::paths::Paths;
+
+    #[test]
+    fn rail_width_clamps_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+
+        // Default when never set.
+        let prefs = UserPrefs::load(&paths);
+        assert_eq!(prefs.rail_width(), 240);
+
+        // Clamped into 180..340.
+        let mut prefs = prefs;
+        prefs.set_rail_width(&paths, 500).unwrap();
+        assert_eq!(prefs.rail_width(), 340);
+        prefs.set_rail_width(&paths, 120).unwrap();
+        assert_eq!(prefs.rail_width(), 180);
+        prefs.set_rail_width(&paths, 0).unwrap();
+        assert_eq!(prefs.rail_width(), 240); // 0 → default
+
+        // Round-trip through disk.
+        prefs.set_rail_width(&paths, 280).unwrap();
+        drop(prefs);
+        let reloaded = UserPrefs::load(&paths);
+        assert_eq!(reloaded.rail_width(), 280);
+    }
+
+    #[test]
+    fn panel_width_clamps_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+
+        let mut prefs = UserPrefs::load(&paths);
+        assert_eq!(prefs.panel_width(), 240);
+
+        prefs.set_panel_width(&paths, 400).unwrap();
+        assert_eq!(prefs.panel_width(), 276);
+        prefs.set_panel_width(&paths, 50).unwrap();
+        assert_eq!(prefs.panel_width(), 200);
+        prefs.set_panel_width(&paths, 0).unwrap();
+        assert_eq!(prefs.panel_width(), 240);
+
+        prefs.set_panel_width(&paths, 260).unwrap();
+        drop(prefs);
+        let reloaded = UserPrefs::load(&paths);
+        assert_eq!(reloaded.panel_width(), 260);
+    }
+
+    #[test]
+    fn panel_width_migrates_from_legacy_panel_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+        std::fs::write(
+            paths.user_prefs_path(),
+            r#"{"panelLayout":{"agent":{"width":220},"git":{"width":230}}}"#,
+        )
+        .unwrap();
+
+        let prefs = UserPrefs::load(&paths);
+        assert_eq!(prefs.panel_width(), 230); // widest legacy width
+    }
 }

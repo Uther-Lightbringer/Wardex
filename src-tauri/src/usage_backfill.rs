@@ -54,16 +54,26 @@ fn backfill_with(
     let mut new_records = Vec::new();
     for meta in metas {
         summary.sessions += 1;
-        let Some(kind) = ArchiveKind::for_provider(&meta.provider) else {
-            continue;
-        };
         let Some(sid) = meta.acp_session_id.as_deref().filter(|s| !s.is_empty()) else {
             continue;
         };
-        let Some(home) = home_of(kind) else {
-            continue;
-        };
-        let (files, recs) = wire::read_archive_full(kind, &home, sid, &meta.work_dir);
+        // opencode 无档案文件，走本地 SQLite（chat/opencode_usage.rs）；
+        // kimi/claude/codex 走各自的 CLI 档案。
+        let (files, recs): (usize, Vec<wire::ArchiveRecord>) =
+            if meta.provider.trim().eq_ignore_ascii_case("opencode") {
+                let Some(home) = crate::chat::opencode_usage::opencode_data_dir() else {
+                    continue;
+                };
+                crate::chat::opencode_usage::read_archive_full(&home, sid)
+            } else {
+                let Some(kind) = ArchiveKind::for_provider(&meta.provider) else {
+                    continue;
+                };
+                let Some(home) = home_of(kind) else {
+                    continue;
+                };
+                wire::read_archive_full(kind, &home, sid, &meta.work_dir)
+            };
         if files == 0 {
             continue;
         }

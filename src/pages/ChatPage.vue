@@ -110,6 +110,11 @@ const agentIndex = computed(() => {
 
 const agentDisplay = computed(() => `◆ ${chat.meta?.agentName || 'Agent'}`);
 
+/** 子会话快捷返回：父会话标题（铁轨里查；查不到就空 tooltip）。 */
+const parentTitle = computed(
+  () => sessions.rail.find((s) => s.sessionId === chat.meta?.parentId)?.title ?? '',
+);
+
 function onAgentPick(i: number): void {
   const a = sessions.agents[i];
   if (!a || i === agentIndex.value) return;
@@ -224,7 +229,7 @@ const sessionUsage = computed(() => {
 
 <template>
   <PageShell :embed="34">
-    <div class="chat">
+    <div class="chat" :style="{ gridTemplateColumns: prefs.railWidth + 'px 1fr auto' }">
       <!-- far left: sessions of this project -->
       <WarFrame
         class="chat__rail"
@@ -246,13 +251,21 @@ const sessionUsage = computed(() => {
           :content-right-extra="4"
         >
           <div class="chat__main-col">
-            <div class="chat__title-row">
-              <span class="chat__title war-outline-gold" :style="{ fontSize: prefs.fs(14) + 'px' }">
-                {{ chat.meta?.title || '新会话' }}
-              </span>
-              <span class="chat__status" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                {{ chat.sessionId ? chat.status.statusText : '' }}
-              </span>
+          <div class="chat__title-row">
+            <span class="chat__title war-outline-gold" :style="{ fontSize: prefs.fs(14) + 'px' }">
+              {{ chat.meta?.title || '新会话' }}
+            </span>
+            <span
+              v-if="chat.meta?.parentId"
+              class="chat__parent"
+              :style="{ fontSize: prefs.fs(11) + 'px' }"
+              :title="'跳转到父会话：' + parentTitle"
+              @click="chat.jumpToParent()"
+              >父会话 ▸</span
+            >
+            <span class="chat__status" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              {{ chat.sessionId ? chat.status.statusText : '' }}
+            </span>
               <span v-if="sessionUsage" class="chat__usage" :style="{ fontSize: prefs.fs(11) + 'px' }">
                 {{ sessionUsage }}
               </span>
@@ -369,9 +382,7 @@ const sessionUsage = computed(() => {
   display: grid;
   /* right column is content-sized so the dock's width animation (44px rail
      ↔ 44px+drawer) pushes the chat area narrower instead of overlaying it */
-  grid-template-columns: 188px 1fr auto;
-  /* bottom bar height: docs/features/chat.md §1 botH elastic formula
-     (menuBtnH=276/4.87≈57, minBotH≈124, menuBtnH*2+76≈190, gap 8, minTopH=240) */
+  /* grid-template-columns comes inline from prefs.railWidth (draggable). */
   grid-template-rows: 1fr max(124px, min(max(190px, 18.5%), calc(100% - 248px)));
   gap: 8px;
   height: 100%;
@@ -463,6 +474,23 @@ const sessionUsage = computed(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat__parent {
+  flex: none;
+  color: var(--war-gold-bright);
+  font-family: SimSun, serif;
+  border: 1px solid var(--war-gold-dim);
+  border-radius: 10px;
+  padding: 0 8px;
+  line-height: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.chat__parent:hover {
+  border-color: var(--war-gold);
+  background: #2a2a18;
 }
 
 .chat__usage {

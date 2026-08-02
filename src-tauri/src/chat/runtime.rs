@@ -24,6 +24,7 @@ use tokio::sync::mpsc;
 use crate::acp::{AcpError, AcpEvent};
 use crate::acp::events::TurnUsage;
 use crate::chat::driver::{ClientDriver, SessionLaunch, Spawner};
+use crate::chat::opencode_usage::OpencodeReader;
 use crate::chat::wire::{ArchiveKind, ArchiveReader};
 use crate::provider;
 use crate::store::agents::Agent;
@@ -587,6 +588,23 @@ pub enum RuntimeCmd {
 // The actor
 // ---------------------------------------------------------------------------
 
+/// 用量补源读取器：kimi/claude/codex 走本地档案（chat/wire.rs 增量求和），
+/// opencode 走本地 SQLite 会话累计差值（chat/opencode_usage.rs，比 prompt
+/// result 只报最后一次调用完整）。
+enum UsageReader {
+    Archive(ArchiveReader),
+    Opencode(OpencodeReader),
+}
+
+impl UsageReader {
+    fn read_new(&mut self) -> Option<TurnUsage> {
+        match self {
+            UsageReader::Archive(r) => r.read_new(),
+            UsageReader::Opencode(r) => r.read_new(),
+        }
+    }
+}
+
 pub(crate) struct Actor {
     session_id: String,
     stores: Arc<Mutex<StoreRegistry>>,
@@ -610,9 +628,10 @@ pub(crate) struct Actor {
     /// usage_update notifications seen during the current turn; used when the
     /// prompt result carries no usage (before the archive backfill).
     turn_usage_live: Option<TurnUsage>,
-    /// 档案用量补源（kimi/claude/codex，见 chat/wire.rs），Started 时按
-    /// provider 定位；其他 provider 为 None。
-    archive_usage: Option<ArchiveReader>,
+    /// 用量补源：kimi/claude/codex 用本地档案增量补源；opencode 的 prompt
+    /// result 只报最后一次 LLM 调用，用 SQLite 会话累计差值补整回合。
+    /// Started 时按 provider 定位；其他 provider 为 None。
+    archive_usage: Option<UsageReader>,
 
     busy: bool,
     user_stop: bool,
@@ -1145,26 +1164,34 @@ impl Actor {
             AcpEvent::Started { session_id } => {
                 self.acp_ready = true;
                 self.snap().acp_running = true;
-                // ACP 适配器不报 usage 的 provider（kimi/claude/codex）：
-                // 定位各自的本地会话档案做增量补源（见 chat/wire.rs）。
-                self.archive_usage = ArchiveKind::for_provider(&self.agent.provider).and_then(
-                    |kind| {
-                        let home = match kind {
-                            ArchiveKind::Kimi => crate::chat::wire::kimi_home(),
-                            ArchiveKind::Claude => crate::chat::wire::claude_home(),
-                            ArchiveKind::Codex => crate::chat::wire::codex_home(),
-                        }?;
-                        let work_dir = {
-                            let mut stores = lock_ok(&self.stores);
-                            stores
-                                .sessions
-                                .meta_for(&self.session_id)
-                                .map(|m| m.work_dir)
-                                .unwrap_or_default()
-                        };
-                        Some(ArchiveReader::locate(kind, home, &session_id, &work_dir))
-                    },
-                );
+                // 用量补源（见 UsageReader）：kimi/claude/codex 定位本地会话
+                // 档案；opencode 定位本地 SQLite 会话累计值。
+                self.archive_usage = {
+                    let provider = self.agent.provider.trim().to_lowercase();
+                    if provider == "opencode" {
+                        crate::chat::opencode_usage::opencode_data_dir()
+                            .map(|d| UsageReader::Opencode(OpencodeReader::locate(d, &session_id)))
+                    } else {
+                        ArchiveKind::for_provider(&provider).and_then(|kind| {
+                            let home = match kind {
+                                ArchiveKind::Kimi => crate::chat::wire::kimi_home(),
+                                ArchiveKind::Claude => crate::chat::wire::claude_home(),
+                                ArchiveKind::Codex => crate::chat::wire::codex_home(),
+                            }?;
+                            let work_dir = {
+                                let mut stores = lock_ok(&self.stores);
+                                stores
+                                    .sessions
+                                    .meta_for(&self.session_id)
+                                    .map(|m| m.work_dir)
+                                    .unwrap_or_default()
+                            };
+                            Some(UsageReader::Archive(ArchiveReader::locate(
+                                kind, home, &session_id, &work_dir,
+                            )))
+                        })
+                    }
+                };
                 {
                     let mut stores = lock_ok(&self.stores);
                     if let Err(e) =
@@ -1428,9 +1455,18 @@ impl Actor {
         // Usage priority: prompt result > usage_update notifications seen
         // during the turn > local archive backfill (chat/wire.rs) for
         // providers whose ACP adapter reports nothing.
-        let usage = usage
-            .or_else(|| self.turn_usage_live.take())
-            .or_else(|| self.read_archive_usage());
+        // opencode 例外：prompt result 只报最后一次 LLM 调用，而 SQLite
+        // 会话累计差值（chat/opencode_usage.rs）覆盖整回合，所以倒序——
+        // SQLite diff > prompt result > usage_update。
+        let usage = if matches!(&self.archive_usage, Some(UsageReader::Opencode(_))) {
+            self.read_archive_usage()
+                .or(usage)
+                .or_else(|| self.turn_usage_live.take())
+        } else {
+            usage
+                .or_else(|| self.turn_usage_live.take())
+                .or_else(|| self.read_archive_usage())
+        };
         // Phase 4: a rate-limited turn is not final — enter backoff and
         // resend the same prompt instead of closing with an error.
         if stop == "error"
@@ -1779,6 +1815,32 @@ impl Actor {
                     { "name": "WARDEX_TODOS_PATH", "value": todos_path.to_string_lossy() },
                 ],
             }));
+        }
+        // Built-in database schema MCP server (db/mcp.rs): one `--mcp-db`
+        // subprocess per session, only when the session's project has DB
+        // connections configured. Exposes metadata-only tools so the agent
+        // can study table structure without seeing data rows.
+        let db_project_dir = lock_ok(&self.stores).sessions.workspace_path_for(&self.session_id);
+        if !db_project_dir.is_empty() {
+            let has_conns = {
+                let stores = lock_ok(&self.stores);
+                !stores
+                    .db_conns
+                    .connections(&db_project_dir)
+                    .is_empty()
+            };
+            if has_conns {
+                if let Ok(exe) = std::env::current_exe() {
+                    mcp_servers.push(json!({
+                        "name": "wardex-db",
+                        "command": exe.to_string_lossy(),
+                        "args": ["--mcp-db"],
+                        "env": [
+                            { "name": "WARDEX_PROJECT_DIR", "value": db_project_dir },
+                        ],
+                    }));
+                }
+            }
         }
         let (cwd, resume) = {
             let mut stores = lock_ok(&self.stores);
@@ -2508,8 +2570,8 @@ impl Actor {
         );
     }
 
-    /// 档案用量补读（chat/wire.rs）：增量求和新记录；reader 未定位
-    /// （不支持的 provider / 未 Started）或无新增返回 None。
+    /// 用量补源读取：kimi/claude/codex 为档案增量求和，opencode 为
+    /// SQLite 会话累计差值；reader 未定位或无新增返回 None。
     fn read_archive_usage(&mut self) -> Option<TurnUsage> {
         self.archive_usage.as_mut()?.read_new()
     }

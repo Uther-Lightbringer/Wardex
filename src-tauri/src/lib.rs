@@ -29,6 +29,7 @@ pub mod acp;
 pub mod chat;
 pub mod cmd;
 pub mod codegraph;
+pub mod db;
 pub mod inspect;
 pub mod mcp_reminder;
 pub mod models;
@@ -102,6 +103,7 @@ struct AppState {
     tester: probe::AgentTester,
     runs: cmd::CommandRunner,
     codegraph: codegraph::CodegraphRunner,
+    db: db::DbManager,
 }
 
 struct TauriSink(tauri::AppHandle);
@@ -144,8 +146,16 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn create_session(state: State<'_, AppState>, project_dir: String) -> Result<String, String> {
-    state.chat.create_session(&project_dir).await.map_err(err)
+async fn create_session(
+    state: State<'_, AppState>,
+    project_dir: String,
+    group_id: Option<String>,
+) -> Result<String, String> {
+    state
+        .chat
+        .create_session_in_group(&project_dir, group_id.as_deref().unwrap_or(""))
+        .await
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -445,18 +455,22 @@ fn session_meta(state: State<'_, AppState>, session_id: String) -> Value {
 }
 
 /// Fork a session at a message: new session with messages [0..=that one],
-/// same agent/provider/project; acpSessionId is NOT inherited. Returns the
-/// new session's meta.
+/// same agent/provider/project; acpSessionId is NOT inherited. The fork is
+/// recorded as a sub-session (parentId/sourceMessageId in meta). `title`
+/// (optional, default "") overrides the derived title — the selection-ask
+/// entry passes a summary of the selected text. Returns the new session's
+/// meta.
 #[tauri::command]
 fn branch_session(
     state: State<'_, AppState>,
     session_id: String,
     up_to_message_id: String,
+    title: Option<String>,
 ) -> Result<Value, String> {
     let mut stores = lock(&state.stores);
     stores
         .sessions
-        .branch_session(&session_id, &up_to_message_id)
+        .branch_session(&session_id, &up_to_message_id, title.as_deref())
         .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
         .map_err(err)
 }
@@ -1112,7 +1126,9 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
         "fontScale": stores.prefs.font_scale(),
         "previewWidth": stores.prefs.preview_width(),
         "previewHeight": stores.prefs.preview_height(),
+        "railWidth": stores.prefs.rail_width(),
         "panelLayout": stores.prefs.panel_layout(),
+        "panelWidth": stores.prefs.panel_width(),
         "userAvatarPath": stores.prefs.user_avatar_path(),
     })
 }
@@ -1214,6 +1230,101 @@ fn set_panel_layout(
     stores.prefs.set_panel_layout(&paths, &panel_id, &entry).map_err(err)
 }
 
+/// Shared right-dock drawer width (px) — one width for ALL dock tabs,
+/// dragged live and persisted once on release (mirrors set_rail_width).
+#[tauri::command]
+fn set_panel_width(state: State<'_, AppState>, width: i64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_panel_width(&paths, width).map_err(err)
+}
+
+/// Chat-page left rail column width (px). The frontend drags it live and
+/// persists once on release; clamp 180..340 keeps both panes usable.
+#[tauri::command]
+fn set_rail_width(state: State<'_, AppState>, width: i64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_rail_width(&paths, width).map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Rail groups (groups.json): per-project session buckets. Every mutation
+// emits store://sessions so the rail re-pulls both the list and the groups.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn list_groups(state: State<'_, AppState>, project_dir: String) -> Value {
+    let stores = lock(&state.stores);
+    serde_json::to_value(stores.sessions.groups_for(&project_dir)).unwrap_or(Value::Null)
+}
+
+#[tauri::command]
+fn create_group(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project_dir: String,
+    name: String,
+) -> Result<Value, String> {
+    let mut stores = lock(&state.stores);
+    let g = stores
+        .sessions
+        .create_group(&project_dir, &name)
+        .map_err(err)?;
+    app.emit("store://sessions", json!({})).ok();
+    serde_json::to_value(g).map_err(err)
+}
+
+#[tauri::command]
+fn rename_group(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    group_id: String,
+    name: String,
+) -> Result<bool, String> {
+    let mut stores = lock(&state.stores);
+    let ok = stores.sessions.rename_group(&group_id, &name).map_err(err)?;
+    if ok {
+        app.emit("store://sessions", json!({})).ok();
+    }
+    Ok(ok)
+}
+
+/// Delete a group + cascade-delete every session in it (confirm dialog is
+/// the frontend's job). Returns the number of removed sessions.
+#[tauri::command]
+fn delete_group(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    group_id: String,
+) -> Result<usize, String> {
+    let removed = {
+        let mut stores = lock(&state.stores);
+        stores.sessions.delete_group(&group_id).map_err(err)?
+    };
+    state.chat.drop_deleted_runtimes(&removed);
+    app.emit("store://sessions", json!({})).ok();
+    Ok(removed.len())
+}
+
+#[tauri::command]
+fn move_session_group(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    group_id: String,
+) -> Result<bool, String> {
+    let mut stores = lock(&state.stores);
+    let ok = stores
+        .sessions
+        .move_session_group(&session_id, &group_id)
+        .map_err(err)?;
+    if ok {
+        app.emit("store://sessions", json!({})).ok();
+    }
+    Ok(ok)
+}
+
 // ---------------------------------------------------------------------------
 // Model list probing (models.rs)
 // ---------------------------------------------------------------------------
@@ -1298,6 +1409,7 @@ pub fn run() {
                 tester: probe::AgentTester::new(),
                 runs: cmd::CommandRunner::new(),
                 codegraph: codegraph::CodegraphRunner::new(),
+                db: db::DbManager::new(),
             });
             log::info!(
                 "startup: chat manager + state ready ({:?}, total {:?})",
@@ -1403,11 +1515,28 @@ pub fn run() {
             set_font_scale,
             set_preview_size,
             set_panel_layout,
+            set_panel_width,
+            set_rail_width,
+            list_groups,
+            create_group,
+            rename_group,
+            delete_group,
+            move_session_group,
             // model list probing
             fetch_models,
             kimi_model_aliases,
             sync_agent_models,
             effort_options,
+            // database (db/commands.rs)
+            db::commands::db_conns,
+            db::commands::db_save_conns,
+            db::commands::db_set_alias,
+            db::commands::db_open,
+            db::commands::db_close,
+            db::commands::db_close_all,
+            db::commands::db_tables,
+            db::commands::db_columns,
+            db::commands::db_execute,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WarDex");

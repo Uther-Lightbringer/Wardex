@@ -5,9 +5,11 @@
 import { defineStore } from 'pinia';
 import { cmd, isTauri } from '../lib/tauri';
 
-// Drawer-dock layout memory: per-panel width + order. Open state is
-// transient (never persisted). Legacy entries may carry stale `open` /
-// `height` keys — they are simply ignored (no migration).
+// Drawer-dock layout memory: per-panel `order` (排序). The drawer WIDTH is
+// shared across all panels as `panelWidth` (dragged once, applies to every
+// tab). Open state is transient (never persisted). Legacy entries may carry
+// stale `open` / `height` / `width` keys — `width` is only migrated by the
+// backend into the shared panelWidth on first load, the rest are ignored.
 export interface PanelLayoutEntry {
   width?: number;
   order?: number;
@@ -36,6 +38,10 @@ export const usePrefsStore = defineStore('prefs', {
     /** File-preview dialog size memory; 0 = not dragged yet (A4 default). */
     previewWidth: 0,
     previewHeight: 0,
+    /** Chat-page left rail column width (px); draggable handle in the rail. */
+    railWidth: 240,
+    /** Shared right-dock drawer width (px) — one width for ALL dock tabs. */
+    panelWidth: 240,
     userAvatarPath: '',
     loaded: false,
   }),
@@ -58,7 +64,9 @@ export const usePrefsStore = defineStore('prefs', {
             permissionMode?: string;
             previewWidth?: number;
             previewHeight?: number;
+            railWidth?: number;
             userAvatarPath?: string;
+            panelWidth?: number;
           }>('get_prefs');
           this.fontScale = clampScale(p.fontScale ?? 1.0);
           this.panelLayout = p.panelLayout ?? {};
@@ -66,6 +74,8 @@ export const usePrefsStore = defineStore('prefs', {
           this.permissionMode = p.permissionMode || 'default';
           this.previewWidth = p.previewWidth ?? 0;
           this.previewHeight = p.previewHeight ?? 0;
+          this.railWidth = p.railWidth ?? 240;
+          this.panelWidth = p.panelWidth ?? 240;
           this.userAvatarPath = p.userAvatarPath ?? '';
           return;
         } catch (e) {
@@ -147,6 +157,38 @@ export const usePrefsStore = defineStore('prefs', {
           await cmd('set_preview_size', { width: this.previewWidth, height: this.previewHeight });
         } catch (e) {
           console.warn('[prefs] set_preview_size failed', e);
+        }
+      }
+    },
+
+    /** 铁轨宽度：拖拽中只改本地 state（不落盘），松手后调用一次持久化。 */
+    setRailWidthLocal(width: number): void {
+      this.railWidth = Math.round(width);
+    },
+
+    async setRailWidth(width: number): Promise<void> {
+      this.railWidth = Math.round(width);
+      if (isTauri) {
+        try {
+          await cmd('set_rail_width', { width: this.railWidth });
+        } catch (e) {
+          console.warn('[prefs] set_rail_width failed', e);
+        }
+      }
+    },
+
+    /** 抽屉面板宽度：拖拽中只改本地 state（不落盘），松手后调用一次持久化。 */
+    setPanelWidthLocal(width: number): void {
+      this.panelWidth = Math.round(width);
+    },
+
+    async setPanelWidth(width: number): Promise<void> {
+      this.panelWidth = Math.round(width);
+      if (isTauri) {
+        try {
+          await cmd('set_panel_width', { width: this.panelWidth });
+        } catch (e) {
+          console.warn('[prefs] set_panel_width failed', e);
         }
       }
     },

@@ -29,12 +29,8 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 - **互斥展开**：同一时刻至多一个面板打开；点击已打开面板的按钮或其标题条 → 折叠收回。
 - **打开状态不持久化**：`panelLayout` 不记 `open`；应用启动时仅 `defaultOpen: true` 的面板展开（当前为「会话信息」），其余全部折叠；用户关闭后下次启动仍会重新展开。已移除旧的 `alwaysOpen`（agent 面板常驻且不可关）概念。
 - **懒挂载**：折叠的面板不挂载组件、不取数据（[performance.md](./performance.md) §1.4 不可见不工作）；首次展开才动态 import + 拉数据。
-- **拖拽调宽**：展开面板**左沿**有拖拽手柄（铁框风格，见 §3），pointer 拖拽实时改宽度；约束 min 200px / max 聊天区宽度的 60%。拖拽过程中内容区 `pointer-events: none` 防误触。
-- **布局记忆**：每个面板的 `{width, order}` 按面板 id 持久化到 `user_prefs.json` 的 `panelLayout` 字段：
-  ```json
-  "panelLayout": { "git": { "width": 320 }, "tasks": { "width": 320 } }
-  ```
-  拖拽结束（pointerup）后 **300ms 防抖**写盘；下次打开同一面板恢复同样宽度。未登记的 id 使用 PanelDef 默认值。旧格式遗留的 `open`/`height` 键直接忽略，不做迁移。
+- **拖拽调宽（共享）**：展开面板**左沿**有拖拽手柄（三线铁纹，hover/拖动变绿，见 §3），pointer 拖拽实时改宽度；约束 min 200px / max 聊天区宽度的 60%（再叠加 PANEL_MAX_W=276）。**拖动期间 Dock 宽度过渡被禁用**（零延迟跟手，松手才恢复 420ms 过渡）；内容区 `pointer-events: none` 防误触。**双击手柄恢复默认 240**（与左栏铁轨同款交互）。
+- **共享宽度**：抽屉宽度是**所有面板共享的一份**（`user_prefs.json` 的 `panelWidth`，同 `railWidth` 模式）：拖动「会话信息」的宽度，对后台任务/待办/版本控制/工作区文件/数据库同样适用。pointerup 一次性写盘，无防抖。`panelLayout` 只保留各面板 `order`（排序用）；旧格式遗留的 `open`/`height` 键直接忽略，旧 `width` 键在首次加载时迁移为共享 `panelWidth`（取最大者，见 [data-formats.md](./data-formats.md) §7）。
 - **排序**：order 持久化；拖拽换序为可后置项（v1 固定按 registry order）。
 
 ### 1.3 后端扩展点（`src-tauri/src/inspect/`）
@@ -87,7 +83,7 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 
 - [ ] 折叠时零请求、零定时器、组件未挂载
 - [ ] 数据有上限（分页/LIMIT/条数），大内容分片拉取
-- [ ] 拖拽宽度入 `panelLayout[id].width` 记忆（打开状态不持久化）
+- [ ] 拖拽宽度入共享 `panelWidth` 记忆（所有标签通用，打开状态不持久化）
 - [ ] 外观只用 WarPanel 槽位，未自定义框样式
 - [ ] refreshOn 触发实现了去抖/代际作废（快速连点不堆请求）
 
@@ -95,8 +91,8 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 
 - [ ] WarDock/WarPanel 组件：44px 按钮栏 + 250ms ease 抽屉滑入，互斥展开，网格 `188px 1fr auto` 挤压式（非 overlay）
 - [ ] 打开状态瞬态：启动仅 `defaultOpen` 面板展开（会话信息），其余折叠；不持久化；无 `alwaysOpen` 特例
-- [ ] 左沿拖拽手柄：min 200px / max 60% 聊天区宽、pointerup 后 300ms 防抖持久化到 `panelLayout[id].width`
-- [ ] panelLayout 读写并入 user_prefs（[data-formats.md](./data-formats.md) §7 字段说明），旧 `open`/`height` 键忽略不迁移
+- [ ] 左沿拖拽手柄：min 200px / max 60% 聊天区宽 + PANEL_MAX_W，拖动期间 Dock 过渡禁用（零延迟跟手），pointerup 一次性持久化到共享 `panelWidth`；双击恢复默认 240
+- [ ] panelLayout（order）+ panelWidth 读写并入 user_prefs（[data-formats.md](./data-formats.md) §7 字段说明），旧 `open`/`height` 键忽略、旧 `width` 迁移为共享值
 - [ ] 懒挂载：动态 import + 折叠卸载
 - [ ] 四个面板（agent/git/files/tasks）按注册表机制实现，无写死特例
 - [ ] L2 无耳胖框（frame_fat_bar / frame_fat_panel）slice/hole 值登记 ui-design.md 参数总表

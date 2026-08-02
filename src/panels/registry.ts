@@ -7,11 +7,19 @@ import type { Component } from 'vue';
 
 export type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 
-/** Max drawer panel width (px). The right grid column also hosts the 300px
- * action bay; keeping rail(44) + panel + window-rail clearance(34) ≤ 300
- * means the column NEVER grows, so opening a drawer never squeezes the
- * chat area. 300 − 44 − 34 = 222. */
-export const PANEL_MAX_W = 222;
+/** Max drawer panel width (px). The right grid column is sized by the
+ * 354px action bay; keeping rail(44) + panel + window-rail clearance(34)
+ * ≤ 354 means the column NEVER grows, so opening a drawer never squeezes
+ * the chat area. 354 − 44 − 34 = 276. */
+export const PANEL_MAX_W = 276;
+
+/** Min drawer panel width (px), matches the frontend drag clamp. */
+export const PANEL_MIN_W = 200;
+
+/** Default drawer width (px) — shared by ALL dock tabs (one drag applies
+ * to every panel, persisted as `panelWidth`). Also the double-click reset
+ * target, matching the left rail's 240 default. */
+export const PANEL_DEFAULT_W = 240;
 
 export interface PanelDef {
   id: string; // 'git' | 'files' | 'db' | ... globally unique
@@ -19,7 +27,7 @@ export interface PanelDef {
   icon?: string; // /assets/... icon, optional
   component: () => Promise<{ default: Component }>; // lazy — not loaded while collapsed
   defaultOpen: boolean;
-  defaultWidth: number; // px, used when there is no panelLayout memory
+  defaultWidth: number; // px — informational; the SHARED prefs.panelWidth drives rendering
   order: number; // default ordering (v1: fixed, drag-reorder deferred)
   refreshOn: RefreshTrigger[];
 }
@@ -69,5 +77,14 @@ export const panelRegistry: PanelDef[] = [
     defaultWidth: 222,
     order: 30,
     refreshOn: ['sessionSwitch', 'expand', 'manual'],
+  },
+  {
+    id: 'db',
+    title: '数据库',
+    component: () => import('./DbPanel.vue'),
+    defaultOpen: false,
+    defaultWidth: 222,
+    order: 35,
+    refreshOn: ['sessionSwitch'],
   },
 ];

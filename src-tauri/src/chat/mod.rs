@@ -16,6 +16,7 @@
 
 pub mod driver;
 pub mod manager;
+pub mod opencode_usage;
 pub mod runtime;
 pub mod wire;
 

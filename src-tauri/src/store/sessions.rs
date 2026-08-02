@@ -85,6 +85,18 @@ pub struct SessionMeta {
     #[serde(rename = "messageCount", deserialize_with = "de_ms_i64")]
     pub message_count: i64,
     pub model: String,
+    // Sub-session linkage (branch_session): source session id + the message
+    // the fork was taken at. Absent on plain sessions; unknown keys survive
+    // via `extra` for old files that never had them.
+    #[serde(rename = "parentId", skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(rename = "sourceMessageId", skip_serializing_if = "Option::is_none")]
+    pub source_message_id: Option<String>,
+    // Rail group id (groups.json table); ""/absent = the built-in default
+    // group. Sub-sessions inherit their parent's group at branch time; the
+    // rail renders a session under its TOP-LEVEL ancestor's group.
+    #[serde(rename = "groupId", skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
     // Later-added key: absent in old files. Once set (even to false) the key
     // is written back, matching the old QVariantMap insert behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -321,6 +333,26 @@ pub struct SessionIndexRow {
     #[serde(rename = "projectDir")]
     pub project_dir: String,
     pub pinned: bool,
+    /// Sub-session source id ("" for top-level sessions).
+    #[serde(rename = "parentId")]
+    pub parent_id: String,
+    /// Rail group id ("" = default group).
+    #[serde(rename = "groupId")]
+    pub group_id: String,
+}
+
+/// One rail group (groups.json table): user-defined buckets for the chat
+/// rail's session list. "默认会话" is the built-in group — not stored, not
+/// deletable, shown first. Groups are per-project.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionGroup {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "projectDir")]
+    pub project_dir: String,
+    #[serde(rename = "createdAt", deserialize_with = "de_ms_i64")]
+    pub created_at: i64,
 }
 
 /// Agent fields snapshotted into meta at session creation (§3).
@@ -347,14 +379,24 @@ pub struct SessionForProject {
     pub title: String,
     #[serde(rename = "updatedAt")]
     pub updated_at: i64,
+    #[serde(rename = "createdAt")]
+    pub created_at: i64,
     #[serde(rename = "messageCount")]
     pub message_count: i64,
     pub pinned: bool,
+    /// Sub-session source id ("" for top-level sessions).
+    #[serde(rename = "parentId")]
+    pub parent_id: String,
+    /// Rail group id ("" = default group).
+    #[serde(rename = "groupId")]
+    pub group_id: String,
 }
 
 pub struct SessionStore {
     paths: Paths,
     index: Vec<SessionIndexRow>,
+    /// User-defined rail groups (groups.json); "默认会话" is implicit.
+    groups: Vec<SessionGroup>,
     open: HashMap<String, OpenSession>,
     /// LRU order: front = most recently used.
     lru: VecDeque<String>,
@@ -374,10 +416,12 @@ impl SessionStore {
         let mut store = Self {
             paths,
             index: Vec::new(),
+            groups: Vec::new(),
             open: HashMap::new(),
             lru: VecDeque::new(),
             pending_cmd_context: HashMap::new(),
         };
+        store.load_groups();
         store.discard_empty_sessions();
         store.reload_index();
         store
@@ -439,6 +483,8 @@ impl SessionStore {
                     summary: meta.summary,
                     project_dir: meta.project_dir,
                     pinned,
+                    parent_id: meta.parent_id.unwrap_or_default(),
+                    group_id: meta.group_id.unwrap_or_default(),
                 });
             }
         }
@@ -472,6 +518,16 @@ impl SessionStore {
         &mut self,
         agent: &AgentSnapshot,
         project_dir: &str,
+    ) -> Result<String, SessionsError> {
+        self.create_session_with_group(agent, project_dir, None)
+    }
+
+    /// createSession with an explicit rail group id (None → default group).
+    pub fn create_session_with_group(
+        &mut self,
+        agent: &AgentSnapshot,
+        project_dir: &str,
+        group_id: Option<&str>,
     ) -> Result<String, SessionsError> {
         self.paths.ensure_layout();
         // QUuid::createUuid().toString(WithoutBraces): lowercase hyphenated.
@@ -516,6 +572,7 @@ impl SessionStore {
             cli_path: agent.cli_path.clone(),
             work_dir,
             project_dir: clean_project,
+            group_id: group_id.filter(|g| !g.is_empty()).map(|g| g.to_string()),
             ..Default::default()
         };
         self.write_meta(&meta)?;
@@ -569,11 +626,15 @@ impl SessionStore {
     /// [0..=idx] where idx is `up_to_message_id`'s position. The branch
     /// inherits provider/model/agent/work/project dirs but NOT acpSessionId
     /// (the fork starts a fresh runtime conversation). The source session is
-    /// untouched. Returns the new session's meta.
+    /// untouched. `title` (optional) overrides the derived title — the
+    /// "基于选中文本提问" entry passes a summary of the selection. The fork
+    /// is recorded as a SUB-SESSION: meta.parentId = source id and
+    /// meta.sourceMessageId = the branch point. Returns the new session's meta.
     pub fn branch_session(
         &mut self,
         session_id: &str,
         up_to_message_id: &str,
+        title: Option<&str>,
     ) -> Result<SessionMeta, SessionsError> {
         if !self.ensure_open(session_id) {
             return Err(SessionsError::BranchMessageMissing);
@@ -598,18 +659,24 @@ impl SessionStore {
         };
         let new_id = self.create_session(&agent, &src_meta.project_dir)?;
 
-        // Title: keep the source's title (+ 分支) once it has one; a still-
-        // untitled source derives from the first user message, same as the
-        // append_message title hint.
-        let title = if src_meta.title != DEFAULT_TITLE && !src_meta.title.is_empty() {
-            left_chars(&format!("{} （分支）", src_meta.title.trim()), 48)
-        } else {
-            rows.iter()
-                .find(|m| m.role == "user" && !m.content.trim().is_empty())
-                .map(|m| ellipsize(&m.content, 24))
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| DEFAULT_TITLE.to_string())
+        // Title: explicit caller title wins; otherwise keep the source's
+        // title (+ 分支) once it has one; a still-untitled source derives
+        // from the first user message, same as the append_message title hint.
+        let derived = |src: &SessionMeta, rows: &[MessageRow]| {
+            if src.title != DEFAULT_TITLE && !src.title.is_empty() {
+                left_chars(&format!("{} （分支）", src.title.trim()), 48)
+            } else {
+                rows.iter()
+                    .find(|m| m.role == "user" && !m.content.trim().is_empty())
+                    .map(|m| ellipsize(&m.content, 24))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| DEFAULT_TITLE.to_string())
+            }
         };
+        let new_title = title
+            .filter(|t| !t.trim().is_empty())
+            .map(|t| left_chars(t.trim(), 48))
+            .unwrap_or_else(|| derived(&src_meta, &rows));
         let summary_source = rows
             .last()
             .map(|m| m.content.clone())
@@ -617,9 +684,13 @@ impl SessionStore {
 
         if let Some(open) = self.open.get_mut(&new_id) {
             open.messages = rows;
+            open.meta.parent_id = Some(session_id.to_string());
+            open.meta.source_message_id = Some(up_to_message_id.to_string());
+            open.meta.group_id = src_meta.group_id.clone(); // 子会话继承父的组
+            open.meta.title = new_title.clone();
         }
         self.rewrite_messages_file(&new_id)?;
-        self.update_meta_after_write(&new_id, &summary_source, Some(&title))?;
+        self.update_meta_after_write(&new_id, &summary_source, Some(&new_title))?;
         Ok(self.meta_for(&new_id).unwrap_or_default())
     }
 
@@ -628,17 +699,190 @@ impl SessionStore {
         self.open.len()
     }
 
+    /// Sub-session cascade: all descendants of `session_id` (via the index's
+    /// parentId links), depth-first. Orphan/cycle-safe: only rows whose
+    /// parent chain actually reaches `session_id` are collected.
+    fn descendant_ids(&self, session_id: &str) -> Vec<String> {
+        fn collect(idx: &[SessionIndexRow], parent: &str, out: &mut Vec<String>) {
+            for r in idx.iter().filter(|r| r.parent_id == parent) {
+                out.push(r.id.clone());
+                collect(idx, &r.id, out);
+            }
+        }
+        let mut out = Vec::new();
+        collect(&self.index, session_id, &mut out);
+        out
+    }
+
+    /// deleteSession: removes the session AND its whole sub-session tree
+    /// (cascade — a deleted parent takes its descendants with it). Each
+    /// session's runtime is released first; the index rows and on-disk dirs
+    /// are removed for the entire subtree.
     pub fn delete_session(&mut self, session_id: &str) -> Result<bool, SessionsError> {
         if session_id.is_empty() {
             return Ok(false);
         }
-        self.release_session(session_id);
-        self.pending_cmd_context.remove(session_id);
-        let dir = self.paths.session_dir(session_id);
-        if dir.exists() && fs::remove_dir_all(&dir).is_err() {
-            return Err(SessionsError::DeleteFailed);
+        let mut doomed = self.descendant_ids(session_id);
+        doomed.push(session_id.to_string());
+        for id in &doomed {
+            self.release_session(id);
+            self.pending_cmd_context.remove(id);
+            let dir = self.paths.session_dir(id);
+            if dir.exists() && fs::remove_dir_all(&dir).is_err() {
+                return Err(SessionsError::DeleteFailed);
+            }
         }
-        self.index.retain(|r| r.id != session_id);
+        self.index.retain(|r| !doomed.contains(&r.id));
+        Ok(true)
+    }
+
+    // ---- rail groups (groups.json; "默认会话" is implicit, not stored) ----
+
+    fn load_groups(&mut self) {
+        self.groups = fs::read(self.paths.groups_path())
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default();
+    }
+
+    fn save_groups(&self) -> Result<(), SessionsError> {
+        write_value_atomic(&self.paths.groups_path(), &self.groups)?;
+        Ok(())
+    }
+
+    /// Groups of one project (case-insensitive dir match; "" = projectless).
+    pub fn groups_for(&self, project_dir: &str) -> Vec<SessionGroup> {
+        let key = if project_dir.is_empty() {
+            String::new()
+        } else {
+            canonical_dir(project_dir)
+        };
+        self.groups
+            .iter()
+            .filter(|g| {
+                if key.is_empty() {
+                    g.project_dir.is_empty()
+                } else {
+                    g.project_dir.eq_ignore_ascii_case(&key)
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Create a group: trimmed non-empty name, ≤48 chars, uuid id.
+    pub fn create_group(
+        &mut self,
+        project_dir: &str,
+        name: &str,
+    ) -> Result<SessionGroup, SessionsError> {
+        let n = left_chars(name.trim(), 48);
+        if n.is_empty() {
+            return Err(SessionsError::MetaWrite);
+        }
+        let clean = if project_dir.is_empty() {
+            String::new()
+        } else {
+            canonical_dir(project_dir)
+        };
+        let group = SessionGroup {
+            id: uuid::Uuid::new_v4().hyphenated().to_string(),
+            name: n,
+            project_dir: clean,
+            created_at: now_ms(),
+        };
+        self.groups.push(group.clone());
+        self.save_groups()?;
+        Ok(group)
+    }
+
+    pub fn rename_group(&mut self, group_id: &str, name: &str) -> Result<bool, SessionsError> {
+        let n = left_chars(name.trim(), 48);
+        if group_id.is_empty() || n.is_empty() {
+            return Ok(false);
+        }
+        let Some(g) = self.groups.iter_mut().find(|g| g.id == group_id) else {
+            return Ok(false);
+        };
+        if g.name == n {
+            return Ok(true);
+        }
+        g.name = n;
+        self.save_groups()?;
+        Ok(true)
+    }
+
+    /// Delete a group AND cascade-delete every session whose top-level
+    /// ancestor sits in it (confirm dialog is the caller's job). Returns the
+    /// ids of every removed session (caller tears down their runtimes).
+    pub fn delete_group(&mut self, group_id: &str) -> Result<Vec<String>, SessionsError> {
+        if group_id.is_empty() {
+            return Ok(Vec::new()); // the default group is not deletable
+        }
+        // Roots = rows in the group with no living parent in the index
+        // (top-level or orphaned children — cascade covers their subtrees).
+        let roots: Vec<String> = self
+            .index
+            .iter()
+            .filter(|r| r.group_id == group_id)
+            .filter(|r| !self.index.iter().any(|p| p.id == r.parent_id))
+            .map(|r| r.id.clone())
+            .collect();
+        let mut removed = Vec::new();
+        for root in roots {
+            let mut doomed = self.descendant_ids(&root);
+            doomed.push(root);
+            for id in &doomed {
+                self.release_session(id);
+                self.pending_cmd_context.remove(id);
+                let dir = self.paths.session_dir(id);
+                if dir.exists() && fs::remove_dir_all(&dir).is_err() {
+                    return Err(SessionsError::DeleteFailed);
+                }
+            }
+            removed.extend(doomed);
+            self.index.retain(|r| !removed.contains(&r.id));
+        }
+        self.groups.retain(|g| g.id != group_id);
+        self.save_groups()?;
+        Ok(removed)
+    }
+
+    /// Move a session (and its whole sub-session tree) to another group:
+    /// the GROUP lives on the session's TOP-LEVEL ancestor — children render
+    /// under whatever group their root is in, so moving any node moves the
+    /// subtree. Empty group_id = the default group.
+    pub fn move_session_group(&mut self, session_id: &str, group_id: &str) -> Result<bool, SessionsError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        // Walk to the top-level ancestor via the index's parent links.
+        let mut root = session_id.to_string();
+        loop {
+            let parent = self
+                .index
+                .iter()
+                .find(|r| r.id == root)
+                .map(|r| r.parent_id.clone())
+                .unwrap_or_default();
+            if parent.is_empty() {
+                break;
+            }
+            root = parent;
+        }
+        let new_group = if group_id.is_empty() { None } else { Some(group_id.to_string()) };
+        let Some(meta) = self.meta_mut(&root) else {
+            return Ok(false);
+        };
+        if meta.group_id == new_group {
+            return Ok(true);
+        }
+        meta.group_id = new_group.clone();
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
+        if let Some(row) = self.index.iter_mut().find(|r| r.id == root) {
+            row.group_id = new_group.unwrap_or_default();
+        }
         Ok(true)
     }
 
@@ -805,8 +1049,11 @@ impl SessionStore {
                 session_id: r.id.clone(),
                 title: r.title.clone(),
                 updated_at: r.updated_at,
+                created_at: r.created_at,
                 message_count: r.message_count,
                 pinned: r.pinned,
+                parent_id: r.parent_id.clone(),
+                group_id: r.group_id.clone(),
             })
             .collect();
         out.sort_by_key(|s| std::cmp::Reverse(s.pinned));
@@ -1246,13 +1493,18 @@ impl SessionStore {
         }
         let meta = open.meta.clone();
         self.write_meta(&meta)?;
-        // Index row: bump updatedAt + move to top (touchSession).
+        // Index row: bump updatedAt + move to top (touchSession). parentId
+        // syncs from meta too — create_session's reload_index ran BEFORE the
+        // branch wrote the link, so the row would otherwise stay parentless
+        // and cascade deletes would miss the subtree.
         if let Some(pos) = self.index.iter().position(|r| r.id == session_id) {
             let mut row = self.index.remove(pos);
             row.updated_at = meta.updated_at;
             row.message_count = meta.message_count;
             row.summary = meta.summary.clone();
             row.title = meta.title.clone();
+            row.parent_id = meta.parent_id.clone().unwrap_or_default();
+            row.group_id = meta.group_id.clone().unwrap_or_default();
             self.index.insert(0, row);
         }
         Ok(())

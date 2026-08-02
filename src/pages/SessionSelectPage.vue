@@ -35,12 +35,21 @@ const chat = useChatStore();
 const ui = useUiStore();
 
 // ---------------------------------------------------------------------------
-// Grouping (spec §2.1)
+// Grouping (spec §2.1): projects first, sub-sessions nested under their
+// parent (createdAt asc, visual depth capped at MAX_DEPTH). Children are
+// collapsed by default (selExpanded empty); the selected row's ancestor
+// chain stays visible (stateless). Parent rows carry a gold child-count
+// badge, ▸/▾ toggles independently of the project-group collapse.
 // ---------------------------------------------------------------------------
+
+interface SelNode {
+  s: SessionIndexRow;
+  depth: number;
+}
 
 interface Group {
   projectDir: string;
-  sessions: SessionIndexRow[];
+  nodes: SelNode[];
 }
 
 const collapsed = ref<Record<string, boolean>>({}); // runtime only, never persisted
@@ -48,6 +57,9 @@ const query = ref('');
 const searchFocused = ref(false);
 
 const titleQuery = computed(() => query.value.trim().toLowerCase());
+
+/** 最深可视嵌套：数据不限深度，视觉压平到 3 级。 */
+const MAX_DEPTH = 3;
 
 const groups = computed<Group[]>(() => {
   const q = titleQuery.value;
@@ -62,8 +74,32 @@ const groups = computed<Group[]>(() => {
   }
   const out: Group[] = [];
   for (const [projectDir, list] of byDir) {
+    const byParent = new Map<string, SessionIndexRow[]>();
+    for (const s of list) {
+      const k = s.parentId || '';
+      const l = byParent.get(k);
+      if (l) l.push(s);
+      else byParent.set(k, [s]);
+    }
+    const kidsOf = (id: string): SessionIndexRow[] =>
+      (byParent.get(id) ?? []).slice().sort((a, b) => a.createdAt - b.createdAt);
+    const nodes: SelNode[] = [];
+    const walk = (pid: string, depth: number): void => {
+      for (const s of kidsOf(pid)) {
+        nodes.push({ s, depth: Math.min(depth, MAX_DEPTH) });
+        if (selExpanded.value.has(s.id) || isAncestorOfSelected(s.id)) walk(s.id, depth + 1);
+      }
+    };
+    // Top level: no parent, or parent missing (orphaned/other project).
     // Pinned first, stable (time order kept inside each pin class).
-    out.push({ projectDir, sessions: [...list].sort((a, b) => Number(b.pinned) - Number(a.pinned)) });
+    const top = list
+      .filter((s) => !s.parentId || !byParent.has(s.parentId))
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned));
+    for (const s of top) {
+      nodes.push({ s, depth: 0 });
+      if (selExpanded.value.has(s.id) || isAncestorOfSelected(s.id)) walk(s.id, 1);
+    }
+    out.push({ projectDir, nodes });
   }
   return out;
 });
@@ -74,9 +110,50 @@ function groupName(dir: string): string {
 }
 
 /** Group rows shown under the header: searching ignores the collapsed map. */
-function visibleSessions(g: Group): SessionIndexRow[] {
-  if (titleQuery.value) return g.sessions;
-  return collapsed.value[g.projectDir] ? [] : g.sessions;
+function visibleNodes(g: Group): SelNode[] {
+  if (titleQuery.value) return g.nodes;
+  return collapsed.value[g.projectDir] ? [] : g.nodes;
+}
+
+// ---- sub-session expansion (independent of project-group collapse) ----
+const selExpanded = ref(new Set<string>());
+
+function isAncestorOfSelected(id: string): boolean {
+  let cur = selectedId.value ? sessions.all.find((s) => s.id === selectedId.value) : undefined;
+  while (cur?.parentId) {
+    if (cur.parentId === id) return true;
+    cur = sessions.all.find((s) => s.id === cur!.parentId);
+  }
+  return false;
+}
+
+function selIsExpanded(id: string): boolean {
+  return selExpanded.value.has(id) || isAncestorOfSelected(id);
+}
+
+function toggleSelExpanded(id: string): void {
+  const set = new Set(selExpanded.value);
+  if (set.has(id)) set.delete(id);
+  else set.add(id);
+  selExpanded.value = set;
+}
+
+const selChildCounts = computed(() => {
+  const m = new Map<string, number>();
+  for (const s of sessions.all) {
+    if (!s.parentId) continue;
+    m.set(s.parentId, (m.get(s.parentId) ?? 0) + 1);
+  }
+  return m;
+});
+function selChildCount(id: string): number {
+  return selChildCounts.value.get(id) ?? 0;
+}
+
+/** 摘要面板的父会话行。 */
+function parentTitleOf(s: SessionIndexRow): string {
+  if (!s.parentId) return '（无，顶层会话）';
+  return sessions.all.find((p) => p.id === s.parentId)?.title ?? '（父会话已删除）';
 }
 
 /** Qt ElideMiddle equivalent (CSS cannot do true middle elision). */
@@ -104,8 +181,8 @@ const selectedRow = computed(() => sessions.all.find((s) => s.id === selectedId.
 
 function selectFirstIfNeeded(): void {
   if (selectedId.value && sessions.all.some((s) => s.id === selectedId.value)) return;
-  const first = groups.value[0]?.sessions[0];
-  selectedId.value = first?.id ?? '';
+  const first = groups.value[0]?.nodes[0];
+  selectedId.value = first?.s.id ?? '';
 }
 
 async function reload(): Promise<void> {
@@ -546,18 +623,27 @@ const pageKeysOn = computed(() => nav.page === 'sessionSelect');
                 </template>
               </div>
 
-              <!-- session rows -->
+              <!-- session rows (sub-sessions nested under their parent) -->
               <div
-                v-for="s in visibleSessions(g)"
-                :key="s.id"
+                v-for="n in visibleNodes(g)"
+                :key="n.s.id"
                 class="sel__row"
-                :class="{ selected: s.id === selectedId }"
-                @click="selectedId = s.id"
-                @dblclick="enterSession(s.id)"
-                @contextmenu.prevent="onContextMenu($event, s)"
+                :class="{ selected: n.s.id === selectedId }"
+                :style="{ paddingLeft: 22 + n.depth * 14 + 'px' }"
+                @click="selectedId = n.s.id"
+                @dblclick="enterSession(n.s.id)"
+                @contextmenu.prevent="onContextMenu($event, n.s)"
               >
-                <span v-if="s.pinned" class="sel__pin">📌</span>
-                <template v-if="renamingId === s.id">
+                <span
+                  v-if="selChildCount(n.s.id) > 0"
+                  class="sel__tgl"
+                  :style="{ fontSize: prefs.fs(10) + 'px' }"
+                  @click.stop="toggleSelExpanded(n.s.id)"
+                  >{{ selIsExpanded(n.s.id) ? '▾' : '▸' }}</span
+                >
+                <span v-else class="sel__tgl sel__tgl--none">·</span>
+                <span v-if="n.s.pinned" class="sel__pin">📌</span>
+                <template v-if="renamingId === n.s.id">
                   <input
                     v-model="renameText"
                     class="war-inline-input sel__rename"
@@ -571,11 +657,21 @@ const pageKeysOn = computed(() => nav.page === 'sessionSelect');
                   />
                 </template>
                 <template v-else>
-                  <span class="sel__row-title" :style="{ fontSize: prefs.fs(13) + 'px' }">{{ s.title }}</span>
-                  <span class="sel__row-provider" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ s.provider }}</span>
-                  <span class="sel__row-time" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ fmtTime(s.updatedAt) }}</span>
-                  <span v-if="sessions.unreadIds.includes(s.id)" class="sel__new-badge" :style="{ fontSize: prefs.fs(9) + 'px' }">NEW</span>
+                  <span class="sel__row-title" :style="{ fontSize: prefs.fs(13) + 'px' }">
+                    <span v-if="n.s.parentId" class="sel__from">↳</span>{{ n.s.title }}
+                  </span>
+                  <span class="sel__row-provider" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ n.s.provider }}</span>
+                  <span class="sel__row-time" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ fmtTime(n.s.updatedAt) }}</span>
+                  <span v-if="sessions.unreadIds.includes(n.s.id)" class="sel__new-badge" :style="{ fontSize: prefs.fs(9) + 'px' }">NEW</span>
                 </template>
+                <span
+                  v-if="selChildCount(n.s.id) > 0"
+                  class="sel__badge"
+                  :class="{ open: selIsExpanded(n.s.id) }"
+                  :style="{ fontSize: prefs.fs(9) + 'px' }"
+                  @click.stop="toggleSelExpanded(n.s.id)"
+                  >{{ selChildCount(n.s.id) }}</span
+                >
               </div>
             </template>
 
@@ -601,6 +697,7 @@ const pageKeysOn = computed(() => nav.page === 'sessionSelect');
             <span class="k">Provider:</span><span class="v">{{ selectedRow.provider }}</span>
             <span class="k">消息数:</span><span class="v">{{ selectedRow.messageCount }}</span>
             <span class="k">更新:</span><span class="v">{{ fmtTime(selectedRow.updatedAt) }}</span>
+            <span class="k">父会话:</span><span class="v">{{ parentTitleOf(selectedRow) }}</span>
             <span class="k">项目:</span>
             <span class="v">{{ selectedRow.projectDir ? elideMiddle(selectedRow.projectDir, 36) : '（临时会话，无项目）' }}</span>
           </div>
@@ -656,7 +753,7 @@ const pageKeysOn = computed(() => nav.page === 'sessionSelect');
     <WarDialog
       v-model:open="deleteOpen"
       title-text="删除会话"
-      :message-text="'确定删除这条会话及其全部消息吗？\n该操作不可撤销。'"
+      :message-text="'确定删除这条会话及其全部消息吗？\n它的全部子会话也将一并删除。\n该操作不可撤销。'"
     >
       <WarButton skin="dialog" :width="190" :art-aspect="5.34" text="删除" @activated="confirmDelete" />
       <WarButton skin="dialog" :width="190" :art-aspect="5.34" text="取消" @activated="deleteTarget = null" />
@@ -919,6 +1016,45 @@ export default {
 .sel__pin {
   flex: none;
   font-size: 10px;
+}
+
+.sel__tgl {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  color: var(--war-gold);
+  user-select: none;
+}
+
+.sel__tgl--none {
+  color: #3a4252;
+}
+
+.sel__from {
+  color: var(--war-gold-dim);
+  margin-right: 2px;
+}
+
+.sel__badge {
+  flex: none;
+  min-width: 15px;
+  padding: 0 3px;
+  text-align: center;
+  line-height: 14px;
+  border: 1px solid var(--war-gold-dim);
+  border-radius: 8px;
+  color: var(--war-gold);
+  background: #0d1116;
+  user-select: none;
+}
+
+.sel__badge:hover {
+  color: var(--war-gold-bright);
+  border-color: var(--war-gold);
+}
+
+.sel__badge.open {
+  background: #1a1f16;
 }
 
 .sel__row-title {

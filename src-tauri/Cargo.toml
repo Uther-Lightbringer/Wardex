@@ -52,6 +52,12 @@ ureq = { version = "2", features = ["tls", "json"] }
 toml = "0.8"
 # Regex-mode project code search (store/workspace.rs search_code).
 regex = "1"
+# Read-only access to the local opencode.db (chat/opencode_usage.rs): the
+# ACP prompt result only reports the LAST LLM call of a turn, so the session
+# row's cumulative token columns are diffed per turn instead.
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlparser = "0.62.0"
+tokio-postgres = "0.7.18"
 
 [dev-dependencies]
 tempfile = "3"

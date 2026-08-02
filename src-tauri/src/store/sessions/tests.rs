@@ -415,3 +415,146 @@ fn case_insensitive_search_matches() {
     };
     assert_eq!(results.len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Sub-sessions (branch_session parent link + cascade delete)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn branch_session_records_parent_link_title_and_prefix() {
+    let (_tmp, paths) = temp_paths();
+    let mut store = SessionStore::load(paths.clone());
+    let parent = store
+        .create_session(&AgentSnapshot::default(), "")
+        .unwrap();
+    store
+        .append_message(&parent, "user", "第一条消息", "kimi", "done", &[], "")
+        .unwrap();
+    store
+        .append_message(&parent, "user", "第二条消息", "kimi", "done", &[], "")
+        .unwrap();
+    let mid = store.open.get(&parent).unwrap().messages[1].id.clone();
+
+    // 显式 title（基于选中文本提问）优先
+    let child = store.branch_session(&parent, &mid, Some("选区摘要标题")).unwrap();
+    assert_eq!(child.parent_id.as_deref(), Some(parent.as_str()));
+    assert_eq!(child.source_message_id.as_deref(), Some(mid.as_str()));
+    assert_eq!(child.title, "选区摘要标题");
+    // 只继承到分支点为止（含分支点 = 2 条）
+    assert_eq!(store.open.get(&child.id).unwrap().messages.len(), 2);
+    // meta 落盘（重开一次从磁盘读）
+    store.release_session(&child.id);
+    store.ensure_open(&child.id);
+    let on_disk = store.meta_for(&child.id).unwrap();
+    assert_eq!(on_disk.parent_id.as_deref(), Some(parent.as_str()));
+
+    // 无 title：沿用旧的派生逻辑（源已有标题 → "原标题 （分支）"）
+    let mid0 = store.open.get(&parent).unwrap().messages[0].id.clone();
+    let branch2 = store.branch_session(&parent, &mid0, None).unwrap();
+    assert_eq!(branch2.title, "第一条消息 （分支）");
+    assert!(branch2.parent_id.is_some());
+}
+
+#[test]
+fn delete_session_cascades_to_whole_subtree() {
+    let (_tmp, paths) = temp_paths();
+    let mut store = SessionStore::load(paths.clone());
+    let top = store
+        .create_session(&AgentSnapshot::default(), "")
+        .unwrap();
+    store
+        .append_message(&top, "user", "m1", "kimi", "done", &[], "")
+        .unwrap();
+    let mid = store.open.get(&top).unwrap().messages[0].id.clone();
+    let child = store.branch_session(&top, &mid, Some("子")).unwrap();
+    // 子会话里含同一批消息 id，可继续从它再分支（孙）
+    let grand = store.branch_session(&child.id, &mid, Some("孙")).unwrap();
+
+    let dir_exists = |id: &str| paths.session_dir(id).exists();
+    assert!(dir_exists(&top) && dir_exists(&child.id) && dir_exists(&grand.id));
+
+    // 删父 → 整棵子树级联删除
+    store.delete_session(&top).unwrap();
+    assert!(!dir_exists(&top));
+    assert!(!dir_exists(&child.id));
+    assert!(!dir_exists(&grand.id));
+    assert!(!store
+        .index
+        .iter()
+        .any(|r| r.id == top || r.id == child.id || r.id == grand.id));
+
+    // 只删子 → 父不受影响
+    let top2 = store
+        .create_session(&AgentSnapshot::default(), "")
+        .unwrap();
+    store
+        .append_message(&top2, "user", "m1", "kimi", "done", &[], "")
+        .unwrap();
+    let mid2 = store.open.get(&top2).unwrap().messages[0].id.clone();
+    let child2 = store.branch_session(&top2, &mid2, Some("子2")).unwrap();
+    let grand2 = store.branch_session(&child2.id, &mid2, Some("孙2")).unwrap();
+    store.delete_session(&child2.id).unwrap();
+    assert!(dir_exists(&top2));
+    assert!(!dir_exists(&child2.id));
+    assert!(!dir_exists(&grand2.id));
+}
+
+// ---------------------------------------------------------------------------
+// Rail groups (groups.json): CRUD, session moves, cascade delete
+// ---------------------------------------------------------------------------
+
+#[test]
+fn groups_crud_move_and_cascade_delete() {
+    let (_tmp, paths) = temp_paths();
+    let mut store = SessionStore::load(paths.clone());
+    let agent = AgentSnapshot::default();
+
+    let g1 = store.create_group("", "组一").unwrap();
+    let g2 = store.create_group("", "组二").unwrap();
+    assert_eq!(store.groups_for("").len(), 2);
+
+    let s1 = store.create_session_with_group(&agent, "", Some(&g1.id)).unwrap();
+    let s2 = store.create_session_with_group(&agent, "", Some(&g1.id)).unwrap();
+    let s3 = store.create_session(&agent, "").unwrap(); // 默认组
+
+    // branch inherits the parent's group
+    store.append_message(&s1, "user", "m1", "kimi", "done", &[], "").unwrap();
+    let mid = store.open.get(&s1).unwrap().messages[0].id.clone();
+    let child = store.branch_session(&s1, &mid, Some("子")).unwrap();
+    assert_eq!(child.group_id.as_deref(), Some(g1.id.as_str()));
+
+    // move: top-level session → g2
+    assert!(store.move_session_group(&s3, &g2.id).unwrap());
+    assert_eq!(store.meta_for(&s3).unwrap().group_id.as_deref(), Some(g2.id.as_str()));
+
+    // move a CHILD → the TOP-LEVEL ancestor re-anchors (whole subtree moves);
+    // the child's own meta keeps its inherited group (rendering follows root)
+    assert!(store.move_session_group(&child.id, &g2.id).unwrap());
+    let s1_meta = store.meta_for(&s1).unwrap();
+    assert_eq!(s1_meta.group_id.as_deref(), Some(g2.id.as_str()));
+    assert_eq!(store.meta_for(&child.id).unwrap().group_id.as_deref(), Some(g1.id.as_str()));
+
+    // delete g2 → s1 + child + s3 cascade-deleted
+    let removed = store.delete_group(&g2.id).unwrap();
+    assert_eq!(removed.len(), 3);
+    assert!(!paths.session_dir(&s1).exists());
+    assert!(!paths.session_dir(&child.id).exists());
+    assert!(!paths.session_dir(&s3).exists());
+    assert!(!store
+        .index
+        .iter()
+        .any(|r| r.id == s1 || r.id == child.id || r.id == s3));
+    // g1 survives, g2 gone
+    assert_eq!(store.groups_for("").len(), 1);
+    assert_eq!(store.groups_for("")[0].id, g1.id);
+
+    // 默认组不可删
+    assert!(store.delete_group("").unwrap().is_empty());
+
+    // rename
+    assert!(store.rename_group(&g1.id, "新组一").unwrap());
+    assert_eq!(store.groups_for("")[0].name, "新组一");
+    // 空名拒绝
+    assert!(!store.rename_group(&g1.id, "  ").unwrap());
+    assert_eq!(store.groups_for("")[0].name, "新组一");
+}

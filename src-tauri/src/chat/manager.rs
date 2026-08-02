@@ -171,10 +171,32 @@ impl ChatManager {
         }
     }
 
+    /// Teardown runtimes for sessions the store just removed wholesale
+    /// (delete_group cascade). The active pointer is cleared if it died;
+    /// the frontend switches to a remaining session itself.
+    pub fn drop_deleted_runtimes(&self, ids: &[String]) {
+        let active = self.active_id();
+        if !active.is_empty() && ids.iter().any(|id| *id == active) {
+            lock_ok(&self.shared).active_id.clear();
+        }
+        for id in ids {
+            self.destroy_runtime(id);
+        }
+    }
+
     /// startNewSession (ChatController.cpp:688-721): default agent required,
     /// session created + warmed, previous empty session discarded.
     pub async fn create_session(&self, project_dir: &str) -> Result<String, ChatError> {
-        self.create_session_with(project_dir, "", true).await
+        self.create_session_in_group(project_dir, "").await
+    }
+
+    /// createSession landing directly in a rail group ("" = default group).
+    pub async fn create_session_in_group(
+        &self,
+        project_dir: &str,
+        group_id: &str,
+    ) -> Result<String, ChatError> {
+        self.create_session_with(project_dir, "", true, group_id).await
     }
 
     /// Internal: `title` empty → default title. `active` false keeps the
@@ -185,6 +207,7 @@ impl ChatManager {
         project_dir: &str,
         title: &str,
         active: bool,
+        group_id: &str,
     ) -> Result<String, ChatError> {
         let agent = {
             let stores = lock_ok(&self.stores);
@@ -197,7 +220,9 @@ impl ChatManager {
         };
         let id = {
             let mut stores = lock_ok(&self.stores);
-            let id = stores.sessions.create_session(&snapshot_of(&agent), project_dir)?;
+            let id = stores
+                .sessions
+                .create_session_with_group(&snapshot_of(&agent), project_dir, Some(group_id))?;
             if !title.trim().is_empty() {
                 let _ = stores.sessions.rename_session(&id, title.trim());
             }
@@ -452,7 +477,7 @@ impl ChatManager {
     async fn fire_project_due(&self, r: crate::store::todos::TodoRow) {
         // Name = the todo title (40 chars cap).
         let title: String = r.title.trim().chars().take(40).collect();
-        let session_id = match self.create_session_with(&r.project_dir, &title, false).await {
+        let session_id = match self.create_session_with(&r.project_dir, &title, false, "").await {
             Ok(id) => id,
             Err(e) => {
                 log::warn!("todos: project due create_session failed: {e}");

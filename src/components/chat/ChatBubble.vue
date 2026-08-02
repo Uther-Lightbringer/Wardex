@@ -21,6 +21,7 @@ import { usePrefsStore } from '../../stores/prefs';
 import { useChatStore, type ChatMessage, type ChatSegment } from '../../stores/chat';
 import { formatTokens } from '../../lib/format';
 import ProcessDialog from './ProcessDialog.vue';
+import WarMenu from '../war/WarMenu.vue';
 
 const props = defineProps<{
   row: ChatMessage;
@@ -193,36 +194,60 @@ const activityHint = computed(() => {
   return '';
 });
 
-// Streaming-only flavor lines: a random fixed phrase shown on its OWN second
-// line of the process pill, re-picked on every structural event (new segment
-// / tool upsert) — its left edge never moves, so no layout jitter.
+// Streaming-only flavor lines: a random quote loaded from the Warcraft quotes
+// file (public/assets/Warcraft3-Quotes/…), shown on its OWN second line of the
+// process pill, re-picked on every structural event (new segment / tool
+// upsert) — its left edge never moves, so no layout jitter. Loaded once at
+// runtime and cached module-wide; built-in lines cover the window while the
+// file loads (or if it is missing).
+const QUOTES_URL =
+  '/assets/Warcraft3-Quotes/' + encodeURIComponent('魔兽争霸3角色台词-中文.md');
 const FLAVOR_LINES = [
-  '天灾军团正在集结……',
-  '为了联盟！',
-  '为了部落！',
-  '敲响警钟！',
   '战争已经打响。',
   '力量与荣耀！',
-  '敌人在前进……',
-  '铁匠铺的炉火正旺。',
-  '圣光保佑我们。',
-  '黑暗即将降临。',
-  '准备战斗！',
+  '为了联盟！',
+  '为了部落！',
   '号角已吹响。',
-  '侦察骑兵已经出发。',
-  '箭塔已就位。',
-  '金币叮当作响。',
 ];
+let quotesCache: Promise<string[]> | null = null;
+function loadQuotes(): Promise<string[]> {
+  if (!quotesCache) {
+    quotesCache = fetch(QUOTES_URL)
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((text) =>
+        text
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith('#') && !l.startsWith('>') && l.includes('：')),
+      );
+  }
+  return quotesCache;
+}
+const flavorLines = ref<string[]>(FLAVOR_LINES);
 const flavor = ref('');
 let lastFlavorIdx = -1;
+function pickFlavor(): void {
+  const lines = flavorLines.value;
+  if (lines.length === 0) return;
+  let idx = Math.floor(Math.random() * lines.length);
+  if (lines.length > 1 && idx === lastFlavorIdx) idx = (idx + 1) % lines.length;
+  lastFlavorIdx = idx;
+  flavor.value = lines[idx];
+}
+void loadQuotes()
+  .then((lines) => {
+    if (lines.length === 0) return;
+    flavorLines.value = lines;
+    if (props.streaming && structSegs.value.length > 0) pickFlavor();
+  })
+  .catch(() => {
+    /* keep built-in fallback lines */
+  });
 watch(
   () => segs.value,
   () => {
     if (!props.streaming || structSegs.value.length === 0) return;
-    let idx = Math.floor(Math.random() * FLAVOR_LINES.length);
-    if (FLAVOR_LINES.length > 1 && idx === lastFlavorIdx) idx = (idx + 1) % FLAVOR_LINES.length;
-    lastFlavorIdx = idx;
-    flavor.value = FLAVOR_LINES[idx];
+    pickFlavor();
   },
   { immediate: true },
 );
@@ -354,6 +379,45 @@ function branchHere(): void {
   void chat.branchFromMessage(props.row.id);
 }
 
+// ---- selection context menu (右选 → 右键 → 基于选中文本提问) ----
+// Applies to user AND assistant bubbles; streaming rows are dead (the
+// streaming contract forbids touching the live text, and the selection is
+// meaningless mid-generation). The selection must be non-empty and anchored
+// INSIDE this bubble — a cross-bubble drag only enables 复制.
+const ctxOpen = ref(false);
+const ctxX = ref(0);
+const ctxY = ref(0);
+const ctxSel = ref('');
+const ctxAskable = ref(false);
+
+function onBubbleContextMenu(e: MouseEvent): void {
+  if (props.streaming || isCommand.value || isReminder.value) return;
+  const sel = window.getSelection();
+  const text = sel?.toString().trim() ?? '';
+  const body = bodyEl.value;
+  if (!body) return;
+  const inside = (n: Node | null): boolean =>
+    n !== null && (n === body || body.contains(n));
+  // 无选区 / 选区锚点不在本气泡内 → 提问禁用（复制仍可）
+  const askable = text.length > 0 && !!sel && inside(sel.anchorNode) && inside(sel.focusNode);
+  ctxSel.value = text;
+  ctxAskable.value = askable;
+  ctxX.value = Math.min(e.clientX, window.innerWidth - 240);
+  ctxY.value = Math.min(e.clientY, window.innerHeight - 110);
+  ctxOpen.value = true;
+}
+
+function onCtxSelect(i: number): void {
+  ctxOpen.value = false;
+  if (i === 0) {
+    if (ctxSel.value) void copyText(ctxSel.value);
+    return;
+  }
+  if (i === 1 && ctxAskable.value) {
+    void chat.askOnSelection(props.row.id, ctxSel.value);
+  }
+}
+
 // ---- long user message fold (四.8) ----
 // Pasted logs etc.: over ~15 lines or ~800 chars the bubble clamps to the
 // first lines with a 展开全部 toggle. User bubbles only; component-local.
@@ -459,6 +523,7 @@ const visibleAtts = computed(() =>
         :class="{ error: isError, streaming: props.streaming }"
         :style="{ fontSize: fs(14) + 'px' }"
         @click="onBodyClick"
+        @contextmenu.prevent="onBubbleContextMenu"
       >
         <!-- header: name · time · status · copy -->
         <div class="bubble-head" :class="{ user: isUser }">
@@ -608,6 +673,18 @@ const visibleAtts = computed(() =>
       </div>
     </div>
   </div>
+
+  <!-- selection context menu: copy + fork a sub-session at this bubble -->
+  <WarMenu
+    v-model:visible="ctxOpen"
+    :x="ctxX"
+    :y="ctxY"
+    :items="[
+      { label: '复制', disabled: !ctxSel },
+      { label: '基于选中文本提问（新会话）', disabled: !ctxAskable },
+    ]"
+    @select="onCtxSelect"
+  />
 </template>
 
 <style scoped>
