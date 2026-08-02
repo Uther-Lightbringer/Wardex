@@ -7,3 +7,7 @@ WarDex-win64-*.zip
 dist-portable/
 src-tauri/target-pkg/
 tools/out/
+background.json
+*.local.json
+.claude/
+
