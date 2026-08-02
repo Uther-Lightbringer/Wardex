@@ -105,7 +105,7 @@
   ```json
   { "type": "image", "source": "/assets/background/LodolonFall.jpg 或绝对路径" }
   ```
-- `type`：`image`（jpg/png/gif/webp，gif/webp 动图）| `model`（glTF/GLB，Three.js 加载，**可后置**）；`video` 已移除，出现即回退默认 image。
+- `type`：`image`（jpg/png/gif/webp，gif/webp 动图）| `video`（mp4 等，`<video>` 静音循环播放，WebView2 原生 H.264，无需 FFmpeg）| `model`（glTF/GLB，Three.js 加载，**可后置**）。
 - 缺省/解析失败一律回退内置 `LodolonFall.jpg`。
 
 ## 新增素材约定

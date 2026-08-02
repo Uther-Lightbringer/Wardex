@@ -54,6 +54,11 @@ fn run_git(dir: &str, args: &[&str]) -> Result<String, String> {
         let mut c = Command::new("git");
         c.arg("-C")
             .arg(dir)
+            // Quote non-ASCII paths as raw UTF-8 instead of \NNN octal escapes
+            // (git's core.quotepath default); otherwise diff/log headers show
+            // Chinese file names as numbers.
+            .arg("-c")
+            .arg("core.quotepath=false")
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

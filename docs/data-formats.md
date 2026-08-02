@@ -351,7 +351,7 @@ tool 段 / `toolCalls` 元素的键集（来自 ACP update + `toolFromUpdate` �
 | `userName` | string | 聊天里用户侧显示名；trim 截 24 字符；**空 → 显示 `"阿尔萨斯"`**（`src/UserPrefs.cpp:56-69`） | `""` |
 | `previewWidth` / `previewHeight` | number(int) | 文件预览对话框上次尺寸；`0 = 未设置`（QML 用 A4 默认），非 0 钳制到 `[320, 4096]`（`src/UserPrefs.cpp:72-75`） | `0` |
 | `fontScale` | number | 全局字体缩放，钳制 **[0.85, 1.30]**，默认 1.0（`src/UserPrefs.cpp:98-111, 162`）。UI 档位 85%/100%/115%/130% | `1.0` |
-| `panelLayout` | object | **新版新增**（旧版无此字段，读取时容忍缺失）。面板坞布局记忆：`{ <panelId>: { "open": bool, "height": px } }`，拖拽结束后 300ms 防抖写盘。规范见 [panels.md](./panels.md) §1.2 | `{}` |
+| `panelLayout` | object | **新版新增**（旧版无此字段，读取时容忍缺失）。面板坞布局记忆：`{ <panelId>: { "width": px, "order": n } }`，拖拽结束后 300ms 防抖写盘。**打开状态不持久化**（启动全折叠，见 [panels.md](./panels.md) §1.2）；旧格式遗留的 `open`/`height` 键读取时直接忽略，不做迁移 | `{}` |
 
 ```json
 {

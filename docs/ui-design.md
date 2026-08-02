@@ -165,9 +165,10 @@ border-image: url('/assets/ui/dropdown/dropdown_panel.png') 14 16 13 20 stretch;
 | `ui/frames/dialog_frame.png` | 863×602 | 56 / 56 / 56 / 56 | stretch | WarDialog 模态框 |
 | `ui/frames/frame_chat_bubble_body.png` | 1037×168 | 14 / 16 / 14 / 16 | **repeat** | ChatBubble 正文框（角固定、石边平铺） |
 | `ui/frames/frame_iron_panel.png` | 717×276 | 96 / 110 / 69 / 108 | stretch | FrameImage 页面主面板（Config/SessionSelect/Todo/Chat 顶部） |
-| `ui/frames/frame_iron_bar.png` | 717×243 | 62 / 110 / 70 / 108 | stretch | FrameImage 底部操作栏 |
+| `ui/frames/frame_iron_bar.png` | 717×243 | 62 / 110 / 70 / 108 | stretch | FrameImage 底部操作栏（iron 家族用于页面级框；**右侧面板坞已改用 fat 家族**，见 [panels.md](./panels.md) §3） |
 | `ui/frames/frame_rail.png` | 392×656 | 92 / 36 / 40 / 36 | stretch | ~~ChatPage 左侧"本项目会话"栏~~（**已弃用**，会话栏改用 frame_fat_bar） |
-| `ui/frames/frame_fat_bar.png` | 804×554 | 28 / 32 / 28 / 32 | stretch | ChatPage 左侧"本项目会话"栏（粗铆钉框，中心镂空） |
+| `ui/frames/frame_fat_bar.png` | 804×554 | 28 / 32 / 28 / 32 | stretch | ChatPage 左侧"本项目会话"栏（粗铆钉框，中心镂空）；右侧抽屉面板标题条 |
+| `ui/frames/frame_fat_panel.png` | — | 28 / 32 / 28 / 32 | stretch | 右侧抽屉面板内容框（无耳胖框，中心镂空；孔位见 §3.2） |
 | `ui/frames/frame_popup.png` | 1023×548 | 88 / 100 / 90 / 100 | stretch | FolderBrowserDialog 列表框、ChatPage 文件预览弹窗 |
 | `ui/frames/frame_popup_small.png` | 511×274 | 44 / 50 / 45 / 50 | stretch | RecentProjectsPanel（frame_popup 的半尺寸版，角块 50/50/44/45）；中心块是画好的深蓝纹理，**需加 `fill`** 才能作为背景显示 |
 | `ui/dropdown/dropdown_bar.png` | 109×36 | 12 / 46 / 12 / 29 | stretch | WarDropdown 关闭态条（右侧 46px 含金箭头帽） |
@@ -244,8 +245,11 @@ const frameStyle = computed(() => ({
 |---|---|---|---|---|
 | `frame_iron_panel.png` | 717×276 | 108/110/96/69 | **24/25/56/21** | `hasHangers: true`；左栏 `contentLeftExtra: 16`（避让铁轨），Chat 页用 `4/4`、`4/6` |
 | `frame_iron_bar.png` | 717×243 | 108/110/62/70 | **24/24/22/21** | `hasHangers: false`；Chat 页 `4/4`，Config 页 `0/0` |
-| `frame_fat_bar.png` | 804×554 | 32/32/28/28 | **26/26/24/24** | 无 hangers、无 extras（ChatPage 会话栏） |
+| `frame_fat_bar.png` | 804×554 | 32/32/28/28 | **26/26/24/24** | 无 hangers、无 extras（ChatPage 会话栏、右栏抽屉标题条） |
+| `frame_fat_panel.png` | — | 32/32/28/28 | **24/26/24/24** | 无 hangers、无 extras（右栏抽屉面板内容框） |
 | ~~`frame_rail.png`~~ | 392×656 | 36/36/92/40 | 24/23/77/26 | **已弃用**，会话栏改用 frame_fat_bar |
+
+> 右侧面板坞（抽屉）的 L2 框用 fat 家族（`frame_fat_bar` + `frame_fat_panel`），**替代**了原先的 iron 家族；`frame_iron_*` 仍用于页面级 FrameImage，见 [panels.md](./panels.md) §3。
 
 > `hasHangers` 只影响旧版 fallback 模式的分数内嵌，像素模式下**无实际作用**，新版可忽略该参数。
 
@@ -579,7 +583,7 @@ export function play(name: keyof typeof files) {
 
 ```json
 {
-  "_comment": "Copy to background.json next to wardex.exe. type: image | model (video removed — no FFmpeg).",
+  "_comment": "Copy to background.json next to wardex.exe. type: image | video (mp4, muted loop) | model (deferred).",
   "type": "image",
   "source": "qrc:/qt/qml/WarDex/assets/background/LodolonFall.jpg"
 }
@@ -593,7 +597,7 @@ export function play(name: keyof typeof files) {
 | `qrc:...` | 内置资源 | 打包内路径 |
 | `file:...` / 绝对路径 | 本地文件 URL | Tauri asset protocol / `convertFileSrc` |
 | 相对路径 | 相对 exe 所在目录 | 相对 exe 所在目录（Rust 侧解析后转 URL） |
-| `type: "video"` | 已移除，强制回退 image + 默认图 | 同样回退 |
+| `type: "video"` | FFmpeg 播放器（旧版已移除） | `<video>` 静音循环自动播放（WebView2 原生 H.264，无需 FFmpeg） |
 
 ### 8.2 image 类型
 
@@ -614,7 +618,13 @@ export function play(name: keyof typeof files) {
 </style>
 ```
 
-### 8.3 model 类型（可后置）
+### 8.3 video 类型
+
+- `<video autoplay muted loop playsinline>` 全屏 `object-fit: cover`，叠层顺序与 image 相同。
+- 静音播放，无需用户手势即可 autoplay；WebView2 原生支持 H.264/AAC，推荐 mp4（H.264）。
+- 本地文件经 Rust 侧解析后走 asset protocol（Tauri v2 支持 range 请求，可流式播放）。
+
+### 8.4 model 类型（可后置）
 
 旧版 BgModel.qml（Qt Quick3D RuntimeLoader）的 Three.js + GLTFLoader 等价实现，**标注为可后置项**：
 
@@ -674,7 +684,7 @@ export function play(name: keyof typeof files) {
 - [ ] 三段式切换动画 770/510/770ms + ShellFrame 750ms 下落 + uiBusy 门控
 - [ ] 自定义光标（热点 5,0 + 回退关键字），弹窗/遮罩不掉系统箭头
 - [ ] 三事件音效：200ms 同名节流、播新停旧、预载、popUp 1280ms 音画时序
-- [ ] background.json 解析（image 默认 LodolonFall.jpg、gif/webp 动图、video 回退）
+- [ ] background.json 解析（image 默认 LodolonFall.jpg、gif/webp 动图、video `<video>` 静音循环）
 - [ ] （可后置）model 背景：Three.js GLTFLoader + 45s 环绕相机 + 双灯
 - [ ] KeyboardHighlight 高亮条 `mix-blend-mode: screen`（RecentProjects 0.55 透明度）
 - [ ] Banner / 模态遮罩 / 浮动条家族外观

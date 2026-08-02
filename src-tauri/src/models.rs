@@ -252,9 +252,12 @@ pub fn remove_kimi_effort_model(model_id: &str) -> Result<(), String> {
 // Bulk sync (配置页「刷新」): declare EVERY model of an agent's endpoint in
 // config.toml, scoped to that agent. The provider section is per-agent
 // ([providers.wardex-agent-<id>]) so apiKey/baseUrl of different agents never
-// mix; model sections that referenced this agent's provider but fell out of
-// the latest /models list are removed. Effort lines (support_efforts /
-// default_effort, written via the 默认思考强度 path) survive the rewrite.
+// mix. The sync FULL-CLEANS every wardex-* namespace first — all
+// [providers.wardex-*] sections and every model that referenced one are
+// removed, so the file ends up holding only this refresh's set (kimi's own
+// sections, managed:kimi-code / kimi-code/* models, stay untouched). Effort
+// lines (support_efforts / default_effort, written via the 默认思考强度
+// path) are captured before the clean and survive the rewrite.
 // ---------------------------------------------------------------------------
 
 /// Per-agent provider key (TOML bare-key safe: agent ids are alphanumeric).
@@ -327,8 +330,25 @@ fn model_sections_for_provider<'a>(text: &'a str, provider_key: &str) -> Vec<(St
     out
 }
 
-/// Rewrite an agent's whole namespace in config.toml from a fresh /models
-/// list. `max_context_k` is in K (1024 tokens); 0 falls back to 256K.
+/// Keys of every `[providers.wardex-*]` section in the file — all WarDex
+/// managed namespaces (per-agent `wardex-agent-<id>` and host-slug
+/// `wardex-<host>`). kimi's own providers never carry the prefix.
+fn wardex_provider_keys(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("[providers.wardex-") {
+            if let Some(key) = rest.strip_suffix(']') {
+                out.push(format!("wardex-{key}"));
+            }
+        }
+    }
+    out
+}
+
+/// Rewrite config.toml from a fresh /models list: full-clean every wardex-*
+/// namespace, then declare this agent's provider and models.
+/// `max_context_k` is in K (1024 tokens); 0 falls back to 256K.
 /// Returns the number of model aliases written.
 pub fn sync_agent_models(
     agent_id: &str,
@@ -345,26 +365,32 @@ pub fn sync_agent_models(
     let pkey = wardex_agent_provider_key(agent_id);
     let max_context = if max_context_k == 0 { 256 * 1024 } else { max_context_k * 1024 };
 
-    // Drop this agent's aliases that the endpoint no longer lists.
-    let keep: std::collections::HashSet<&str> = model_ids.iter().map(String::as_str).collect();
+    // Capture effort lines BEFORE the clean — they live in the sections that
+    // are about to be removed.
+    let efforts: Vec<String> = model_ids
+        .iter()
+        .map(|id| extract_effort_lines(&text, &format!("[models.\"{}\"]", id)))
+        .collect();
+
+    // Full clean: drop every wardex-* provider and every model section that
+    // referenced one; only this refresh's set is written back below.
     let mut text = text;
-    for (header, alias) in model_sections_for_provider(&text, &pkey) {
-        if !keep.contains(alias.as_str()) {
+    for key in wardex_provider_keys(&text) {
+        for (header, _alias) in model_sections_for_provider(&text, &key) {
             text = remove_section(&text, &header);
         }
+        text = remove_section(&text, &format!("[providers.{key}]"));
     }
 
     let pheader = format!("[providers.{pkey}]");
     text = upsert_section(&text, &pheader, &provider_block(&pkey, base_url, api_key));
 
-    for id in model_ids {
+    for (id, effort_lines) in model_ids.iter().zip(efforts.iter()) {
         let mheader = format!("[models.\"{}\"]", id);
-        // Preserve effort lines the user configured via 默认思考强度.
-        let efforts = extract_effort_lines(&text, &mheader);
         text = upsert_section(
             &text,
             &mheader,
-            &agent_model_block(id, &pkey, id, max_context, &efforts),
+            &agent_model_block(id, &pkey, id, max_context, effort_lines),
         );
     }
 
@@ -442,8 +468,40 @@ mod tests {
         assert_eq!(extract_effort_lines(text, "[models.\"qwen3.5-plus\"]"), "");
     }
 
+    /// Serializes the two tests that override the process-wide
+    /// KIMI_CODE_HOME env var (they would race otherwise).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn sync_agent_models_full_cleans_other_wardex_namespaces() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("wardex-sync-clean-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Safety: test-local override of the config path root.
+        unsafe { std::env::set_var("KIMI_CODE_HOME", &dir) };
+        let seed = "default_model = \"kimi-code/k3\"\n\n[providers.\"managed:kimi-code\"]\ntype = \"kimi\"\n\n[models.\"kimi-code/k3\"]\nprovider = \"managed:kimi-code\"\nmodel = \"k3\"\n\n[providers.wardex-opencode-ai]\ntype = \"openai\"\n\n[models.\"old-model\"]\nprovider = \"wardex-opencode-ai\"\nmodel = \"old-model\"\n\n[models.\"glm-5\"]\nprovider = \"wardex-agent-b2\"\nmodel = \"glm-5\"\ndefault_effort = \"max\"\n";
+        std::fs::write(dir.join("config.toml"), seed).unwrap();
+        let ids = vec!["glm-5".to_string()];
+        sync_agent_models("a1", "https://x.test/v1", "sk-k", &ids, 256).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        // kimi's own sections survive; every wardex-* namespace is gone
+        assert!(text.contains("[providers.\"managed:kimi-code\"]"));
+        assert!(text.contains("[models.\"kimi-code/k3\"]"));
+        assert!(!text.contains("wardex-opencode-ai"));
+        assert!(!text.contains("old-model"));
+        assert!(!text.contains("wardex-agent-b2"));
+        // only this refresh's set is written back…
+        assert!(text.contains("[providers.wardex-agent-a1]"));
+        assert!(text.contains("[models.\"glm-5\"]"));
+        // …with effort lines captured before the clean preserved
+        assert!(text.contains("default_effort = \"max\""));
+        unsafe { std::env::remove_var("KIMI_CODE_HOME") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn sync_agent_models_writes_namespace_and_prunes() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("wardex-sync-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Safety: test-local override of the config path root.

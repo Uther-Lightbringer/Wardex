@@ -9,9 +9,14 @@
 // scrollbar-width: none).
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 
-const props = defineProps<{
-  target: HTMLElement | null;
-}>();
+const props = withDefaults(
+  defineProps<{
+    target: HTMLElement | null;
+    /** Uniform shrink factor (1 = native 22px WC3 art). Layout width scales too. */
+    scale?: number;
+  }>(),
+  { scale: 1 },
+);
 
 const scrollTop = ref(0);
 const clientH = ref(0);
@@ -48,17 +53,24 @@ function refresh(): void {
 }
 
 function onScroll(): void {
-  if (props.target) scrollTop.value = props.target.scrollTop;
+  // Full refresh, not just scrollTop: programmatic fills (paste path sets
+  // text via v-model, no input event) still auto-scroll the textarea, and
+  // this is the only signal that scrollHeight changed.
+  refresh();
 }
 
 watch(
   () => props.target,
   (t, old) => {
     old?.removeEventListener('scroll', onScroll);
+    old?.removeEventListener('input', refresh);
     ro?.disconnect();
     mo?.disconnect();
     if (t) {
       t.addEventListener('scroll', onScroll, { passive: true });
+      // textarea typing fires no DOM mutations — MutationObserver alone
+      // never sees scrollHeight grow, so the bar stayed hidden (off).
+      t.addEventListener('input', refresh, { passive: true });
       ro = new ResizeObserver(refresh);
       ro.observe(t);
       mo = new MutationObserver(refresh);
@@ -79,6 +91,7 @@ watch(barEl, (el) => {
 
 onBeforeUnmount(() => {
   props.target?.removeEventListener('scroll', onScroll);
+  props.target?.removeEventListener('input', refresh);
   ro?.disconnect();
   mo?.disconnect();
 });
@@ -108,41 +121,56 @@ function onThumbMove(e: PointerEvent): void {
   const usable = trackH.value - thumbH.value;
   if (usable <= 0) return;
   const range = scrollH.value - clientH.value;
-  props.target.scrollTop = dragStartScroll + ((e.clientY - dragStartY) / usable) * range;
+  // clientY is screen px; thumb coordinates live in the unscaled inner space.
+  props.target.scrollTop = dragStartScroll + ((e.clientY - dragStartY) / props.scale / usable) * range;
 }
 </script>
 
 <template>
-  <div ref="barEl" class="war-scroll" :class="{ off: !scrollable }">
-    <img
-      class="war-scroll__arrow war-scroll__arrow--up"
-      src="/assets/ui/scroll/scroll_up.png"
-      draggable="false"
-      @click="step(-1)"
-    />
-    <div class="war-scroll__track">
-      <div
-        v-if="scrollable"
-        class="war-scroll__thumb"
-        :style="{ height: thumbH + 'px', top: thumbY + 'px' }"
-        @pointerdown="onThumbDown"
-        @pointermove="onThumbMove"
-      ></div>
+  <div class="war-scroll" :class="{ off: !scrollable }" :style="{ width: 22 * scale + 'px' }">
+    <div ref="barEl" class="war-scroll__inner" :style="{ transform: `scale(${scale})` }">
+      <img
+        class="war-scroll__arrow war-scroll__arrow--up"
+        src="/assets/ui/scroll/scroll_up.png"
+        draggable="false"
+        @click="step(-1)"
+      />
+      <div class="war-scroll__track">
+        <div
+          v-if="scrollable"
+          class="war-scroll__thumb"
+          :style="{ height: thumbH + 'px', top: thumbY + 'px' }"
+          @pointerdown="onThumbDown"
+          @pointermove="onThumbMove"
+        ></div>
+      </div>
+      <img
+        class="war-scroll__arrow war-scroll__arrow--down"
+        src="/assets/ui/scroll/scroll_down.png"
+        draggable="false"
+        @click="step(1)"
+      />
     </div>
-    <img
-      class="war-scroll__arrow war-scroll__arrow--down"
-      src="/assets/ui/scroll/scroll_down.png"
-      draggable="false"
-      @click="step(1)"
-    />
   </div>
 </template>
 
 <style scoped>
 .war-scroll {
   position: relative;
-  width: 22px;
   height: 100%;
+  /* width set inline: 22 * scale */
+}
+
+/* Inner layer keeps the native 22px coordinate space (thumb math, clientHeight
+   all unaffected by the transform); the outer box takes the shrunken width. */
+.war-scroll__inner {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 22px;
+  /* scaled height must still fill the outer box: 100% after transform */
+  height: calc(100% / v-bind(scale));
+  transform-origin: top left;
 }
 
 .war-scroll__arrow {

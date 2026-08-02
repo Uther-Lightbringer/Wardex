@@ -154,8 +154,8 @@ pub fn mask_key(key: &str) -> String {
 }
 
 /// Single funnel so the store never grows `if provider == …` (red line C3).
-/// Delegates to the provider registry's chatCapable flag — all four
-/// providers (kimi/claude/codex/custom) are chat-capable.
+/// Delegates to the provider registry's chatCapable flag — all five
+/// providers (kimi/claude/codex/opencode/custom) are chat-capable.
 pub fn provider_supports_chat(provider: &str) -> bool {
     crate::provider::chat_capable(provider)
 }

@@ -27,11 +27,15 @@ function openDetail(s: Subagent): void {
   dlgOpen.value = true;
 }
 
+// Background CLI tasks (kind === 'task') live in the dock's TasksPanel —
+// the floating panel only shows real sub-agents.
+const agents = computed<Subagent[]>(() => chat.subagents.filter((s) => s.kind !== 'task'));
+
 const activeCount = computed(
-  () => chat.subagents.filter((s) => s.status === 'in_progress').length,
+  () => agents.value.filter((s) => s.status === 'in_progress').length,
 );
 const hasLive = computed(() =>
-  chat.subagents.some((s) => s.status === 'pending' || s.status === 'in_progress'),
+  agents.value.some((s) => s.status === 'pending' || s.status === 'in_progress'),
 );
 
 // 1s heartbeat — only while visible with live entries.
@@ -104,14 +108,14 @@ function isStuck(s: Subagent): boolean {
 </script>
 
 <template>
-  <div v-if="chat.subagents.length > 0" class="subagent" :class="{ collapsed: !open }">
+  <div v-if="agents.length > 0" class="subagent" :class="{ collapsed: !open }">
     <div class="subagent__head" @click="open = !open">
       <span :style="{ fontSize: prefs.fs(12) + 'px' }">
-        {{ open ? '▼' : '▶' }} 子 Agent (执行中 {{ activeCount }} / 共 {{ chat.subagents.length }})
+        {{ open ? '▼' : '▶' }} 子 Agent (执行中 {{ activeCount }} / 共 {{ agents.length }})
       </span>
     </div>
     <div v-if="open" class="subagent__list">
-      <div v-for="s in chat.subagents" :key="s.id" class="subagent__row" title="点击查看任务书与报告" @click="openDetail(s)">
+      <div v-for="s in agents" :key="s.id" class="subagent__row" title="点击查看任务书与报告" @click="openDetail(s)">
         <span class="subagent__dot" :class="[dotClass(s), { breath: breathing(s) }]"></span>
         <span
           class="subagent__title"

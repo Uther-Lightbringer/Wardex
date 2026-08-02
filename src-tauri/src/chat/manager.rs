@@ -383,6 +383,16 @@ impl ChatManager {
             .and_then(|e| lock_ok(&e.snap).perm_pending.clone())
     }
 
+    /// Latest sub-agent/task list for a session (Null when the runtime is
+    /// gone). Read from the snap — no round-trip into the actor needed; the
+    /// chat store re-pulls it after a session switch.
+    pub fn get_subagents(&self, session_id: &str) -> Value {
+        lock_ok(&self.registry)
+            .get(session_id)
+            .map(|e| json!(lock_ok(&e.snap).subagents))
+            .unwrap_or(Value::Null)
+    }
+
     pub async fn guide_at(&self, session_id: &str, index: usize) -> Result<(), ChatError> {
         self.send(session_id, RuntimeCmd::GuideAt(index)).await
     }
@@ -465,6 +475,17 @@ impl ChatManager {
                 value: value.to_string(),
             })
             .await;
+        Ok(())
+    }
+
+    /// Re-push the cached configOptions for a re-activated session: the
+    /// frontend clears its copy on every switch, and a live runtime would
+    /// otherwise stay silent until the next picker-affecting event.
+    pub async fn resend_config_options(&self, session_id: &str) -> Result<(), ChatError> {
+        let Some(tx) = self.entry_tx(session_id) else {
+            return Err(ChatError::NoSession);
+        };
+        let _ = tx.send(RuntimeCmd::ResendConfigOptions).await;
         Ok(())
     }
 

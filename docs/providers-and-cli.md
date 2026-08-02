@@ -50,24 +50,24 @@ pub struct ProviderSpec {
 }
 ```
 
-### 1.1 四个内置 provider 的逐项值
+### 1.1 五个内置 provider 的逐项值
 
 参照：`ProviderRegistry.cpp:3-85`。
 
-| 字段 | kimi | claude | codex | custom |
-|---|---|---|---|---|
-| `id` | `kimi` | `claude` | `codex` | `custom` |
-| `displayName` | `Kimi CLI` | `Claude Code` | `Codex CLI` | `自定义 (ACP)` |
-| `defaultCommand` | `kimi` | `claude-code-acp` | `codex-acp` | （空） |
-| `acpArgs` | `["acp"]` | `[]`（adapter 直接讲 ACP，无子命令） | `[]` | `[]` |
-| `apiKeyEnvs` | `["KIMI_API_KEY", "OPENAI_API_KEY"]` | `["ANTHROPIC_API_KEY"]` | `["OPENAI_API_KEY"]` | `["OPENAI_API_KEY"]` |
-| `baseUrlEnvs` | `["KIMI_BASE_URL", "OPENAI_BASE_URL"]` | `["ANTHROPIC_BASE_URL"]` | `["OPENAI_BASE_URL"]` | `["OPENAI_BASE_URL"]` |
-| `clearEnvs` | `[]` | `["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]` | `[]` | `[]` |
-| `bearerTokenEnv` | （空） | `ANTHROPIC_AUTH_TOKEN` | （空） | （空） |
-| `officialKeyPrefix` | （空） | `sk-ant-` | （空） | （空） |
-| `modeMap` | `{}`（恒等） | `{auto: acceptEdits, yolo: bypassPermissions}` | `{}` | `{}` |
-| `installHint` | `安装见 https://www.kimi.com/code` | `npm i -g @zed-industries/claude-code-acp；API Key 留空则使用 claude /login 的本地凭据` | `npm i -g @zed-industries/codex-acp；API Key 留空则使用 codex login 的本地凭据` | `填写 CLI 路径与进入 ACP 模式的参数（如 acp 或 --experimental-acp）` |
-| `baseUrlHint` | `OpenAI 兼容端点，通常以 /v1 结尾，如 https://api.kimi.com/coding/v1；留空使用本机登录态` | `Anthropic 格式根地址（走 /v1/messages 协议），如 https://api.anthropic.com 或中转的 Anthropic 兼容地址，结尾不要带 /v1/messages` | `OpenAI 兼容端点，以 /v1 结尾，如 https://api.openai.com/v1；仅支持旧式 chat 接口的中转需在 ~/.codex/config.toml 配 wire_api="chat"` | `按该 CLI 文档要求的根地址填写（注入 OPENAI_BASE_URL）` |
+| 字段 | kimi | claude | codex | opencode | custom |
+|---|---|---|---|---|---|
+| `id` | `kimi` | `claude` | `codex` | `opencode` | `custom` |
+| `displayName` | `Kimi CLI` | `Claude Code` | `Codex CLI` | `OpenCode` | `自定义 (ACP)` |
+| `defaultCommand` | `kimi` | `claude-code-acp` | `codex-acp` | `opencode` | （空） |
+| `acpArgs` | `["acp"]` | `[]`（adapter 直接讲 ACP，无子命令） | `[]` | `["acp"]`（原生子命令，无 adapter） | `[]` |
+| `apiKeyEnvs` | `["KIMI_API_KEY", "OPENAI_API_KEY"]` | `["ANTHROPIC_API_KEY"]` | `["OPENAI_API_KEY"]` | `["OPENCODE_API_KEY"]` | `["OPENAI_API_KEY"]` |
+| `baseUrlEnvs` | `["KIMI_BASE_URL", "OPENAI_BASE_URL"]` | `["ANTHROPIC_BASE_URL"]` | `["OPENAI_BASE_URL"]` | `[]`（无 base-url 环境变量约定） | `["OPENAI_BASE_URL"]` |
+| `clearEnvs` | `[]` | `["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"]` | `[]` | `[]` | `[]` |
+| `bearerTokenEnv` | （空） | `ANTHROPIC_AUTH_TOKEN` | （空） | （空） | （空） |
+| `officialKeyPrefix` | （空） | `sk-ant-` | （空） | （空） | （空） |
+| `modeMap` | `{}`（恒等） | `{auto: acceptEdits, yolo: bypassPermissions}` | `{}` | `{}` | `{}` |
+| `installHint` | `安装见 https://www.kimi.com/code` | `npm i -g @zed-industries/claude-code-acp；API Key 留空则使用 claude /login 的本地凭据` | `npm i -g @zed-industries/codex-acp；API Key 留空则使用 codex login 的本地凭据` | `npm i -g opencode-ai；API Key 留空则使用 opencode auth login 的本地凭据` | `填写 CLI 路径与进入 ACP 模式的参数（如 acp 或 --experimental-acp）` |
+| `baseUrlHint` | `OpenAI 兼容端点，通常以 /v1 结尾，如 https://api.kimi.com/coding/v1；留空使用本机登录态` | `Anthropic 格式根地址（走 /v1/messages 协议），如 https://api.anthropic.com 或中转的 Anthropic 兼容地址，结尾不要带 /v1/messages` | `OpenAI 兼容端点，以 /v1 结尾，如 https://api.openai.com/v1；仅支持旧式 chat 接口的中转需在 ~/.codex/config.toml 配 wire_api="chat"` | `此栏不注入环境变量，留空即可；自定义端点请在 opencode.json 配置 provider` | `按该 CLI 文档要求的根地址填写（注入 OPENAI_BASE_URL）` |
 
 补充说明：
 
@@ -82,6 +82,10 @@ pub struct ProviderSpec {
 - **custom 是逃生舱**（`ProviderRegistry.cpp:67-80`）：command 由用户的 `cliPath` 提供，
   args 由用户的 `extraArgs` 提供（此时 extraArgs 就是全部参数），无需改代码即可接任何
   讲 ACP 的 CLI。
+- **opencode 原生讲 ACP**（`opencode acp` 子命令，无 adapter）：`OPENCODE_API_KEY` 同时
+  覆盖官方 Zen（`https://opencode.ai/zen/v1`）与 `opencode-go`（`zen/go/v1`）两个内置
+  provider；opencode 没有 base-url 环境变量约定，自定义端点要写到 opencode.json 的
+  provider 配置里，因此 `baseUrlEnvs` 为空、agent 的 baseUrl 栏对它不生效。
 
 ### 1.2 claude 的 ANTHROPIC_AUTH_TOKEN 中转 key 特例
 
@@ -107,7 +111,7 @@ if apiKey 非空:
 参照：`ProviderRegistry.cpp:87-135`。
 
 - `spec(id)`：id `trim + toLower` 后精确匹配，找不到返回 None。
-- `ids()`：四个 id 列表（注册顺序：kimi, claude, codex, custom）。
+- `ids()`：五个 id 列表（注册顺序：kimi, claude, codex, opencode, custom）。
 - `chatCapable(id)`：spec 存在且 `chat_capable`。
 - `mapMode(id, mode)`：`modeMap.get(mode).unwrap_or(mode)`——**未映射的 mode 原样透传**
   （恒等），未知 provider 也恒等（`ProviderRegistry.cpp:113-117`）。
@@ -126,7 +130,7 @@ if apiKey 非空:
 pub struct Agent {
     pub id: String,           // UUID 不带花括号（QUuid::WithoutBraces 格式）
     pub name: String,
-    pub provider: String,     // kimi | claude | codex | custom
+    pub provider: String,     // kimi | claude | codex | opencode | custom
     pub is_default: bool,
     pub enabled: bool,        // 默认 true
     pub model: String,        // 如 "moonshot-v1-auto"；当前仅展示/记录用
@@ -393,7 +397,7 @@ WarDex 通过本机 Kimi CLI 与模型通信。
 
 Provider 注册表（`src-tauri/src/providers.rs`）：
 
-- [ ] ProviderSpec 全部 13 个字段与四个 provider 的逐项值同 1.1 表一致（`ProviderRegistry.cpp:3-85`）
+- [ ] ProviderSpec 全部 13 个字段与五个 provider 的逐项值同 1.1 表一致（`ProviderRegistry.cpp:3-85`）
 - [ ] claude `clearEnvs` 三变量经"null = 删除"注入（`ProviderRegistry.cpp:34-38`）
 - [ ] ANTHROPIC_AUTH_TOKEN 特例：`sk-ant-` 前缀官方 key 不注入 bearerTokenEnv（`ChatController.cpp:849-856`）
 - [ ] `mapMode` 未映射恒等透传；`spec(id)` trim+toLower 匹配（`ProviderRegistry.cpp:89-117`）

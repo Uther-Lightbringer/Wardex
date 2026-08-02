@@ -31,6 +31,21 @@ const inputEl = ref<HTMLTextAreaElement | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const composing = ref(false);
 
+// ---- per-session draft (text + attachments), in-memory ----
+// Switching sessions saves the outgoing draft under the old sessionId and
+// restores the target's; deleted/cleared sessions simply have no entry.
+watch(
+  () => chat.sessionId,
+  (id, prev) => {
+    if (prev && prev !== id) chat.saveDraft(prev, text.value, chat.attachments);
+    const d = id ? chat.drafts[id] : undefined;
+    text.value = d?.text ?? '';
+    chat.attachments = [...(d?.attachments ?? [])];
+    pickerOpen.value = false;
+    slashOpen.value = false;
+  },
+);
+
 // ---- popup anchoring ----
 // Popups (slash / @ pickers) float ABOVE the composer, but the composer lives
 // inside WarFrame's overflow:hidden content layer — position:absolute there
@@ -526,6 +541,7 @@ async function send(): Promise<void> {
   if (ok) {
     text.value = '';
     chat.clearAttachments();
+    chat.saveDraft(chat.sessionId, '', []); // sent → drop any stored draft
     pickerOpen.value = false;
   }
   inputEl.value?.focus();
@@ -630,7 +646,7 @@ function onExpandConfirm(v: string): void {
         @click="expandOpen = true"
         >⛶</span
       >
-      <WarScrollBar :target="inputEl" />
+      <WarScrollBar :target="inputEl" :scale="0.7" />
     </div>
 
     <div class="composer__side">
@@ -796,7 +812,7 @@ function onExpandConfirm(v: string): void {
 .composer__expand {
   position: absolute;
   top: 4px;
-  right: 30px; /* left of the WC3 scrollbar */
+  right: 22px; /* left of the (scaled-down) WC3 scrollbar */
   z-index: 6;
   color: var(--war-gold);
   user-select: none;

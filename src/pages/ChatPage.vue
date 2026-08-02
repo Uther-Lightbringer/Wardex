@@ -23,7 +23,6 @@ import { usePrefsStore } from '../stores/prefs';
 import { useChatStore } from '../stores/chat';
 import { useSessionsStore } from '../stores/sessions';
 import { useAgentsStore } from '../stores/agents';
-import { cmd } from '../lib/tauri';
 import { useElementSize } from '../lib/useElementSize';
 import { formatTokens } from '../lib/format';
 
@@ -132,24 +131,13 @@ const curAgentId = computed(
 );
 const curAgent = computed(() => agentsStore.byId(curAgentId.value));
 
-const endpointModels = ref<string[]>([]);
-let modelFetchGen = 0;
+const endpointModels = computed(() => agentsStore.modelsByAgent[curAgentId.value] ?? []);
+// Cache-first: the dropdown renders the cached list instantly; the store
+// revalidates in the background (single-flight, failure keeps the cache).
 watch(
   () => [curAgentId.value, curAgent.value?.baseUrl ?? ''] as const,
-  ([, baseUrl]) => {
-    const gen = ++modelFetchGen;
-    if (!baseUrl.trim()) {
-      endpointModels.value = [];
-      return;
-    }
-    void (async () => {
-      const ids = await cmd<string[]>(
-        'fetch_models',
-        { baseUrl: baseUrl.trim(), apiKey: curAgent.value?.apiKey ?? '' },
-        [],
-      );
-      if (gen === modelFetchGen) endpointModels.value = ids;
-    })();
+  ([id]) => {
+    if (id) void agentsStore.ensureEndpointModels(id);
   },
   { immediate: true },
 );
@@ -360,7 +348,9 @@ const sessionUsage = computed(() => {
 <style scoped>
 .chat {
   display: grid;
-  grid-template-columns: 188px 72fr 28fr;
+  /* right column is content-sized so the dock's width animation (44px rail
+     ↔ 44px+drawer) pushes the chat area narrower instead of overlaying it */
+  grid-template-columns: 188px 1fr auto;
   grid-template-rows: 1fr max(124px, 18.5%);
   gap: 8px;
   height: 100%;
@@ -398,11 +388,22 @@ const sessionUsage = computed(() => {
   grid-row: 1;
   grid-column: 3;
   min-height: 0;
+  /* shrink to the WarDock's animated width, hugging the right edge */
+  justify-self: end;
+  /* clear the permanent right window rail (PageShell embed=34 tucks the
+     band's right 34px under the z40 edge frame) — the drawer buttons must
+     not sit in that covered zone */
+  margin-right: 34px;
 }
 
 .chat__actions {
   grid-row: 2;
   grid-column: 3;
+  /* fixed width: WarFrame content is absolutely positioned (no intrinsic
+     size), so in the `auto` column it would collapse to the dock's 44px
+     rail width when the drawer is closed */
+  width: 300px;
+  justify-self: end;
 }
 
 .chat__main-col {

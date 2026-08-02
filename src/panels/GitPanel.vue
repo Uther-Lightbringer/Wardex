@@ -2,9 +2,9 @@
 // Version-control panel (features/chat.md §6.3, panels.md §2): branch badge
 // read from .git/HEAD (hidden entirely outside git repos), a working-tree
 // 更改 list (git_status) and a read-only commit list (git_log, 200-entry
-// cap). 更改 rows open an inline read-only diff (git_diff_file); commit rows
-// open the GitLab-style GitCommitDialog (git_diff_commit — file list + per-
-// file diff, R4 64KB-capped with a truncated marker). No stage/unstage.
+// cap). Both 更改 rows (git_diff_file) and commit rows (git_diff_commit)
+// open the GitLab-style GitCommitDialog — file list + per-file diff, R4
+// 64KB-capped with a truncated marker. No stage/unstage.
 // refreshOn: turnEnd | sessionSwitch | expand | manual — the agent may have
 // committed or switched branches during the turn.
 import { computed, onMounted, ref, watch } from 'vue';
@@ -15,9 +15,9 @@ import GitCommitDialog from './GitCommitDialog.vue';
 import WarScrollBar from '../components/war/WarScrollBar.vue';
 import type { GitCommit, GitDiff, GitStatusEntry } from './git-types';
 
-/** What the open diff view shows; re-fetched on refresh (generation-guarded).
- * kind 'file' renders inline (更改 tab); kind 'commit' opens the
- * GitLab-style GitCommitDialog. */
+/** What the open dialog shows; re-fetched on refresh (generation-guarded).
+ * kind 'file' is a 更改 row (git_diff_file); kind 'commit' a history row
+ * (git_diff_commit). Both render in the GitLab-style GitCommitDialog. */
 type DiffSpec =
   | { kind: 'file'; path: string; mode: 'worktree' | 'staged' | 'untracked'; label: string }
   | { kind: 'commit'; hash: string; subject: string; meta: string };
@@ -43,7 +43,6 @@ let generation = 0;
 
 // ---- scroll targets (WC3 WarScrollBar) ----
 const listEl = ref<HTMLElement | null>(null);
-const diffEl = ref<HTMLElement | null>(null);
 
 const workDir = computed(() => chat.meta?.workDir || chat.meta?.projectDir || chat.projectDir);
 
@@ -52,6 +51,32 @@ const workDir = computed(() => chat.meta?.workDir || chat.meta?.projectDir || ch
 const noRepoText = computed(() =>
   chat.meta?.projectDir ? '（非 Git 目录）' : '（非 Git 目录——从主菜单打开项目后可用）',
 );
+
+/** Dialog header text: commits show subject + meta; 更改 rows show the path
+ * plus a mode label. */
+const dialogSubject = computed(() => {
+  const s = diffSpec.value;
+  if (!s) return '';
+  return s.kind === 'commit' ? s.subject : s.label;
+});
+const dialogMeta = computed(() => {
+  const s = diffSpec.value;
+  if (!s) return '';
+  if (s.kind === 'commit') return s.meta;
+  return {
+    worktree: '工作区更改（vs HEAD）',
+    staged: '已暂存的更改',
+    untracked: '未跟踪的新文件',
+  }[s.mode];
+});
+
+/** Split a repo-relative path into directory prefix + basename so the narrow
+ * 更改 list can keep the file name itself fully visible (ellipsis eats the
+ * directory part first). */
+function splitPath(p: string): { dir: string; name: string } {
+  const i = p.lastIndexOf('/');
+  return i < 0 ? { dir: '', name: p } : { dir: p.slice(0, i + 1), name: p.slice(i + 1) };
+}
 
 /** Porcelain columns → which diff command mode shows this entry's changes. */
 function diffMode(e: GitStatusEntry): 'worktree' | 'staged' | 'untracked' {
@@ -156,77 +181,28 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
         </span>
       </div>
 
-      <!-- diff view (replaces the lists while open; file diffs only — commits
-           open the GitCommitDialog instead) -->
-      <template v-if="diffSpec && diffSpec.kind === 'file'">
-        <div class="gitp__diff-head">
-          <span class="gitp__back" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="closeDiff">← 返回</span>
-          <span class="gitp__diff-title" :style="{ fontSize: prefs.fs(11) + 'px' }" :title="diffSpec.label">
-            {{ diffSpec.label }}
-          </span>
-        </div>
-        <div class="gitp__diff-wrap">
-          <div ref="diffEl" class="gitp__diff">
-          <div v-if="diffError" class="gitp__error" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ diffError }}</div>
-          <div v-else-if="diffLoading" class="gitp__empty" :style="{ fontSize: prefs.fs(11) + 'px' }">加载中…</div>
-          <template v-else-if="diff">
-            <div v-if="diff.files.length === 0" class="gitp__empty" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              （无差异）
-            </div>
-            <div v-for="f in diff.files" :key="f.path" class="gitp__file">
-              <div class="gitp__file-name" :style="{ fontSize: prefs.fs(11) + 'px' }" :title="f.path">
-                {{ f.path }}<template v-if="f.binary">（二进制）</template>
-              </div>
-              <div
-                v-for="(l, i) in f.lines"
-                :key="i"
-                class="gitp__line"
-                :class="`gitp__line--${l.kind}`"
-                :style="{ fontSize: prefs.fs(11) + 'px' }"
-              >
-                <template v-if="l.kind === 'add' || l.kind === 'del' || l.kind === 'ctx'">
-                  <span class="gitp__ln">{{ l.old_lineno ?? '' }}</span>
-                  <span class="gitp__ln">{{ l.new_lineno ?? '' }}</span>
-                  <span class="gitp__sign">{{ l.kind === 'add' ? '+' : l.kind === 'del' ? '-' : ' ' }}</span>
-                  <span class="gitp__code">{{ l.text }}</span>
-                </template>
-                <template v-else>
-                  <span class="gitp__code">{{ l.text }}</span>
-                </template>
-              </div>
-            </div>
-            <div v-if="diff.truncated" class="gitp__trunc" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              …（内容超过 64KB，已截断）
-            </div>
-          </template>
-          </div>
-          <WarScrollBar :target="diffEl" />
-        </div>
-      </template>
-
-      <!-- changes / history lists -->
-      <template v-else>
-        <div class="gitp__tabs">
-          <span
-            class="gitp__tab"
-            :class="{ active: tab === 'changes' }"
-            :style="{ fontSize: prefs.fs(11) + 'px' }"
-            @click="tab = 'changes'"
-          >
-            更改<template v-if="changes.length">（{{ changes.length }}）</template>
-          </span>
-          <span
-            class="gitp__tab"
-            :class="{ active: tab === 'history' }"
-            :style="{ fontSize: prefs.fs(11) + 'px' }"
-            @click="tab = 'history'"
-          >
-            历史
-          </span>
-        </div>
-        <div class="gitp__list-wrap">
-          <div ref="listEl" class="gitp__list">
-            <div v-if="error" class="gitp__error" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ error }}</div>
+      <!-- changes / history lists (rows open the GitCommitDialog) -->
+      <div class="gitp__tabs">
+        <span
+          class="gitp__tab"
+          :class="{ active: tab === 'changes' }"
+          :style="{ fontSize: prefs.fs(11) + 'px' }"
+          @click="tab = 'changes'"
+        >
+          更改<template v-if="changes.length">（{{ changes.length }}）</template>
+        </span>
+        <span
+          class="gitp__tab"
+          :class="{ active: tab === 'history' }"
+          :style="{ fontSize: prefs.fs(11) + 'px' }"
+          @click="tab = 'history'"
+        >
+          历史
+        </span>
+      </div>
+      <div class="gitp__list-wrap">
+        <div ref="listEl" class="gitp__list">
+          <div v-if="error" class="gitp__error" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ error }}</div>
           <template v-else-if="tab === 'changes'">
             <div v-if="!loading && changes.length === 0" class="gitp__empty" :style="{ fontSize: prefs.fs(11) + 'px' }">
               工作区干净
@@ -241,7 +217,10 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
                 {{ statusBadge(c) }}
               </span>
               <span class="gitp__path" :style="{ fontSize: prefs.fs(12) + 'px' }" :title="c.orig_path ? `${c.orig_path} → ${c.path}` : c.path">
-                {{ c.orig_path ? `${c.orig_path} → ${c.path}` : c.path }}
+                <span class="gitp__path-name">{{ splitPath(c.path).name }}</span><span
+                  v-if="splitPath(c.path).dir"
+                  class="gitp__path-dir"
+                >{{ splitPath(c.path).dir }}</span>
               </span>
               <span v-if="c.index !== ' ' && c.index !== '?'" class="gitp__staged" :style="{ fontSize: prefs.fs(10) + 'px' }">
                 已暂存
@@ -266,18 +245,18 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
               </div>
             </div>
           </template>
-          </div>
-          <WarScrollBar :target="listEl" />
         </div>
-      </template>
+        <WarScrollBar :target="listEl" />
+      </div>
     </template>
     <div v-else class="gitp__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">{{ noRepoText }}</div>
 
-    <!-- commit detail dialog (GitLab-style file list + per-file diff) -->
+    <!-- diff detail dialog (GitLab-style file list + per-file diff; shared by
+         更改 rows and commit rows) -->
     <GitCommitDialog
-      :open="diffSpec?.kind === 'commit'"
-      :subject="diffSpec?.kind === 'commit' ? diffSpec.subject : ''"
-      :meta="diffSpec?.kind === 'commit' ? diffSpec.meta : ''"
+      :open="diffSpec !== null"
+      :subject="dialogSubject"
+      :meta="dialogMeta"
       :diff="diff"
       :loading="diffLoading"
       :error="diffError"
@@ -368,7 +347,7 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
 }
 
 .gitp__row:hover .gitp__subject,
-.gitp__change-row:hover .gitp__path {
+.gitp__change-row:hover .gitp__path-name {
   color: var(--war-text);
 }
 
@@ -394,10 +373,26 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
 .gitp__path {
   flex: 1;
   min-width: 0;
-  color: var(--war-text-dim);
+  display: flex;
+  align-items: baseline;
   white-space: nowrap;
   overflow: hidden;
+  color: var(--war-text-dim);
+}
+
+/* Basename stays fully visible; the directory prefix shrinks away first
+   (ellipsis) so narrow panels never clip the name itself. */
+.gitp__path-name {
+  flex: none;
+}
+
+.gitp__path-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: 4px;
+  overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--war-text-faint);
 }
 
 .gitp__staged {
@@ -425,116 +420,5 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
   color: var(--war-text-faint);
   text-align: center;
   padding: 8px 0;
-}
-
-/* ---- diff view ---- */
-
-.gitp__diff-head {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.gitp__back {
-  flex: none;
-  color: var(--war-gold);
-  user-select: none;
-}
-
-.gitp__back:hover {
-  color: var(--war-gold-bright);
-}
-
-.gitp__diff-title {
-  flex: 1;
-  min-width: 0;
-  color: var(--war-text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.gitp__diff-wrap {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
-.gitp__diff {
-  flex: 1;
-  min-width: 0;
-  overflow: auto;
-  scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
-}
-
-.gitp__file {
-  margin-bottom: 6px;
-}
-
-.gitp__file-name {
-  color: var(--war-user-blue);
-  padding: 2px 0;
-  position: sticky;
-  top: 0;
-  background: var(--war-glass);
-}
-
-.gitp__line {
-  display: flex;
-  white-space: pre;
-  font-family: Consolas, 'Cascadia Mono', monospace;
-}
-
-.gitp__ln {
-  flex: none;
-  width: 3ch;
-  min-width: 3ch;
-  margin-right: 4px;
-  text-align: right;
-  color: var(--war-text-faint);
-  user-select: none;
-}
-
-.gitp__sign {
-  flex: none;
-  width: 1ch;
-  user-select: none;
-}
-
-.gitp__code {
-  overflow-wrap: normal;
-}
-
-.gitp__line--add {
-  color: #7ec87e; /* diff-add green */
-  background: #7ec87e14;
-}
-
-.gitp__line--del {
-  color: var(--war-error);
-  background: #d0807014;
-}
-
-.gitp__line--ctx {
-  color: var(--war-text-muted);
-}
-
-.gitp__line--hunk {
-  color: var(--war-user-blue);
-}
-
-.gitp__line--meta {
-  color: var(--war-text-faint);
-}
-
-.gitp__line--eof {
-  color: var(--war-text-faint);
-}
-
-.gitp__trunc {
-  color: var(--war-gold);
-  text-align: center;
-  padding: 4px 0;
 }
 </style>

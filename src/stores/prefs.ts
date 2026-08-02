@@ -5,9 +5,11 @@
 import { defineStore } from 'pinia';
 import { cmd, isTauri } from '../lib/tauri';
 
+// Drawer-dock layout memory: per-panel width + order. Open state is
+// transient (never persisted). Legacy entries may carry stale `open` /
+// `height` keys — they are simply ignored (no migration).
 export interface PanelLayoutEntry {
-  open?: boolean;
-  height?: number;
+  width?: number;
   order?: number;
 }
 

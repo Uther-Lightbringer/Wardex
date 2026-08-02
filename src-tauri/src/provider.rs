@@ -1,8 +1,8 @@
 // Provider registry: a pure data table (design-principles.md red line C3).
-// Every kimi/claude/codex/custom difference — acpArgs, env names, clearEnvs,
-// modeMap, the claude relay-key special case — lives ONLY here; the protocol
-// and chat layers never branch on `provider == ...`. Supporting a new CLI =
-// adding one entry to REGISTRY.
+// Every kimi/claude/codex/opencode/custom difference — acpArgs, env names,
+// clearEnvs, modeMap, the claude relay-key special case — lives ONLY here;
+// the protocol and chat layers never branch on `provider == ...`. Supporting
+// a new CLI = adding one entry to REGISTRY.
 //
 // Ported from src/ProviderRegistry.h/.cpp of the C++/Qt codebase; the
 // authoritative spec is docs/providers-and-cli.md §1.
@@ -48,7 +48,7 @@ pub struct ProviderSpec {
     pub chat_capable: bool,
 }
 
-/// Registration order is the UI list order: kimi, claude, codex, custom.
+/// Registration order is the UI list order: kimi, claude, codex, opencode, custom.
 pub static REGISTRY: &[ProviderSpec] = &[
     ProviderSpec {
         id: "kimi",
@@ -101,6 +101,26 @@ pub static REGISTRY: &[ProviderSpec] = &[
         base_url_hint: "OpenAI 兼容端点，以 /v1 结尾，如 https://api.openai.com/v1；仅支持旧式 chat 接口的中转需在 ~/.codex/config.toml 配 wire_api=\"chat\"",
         mode_map: &[],
         install_hint: "npm i -g @zed-industries/codex-acp；API Key 留空则使用 codex login 的本地凭据",
+        chat_capable: true,
+    },
+    // opencode speaks ACP natively via its `acp` subcommand — no adapter.
+    // Credentials fall back to `opencode auth login` (auth.json) when no key
+    // is injected; OPENCODE_API_KEY covers both Zen providers (zen/v1 and
+    // zen/go/v1). There is no base-URL env convention, so baseUrlEnvs is
+    // empty — custom endpoints belong in opencode.json.
+    ProviderSpec {
+        id: "opencode",
+        display_name: "OpenCode",
+        default_command: "opencode",
+        acp_args: &["acp"],
+        api_key_envs: &["OPENCODE_API_KEY"],
+        base_url_envs: &[],
+        clear_envs: &[],
+        bearer_token_env: "",
+        official_key_prefix: "",
+        base_url_hint: "此栏不注入环境变量，留空即可；自定义端点请在 opencode.json 配置 provider",
+        mode_map: &[],
+        install_hint: "npm i -g opencode-ai；API Key 留空则使用 opencode auth login 的本地凭据",
         chat_capable: true,
     },
     // Escape hatch: any ACP-speaking CLI without touching code — the user
@@ -272,9 +292,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_four_records_in_order() {
+    fn registry_has_five_records_in_order() {
         let ids: Vec<&str> = ids().collect();
-        assert_eq!(ids, ["kimi", "claude", "codex", "custom"]);
+        assert_eq!(ids, ["kimi", "claude", "codex", "opencode", "custom"]);
         // Every record: fixed chat_capable, non-empty display/hints.
         for s in REGISTRY {
             assert!(s.chat_capable, "{} chat_capable", s.id);
@@ -321,6 +341,14 @@ mod tests {
         assert_eq!(codex.api_key_envs, &["OPENAI_API_KEY"]);
         assert_eq!(codex.base_url_envs, &["OPENAI_BASE_URL"]);
         assert!(codex.clear_envs.is_empty());
+
+        let opencode = spec("opencode").expect("opencode");
+        assert_eq!(opencode.display_name, "OpenCode");
+        assert_eq!(opencode.default_command, "opencode");
+        assert_eq!(opencode.acp_args, &["acp"]);
+        assert_eq!(opencode.api_key_envs, &["OPENCODE_API_KEY"]);
+        assert!(opencode.base_url_envs.is_empty());
+        assert!(opencode.clear_envs.is_empty());
 
         let custom = spec("custom").expect("custom");
         assert_eq!(custom.display_name, "自定义 (ACP)");

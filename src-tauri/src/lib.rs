@@ -230,6 +230,20 @@ async fn set_config_option(
         .map_err(err)
 }
 
+/// Re-push cached configOptions after a session switch (the frontend cleared
+/// its copy); the pickers arrive via acp://configOptions.
+#[tauri::command]
+async fn resend_config_options(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    state
+        .chat
+        .resend_config_options(&session_id)
+        .await
+        .map_err(err)
+}
+
 /// Chat-page model switch for endpoint models the CLI picker does not
 /// advertise; the runtime persists the choice and respawns the CLI.
 #[tauri::command]
@@ -272,6 +286,14 @@ fn pending_permission(state: State<'_, AppState>, session_id: String) -> Value {
     state.chat.pending_permission(&session_id).unwrap_or(Value::Null)
 }
 
+/// Latest sub-agent/task list for a session (null when the runtime is gone).
+/// Pulled by the chat store after a session switch — the live acp://subagent
+/// event only reached whichever session was active when it fired.
+#[tauri::command]
+fn get_subagents(state: State<'_, AppState>, session_id: String) -> Value {
+    state.chat.get_subagents(&session_id)
+}
+
 #[tauri::command]
 async fn set_permission_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
     state.chat.set_permission_mode(&mode).await.map_err(err)
@@ -310,9 +332,14 @@ fn session_messages(state: State<'_, AppState>, session_id: String) -> Vec<Value
     state.chat.session_messages(&session_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn runtime_states(state: State<'_, AppState>) -> Value {
+    let t0 = std::time::Instant::now();
     let states = state.chat.runtime_states();
+    let total = t0.elapsed();
+    if total.as_millis() > 50 {
+        log::info!("[perf] runtime_states total={total:?}");
+    }
     json!(states
         .into_iter()
         .map(|(id, s)| {
@@ -329,9 +356,15 @@ fn runtime_states(state: State<'_, AppState>) -> Value {
         .collect::<serde_json::Map<String, Value>>())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn unread_sessions(state: State<'_, AppState>) -> Vec<String> {
-    state.chat.unread_ids()
+    let t0 = std::time::Instant::now();
+    let v = state.chat.unread_ids();
+    let total = t0.elapsed();
+    if total.as_millis() > 50 {
+        log::info!("[perf] unread_sessions total={total:?}");
+    }
+    v
 }
 
 // ---------------------------------------------------------------------------
@@ -344,10 +377,20 @@ fn list_sessions(state: State<'_, AppState>) -> Value {
     serde_json::to_value(stores.sessions.list()).unwrap_or(Value::Null)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn sessions_for_project(state: State<'_, AppState>, project_dir: String) -> Value {
+    // Switch-lag instrumentation: the frontend sees ~1s stalls here; split
+    // lock-wait from body time to find who holds the stores mutex.
+    let t0 = std::time::Instant::now();
     let stores = lock(&state.stores);
-    serde_json::to_value(stores.sessions.sessions_for_project(&project_dir)).unwrap_or(Value::Null)
+    let t_lock = t0.elapsed();
+    let v = serde_json::to_value(stores.sessions.sessions_for_project(&project_dir))
+        .unwrap_or(Value::Null);
+    let total = t0.elapsed();
+    if total.as_millis() > 50 {
+        log::info!("[perf] sessions_for_project lock={t_lock:?} body={:?}", total - t_lock);
+    }
+    v
 }
 
 #[tauri::command]
@@ -892,8 +935,8 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
 /// default image; background.json overrides {type, source}; relative source
 /// anchors at the exe dir; file:/absolute sources are returned as plain
 /// filesystem paths (the webview converts them via the asset protocol);
-/// qrc: passes through (frontend maps to bundled /assets); `video` was
-/// removed and falls back to the default image.
+/// qrc: passes through (frontend maps to bundled /assets); `video` plays
+/// in a muted looping <video> (WebView2 has native H.264, no FFmpeg).
 #[tauri::command]
 fn background_config() -> Value {
     const DEFAULT_SOURCE: &str = "qrc:/qt/qml/WarDex/assets/background/LodolonFall.jpg";
@@ -922,11 +965,6 @@ fn background_config() -> Value {
                 }
             }
         }
-    }
-    if bg_type == "video" {
-        log::info!("bg type=video is removed; forcing image");
-        bg_type = "image".to_string();
-        bg_source = DEFAULT_SOURCE.to_string();
     }
     json!({ "type": bg_type, "source": bg_source })
 }
@@ -995,7 +1033,9 @@ fn set_panel_layout(
 
 /// GET {baseUrl}/models (OpenAI-compatible); the /chat/completions suffix is
 /// stripped before appending /models. Returns sorted model ids.
-#[tauri::command]
+/// `command(async)`: blocking ureq on the main thread stalled every other
+/// sync command behind it (~1s per switch when the endpoint is slow).
+#[tauri::command(async)]
 fn fetch_models(base_url: String, api_key: String) -> Result<Vec<String>, String> {
     crate::models::fetch_models(&base_url, &api_key)
 }
@@ -1006,9 +1046,9 @@ fn kimi_model_aliases() -> Vec<String> {
     crate::models::kimi_model_aliases()
 }
 
-/// Bulk sync (配置页「刷新」): declare every fetched endpoint model in
-/// config.toml under the agent's own provider namespace, pruning aliases
-/// the endpoint no longer lists. Returns the number of aliases written.
+/// Bulk sync (配置页「刷新」): full-clean every wardex-* namespace in
+/// config.toml, then declare this agent's provider and every fetched model.
+/// Returns the number of aliases written.
 #[tauri::command]
 fn sync_agent_models(
     agent_id: String,
@@ -1078,10 +1118,12 @@ pub fn run() {
             send_prompt,
             cancel,
             set_config_option,
+            resend_config_options,
             set_session_model,
             retry_cancel,
             answer_permission,
             pending_permission,
+            get_subagents,
             set_permission_mode,
             switch_agent,
             guide_at,

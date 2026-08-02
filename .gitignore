@@ -5,3 +5,5 @@ src-tauri/gen
 *.log
 WarDex-win64-*.zip
 dist-portable/
+src-tauri/target-pkg/
+tools/out/

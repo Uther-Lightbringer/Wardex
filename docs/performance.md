@@ -38,6 +38,7 @@
 | CLI 探测结果 | 每 provider 1 份 | 显式刷新 | agent 配置变更 |
 | 前端气泡 DOM | 视口 ±buffer | 虚拟滚动卸载 | — |
 | 面板数据（git/diff/db 等） | 展开的面板各 1 份 | 折叠即弃 | 见 [panels.md](./panels.md) 的 refreshOn |
+| 后台任务（tasks 面板） | 每会话 1 份，条数有限 | 会话模型卸载即弃 | `acp://subagent` 事件（`task_id:` 应答 + TaskList/TaskOutput 更新）增量刷新；会话切换用 `get_subagents` 快照重建 |
 | 图片解码 | 1920px 边长 | 解码即缩放 | — |
 
 新增缓存时**必须在此表登记一行**。

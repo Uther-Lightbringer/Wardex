@@ -18,7 +18,7 @@
 //     (status done/error/interrupted), once per segment.
 
 import { defineStore } from 'pinia';
-import { markRaw } from 'vue';
+import { markRaw, nextTick } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { cmd, isTauri } from '../lib/tauri';
 import { useSessionsStore } from './sessions';
@@ -106,6 +106,8 @@ export interface Subagent {
   output: string;
   /** CLI-side agent ids (wire transcript dir names), from rawOutput. */
   agentIds: string[];
+  /** CLI background-task id from a `task_id:` launch ack (kind === 'task'). */
+  taskId: string;
   startedAt: number;
   finishedAt: number;
   /** Last tool_call(_update) touch — stuck detection. */
@@ -219,6 +221,9 @@ export const useChatStore = defineStore('chat', {
     workspaceRefreshSeq: 0,
     /** Pending attachment paths (attachment bar floats above the composer). */
     attachments: [] as string[],
+    /** Per-session composer drafts (text + attachments), in-memory only —
+     * switching sessions saves the old draft and restores the target's. */
+    drafts: {} as Record<string, { text: string; attachments: string[] }>,
     /** Live DOM node of the streaming segment (R1 incremental append). */
     streamTarget: null as StreamTarget | null,
     /** File preview dialog state (FilesPanel opens, dialog renders). */
@@ -331,11 +336,13 @@ export const useChatStore = defineStore('chat', {
     // ---- streaming merge (mirrors sessions.rs append_text_segment) ----
 
     /** The assistant row that stream events append to. If the last row is not
-     * a pending assistant placeholder (chat://messageAppended not emitted or
-     * already flipped), synthesize one instead of dropping the event. */
+     * an in-flight assistant row (pending placeholder or reloaded 'streaming'
+     * row), synthesize one instead of dropping the event. */
     ensureStreamRow(): ChatMessage {
       const last = this.rows[this.rows.length - 1];
-      if (last && last.role === 'assistant' && last.status === 'pending') return last;
+      // 'streaming' too: rows reloaded via loadMessages() carry the persisted
+      // mid-stream status; treating them as foreign would synth a 2nd bubble.
+      if (last && last.role === 'assistant' && (last.status === 'pending' || last.status === 'streaming')) return last;
       const row = markRaw({
         id: `synth-${Date.now()}-${this.rows.length}`,
         role: 'assistant',
@@ -508,6 +515,14 @@ export const useChatStore = defineStore('chat', {
      * the 无法打开会话 banner). */
     async openSession(id: string): Promise<boolean> {
       if (id === this.sessionId) return true;
+      // Switch-cost instrumentation (temporary): per-step + total timing.
+      let t = performance.now();
+      const t0 = t;
+      const lap = (label: string): void => {
+        const now = performance.now();
+        console.info(`[chat] openSession ${label}: ${(now - t).toFixed(1)}ms`);
+        t = now;
+      };
       const sessions = useSessionsStore();
       try {
         await cmd('open_session', { sessionId: id });
@@ -515,12 +530,18 @@ export const useChatStore = defineStore('chat', {
         console.warn('[chat] open_session failed', e);
         return false;
       }
+      lap('open_session');
       this.sessionId = id;
       await this.refreshMeta();
+      lap('refreshMeta');
       if (this.meta?.projectDir) this.projectDir = this.meta.projectDir;
       await sessions.refresh(this.projectDir);
+      lap('sessions.refresh');
       this.syncStatusFromRuntime();
       await this.loadMessages();
+      lap(`loadMessages(rows=${this.rows.length})`);
+      await nextTick(); // rows assigned → measure the actual list re-render
+      lap('render(nextTick)');
       // A permission requested while this session was in the background only
       // fired the live event for the then-active session; re-pull the stored
       // payload so the dialog reappears after switching here.
@@ -529,6 +550,17 @@ export const useChatStore = defineStore('chat', {
         { sessionId: id },
         null,
       );
+      lap('pending_permission');
+      // Same for the sub-agent/task list: re-pull the backend snapshot so the
+      // panels survive switching back (syncStatusFromRuntime already cleared).
+      this.subagents = (await cmd<Subagent[] | null>('get_subagents', { sessionId: id }, null)) ?? [];
+      lap('get_subagents');
+      // syncStatusFromRuntime cleared configOptions; a live runtime stays
+      // silent until the next picker event, so ask it to re-push its cache
+      // (keeps the 模型/思考 dropdowns visible after switching back).
+      await cmd('resend_config_options', { sessionId: id }, null);
+      lap('resend_config_options');
+      console.info(`[chat] openSession total: ${(performance.now() - t0).toFixed(1)}ms`);
       this.scrollSeq += 1; // force scroll-to-end after a switch
       return true;
     },
@@ -582,6 +614,11 @@ export const useChatStore = defineStore('chat', {
         const rest = { ...this.commandsBySession };
         delete rest[id];
         this.commandsBySession = rest;
+      }
+      if (id in this.drafts) {
+        const rest = { ...this.drafts };
+        delete rest[id];
+        this.drafts = rest;
       }
       await sessions.refresh(this.projectDir);
     },
@@ -759,6 +796,16 @@ export const useChatStore = defineStore('chat', {
 
     clearAttachments(): void {
       this.attachments = [];
+    },
+
+    /** Save/restore hook for the composer (per-session draft, §3): empty
+     * drafts are dropped so the map only holds real content. */
+    saveDraft(sessionId: string, text: string, attachments: string[]): void {
+      if (!sessionId) return;
+      const rest = { ...this.drafts };
+      if (!text && attachments.length === 0) delete rest[sessionId];
+      else rest[sessionId] = { text, attachments: [...attachments] };
+      this.drafts = rest;
     },
   },
 });

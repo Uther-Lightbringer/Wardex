@@ -191,6 +191,71 @@ pub fn tool_raw_text(tool: &Map<String, Value>) -> String {
     }
 }
 
+/// Background-task launch ack: the CLI starts a background task (e.g. Bash
+/// run_in_background) and the tool output returns immediately carrying a
+/// `task_id: <id>` line. Case-insensitive; the id is the following run of
+/// [0-9a-zA-Z-_]. Fail-silent: None when the marker is absent.
+pub fn launch_task_id(raw: &str) -> Option<String> {
+    let lower = raw.to_lowercase();
+    let mut from = 0usize;
+    while let Some(p) = lower[from..].find("task_id:") {
+        let start = from + p + "task_id:".len();
+        let id: String = raw[start..]
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+        from = start;
+    }
+    None
+}
+
+/// Short human label from a launch ack: a `description:` line when present.
+pub fn launch_task_title(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let l = line.trim();
+        if l
+            .get(.."description:".len())
+            .is_some_and(|p| p.eq_ignore_ascii_case("description:"))
+        {
+            let t = l["description:".len()..].trim();
+            if !t.is_empty() {
+                return Some(elide(t, 48));
+            }
+        }
+    }
+    None
+}
+
+/// `status: <word>` line in TaskList/TaskOutput output, mapped onto the
+/// sub-agent status vocabulary. Fail-silent: None when absent/unknown.
+pub fn task_status_from_output(raw: &str) -> Option<&'static str> {
+    for line in raw.lines() {
+        let l = line.trim();
+        if l
+            .get(.."status:".len())
+            .is_some_and(|p| p.eq_ignore_ascii_case("status:"))
+        {            let word: String = l["status:".len()..]
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect::<String>()
+                .to_lowercase();
+            return match word.as_str() {
+                "completed" | "complete" | "done" => Some("completed"),
+                "failed" | "error" => Some("failed"),
+                "stopped" | "cancelled" | "canceled" | "killed" => Some("interrupted"),
+                "running" | "pending" | "in_progress" => Some("in_progress"),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// Provider-dispatched outcome summary. kimi uses subagent_summary
 /// (swarm outcome counts / actual_subagent_type line). claude-code-acp Task
 /// output is "<report>\nagentId: xxx (for resuming…)\n<usage>…": the report
@@ -357,6 +422,9 @@ pub struct SubagentEntry {
     /// CLI-side agent id(s) from rawOutput (`agent_id:` lines) — names of the
     /// on-disk wire transcript dirs, for the dialog's 执行过程 section.
     pub agent_ids: Vec<String>,
+    /// CLI background-task id parsed from a `task_id:` launch ack — only set
+    /// for kind=="task" entries; TaskList/TaskOutput calls reference it.
+    pub task_id: String,
     pub started_at: i64,
     pub finished_at: i64,
     /// Last time any tool_call(_update) touched this entry — stuck detection.
@@ -384,6 +452,9 @@ pub struct RuntimeSnap {
     /// dialog survives a session switch by re-pulling this (the live event
     /// only reaches whichever session was active when it fired).
     pub perm_pending: Option<Value>,
+    /// Latest sub-agent/task list, mirrored on every emit_subagents — the
+    /// panels survive a session switch by re-pulling this (get_subagents).
+    pub subagents: Vec<SubagentEntry>,
 }
 
 pub struct RuntimeEntry {
@@ -485,6 +556,10 @@ pub enum RuntimeCmd {
     SetMode(String),
     /// ACP config option picker (kimi: "thinking" / "model"); passthrough.
     SetConfigOption { config_id: String, value: String },
+    /// Re-push the cached configOptions batch: the frontend clears its copy
+    /// on every session switch, so a re-activated live runtime must send it
+    /// again or the model/thinking pickers vanish.
+    ResendConfigOptions,
     /// Chat-page pick of a model the CLI picker does not advertise (per-agent
     /// endpoint model): persist to the agent record and respawn so
     /// build_launch injects it via KIMI_MODEL_* env.
@@ -759,6 +834,7 @@ impl Actor {
                     }
                 }
             }
+            RuntimeCmd::ResendConfigOptions => self.resend_config_options(),
             RuntimeCmd::SwitchAgent(agent) => self.on_switch_agent(*agent).await,
             RuntimeCmd::SetModel(model) => self.on_set_model(model).await,
             RuntimeCmd::EnsureAcp => self.ensure_acp().await,
@@ -1577,6 +1653,18 @@ impl Actor {
         }
     }
 
+    /// Re-forward the cached configOptions batch to the frontend (which drops
+    /// its copy on every session switch). No-op before the first batch.
+    fn resend_config_options(&self) {
+        if self.last_config_options.is_empty() {
+            return;
+        }
+        self.emit(
+            "acp://configOptions",
+            json!({ "sessionId": self.session_id, "options": self.last_config_options }),
+        );
+    }
+
     /// ensureAcp (ChatController.cpp:836-896): compute launch params from the
     /// agent snapshot + store, enforce the process cap, spawn, handshake.
     async fn ensure_acp(&mut self) {
@@ -2016,24 +2104,70 @@ impl Actor {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let idx = self.subagents.iter().position(|e| e.id == id);
+        // TaskList/TaskOutput reference background tasks; they update existing
+        // task entries (matched by task id) but never create one.
+        let is_task_query = matches!(name.to_lowercase().as_str(), "tasklist" | "taskoutput");
+        let mut idx = self.subagents.iter().position(|e| e.id == id);
+        let mut task_launch: Option<(String, String)> = None; // (task_id, raw)
         if idx.is_none() && !is_subagent_tool_name(&name) {
-            return;
+            let raw = tool_raw_text(tool);
+            let Some(tid) = launch_task_id(&raw) else {
+                return;
+            };
+            // A query tool for a known task flows into that entry.
+            idx = self
+                .subagents
+                .iter()
+                .position(|e| e.kind == "task" && e.task_id == tid);
+            if idx.is_none() {
+                if is_task_query {
+                    return;
+                }
+                task_launch = Some((tid, raw));
+            }
         }
         let mut entry = match idx {
             Some(i) => self.subagents[i].clone(),
-            None => SubagentEntry {
-                id: id.clone(),
-                kind: name.clone(),
-                title: "子 Agent".to_string(),
-                status: "pending".to_string(),
-                started_at: now_ms(),
-                ..Default::default()
+            None => match &task_launch {
+                // Launch ack: the call itself already completed, but the entry
+                // tracks the BACKGROUND task — it starts in_progress and a
+                // later TaskList/TaskOutput status settles it.
+                Some((tid, raw)) => SubagentEntry {
+                    id: id.clone(),
+                    kind: "task".to_string(),
+                    title: launch_task_title(raw).unwrap_or_else(|| "后台任务".to_string()),
+                    status: "in_progress".to_string(),
+                    task_id: tid.clone(),
+                    started_at: now_ms(),
+                    ..Default::default()
+                },
+                None => SubagentEntry {
+                    id: id.clone(),
+                    kind: name.clone(),
+                    title: "子 Agent".to_string(),
+                    status: "pending".to_string(),
+                    started_at: now_ms(),
+                    ..Default::default()
+                },
             },
         };
-        if let Some(status) = tool.get("status").and_then(Value::as_str) {
-            if !status.is_empty() {
-                entry.status = status.to_string();
+        if entry.kind != "task" {
+            if let Some(status) = tool.get("status").and_then(Value::as_str) {
+                if !status.is_empty() {
+                    entry.status = status.to_string();
+                }
+            }
+        }
+        if entry.kind == "task" {
+            if task_launch.is_some() {
+                // The launch call reports "completed" — that is the ack, not
+                // the task; keep it running until a query says otherwise.
+                entry.status = "in_progress".to_string();
+            } else if is_task_query {
+                let raw = tool_raw_text(tool);
+                if let Some(s) = task_status_from_output(&raw) {
+                    entry.status = s.to_string();
+                }
             }
         }
         entry.last_update = now_ms();
@@ -2162,6 +2296,13 @@ impl Actor {
         let mut changed = false;
         for e in self.subagents.iter_mut() {
             if e.status != "pending" && e.status != "in_progress" {
+                continue;
+            }
+            if e.kind == "task" && !interrupted {
+                // A background task genuinely keeps running past the turn —
+                // don't settle it on the launch turn's end; a later
+                // TaskList/TaskOutput status settles it (and wakes the agent).
+                self.bg_pending.insert(e.id.clone());
                 continue;
             }
             if !interrupted {
@@ -2373,6 +2514,9 @@ impl Actor {
     }
 
     fn emit_subagents(&self) {
+        // Mirror into the snap so a session switch can re-pull the list
+        // (get_subagents) — the live event only reaches the active session.
+        self.snap().subagents = self.subagents.clone();
         self.emit(
             "acp://subagent",
             json!({ "sessionId": self.session_id, "subagents": self.subagents }),
@@ -2565,6 +2709,35 @@ mod tests {
         assert_eq!(right_chars("你好世界", 2), "世界");
         assert_eq!(right_chars("abc", 10), "abc");
         assert_eq!(right_chars("", 5), "");
+    }
+
+    #[test]
+    fn launch_task_id_parses_ack_fail_silent() {
+        assert_eq!(
+            launch_task_id("Background task started.\ntask_id: 9f3a2b-cd\nuse TaskOutput to poll"),
+            Some("9f3a2b-cd".to_string())
+        );
+        assert_eq!(launch_task_id("TASK_ID: abc123"), Some("abc123".to_string()));
+        assert!(launch_task_id("no marker here").is_none());
+        assert!(launch_task_id("").is_none());
+        assert!(launch_task_id("task_id:").is_none());
+    }
+
+    #[test]
+    fn launch_task_title_from_description_line() {
+        let raw = "task_id: a1\ndescription: 跑测试套件并汇报";
+        assert_eq!(launch_task_title(raw).as_deref(), Some("跑测试套件并汇报"));
+        assert!(launch_task_title("task_id: a1").is_none());
+    }
+
+    #[test]
+    fn task_status_mapping() {
+        assert_eq!(task_status_from_output("status: completed"), Some("completed"));
+        assert_eq!(task_status_from_output("  Status: FAILED"), Some("failed"));
+        assert_eq!(task_status_from_output("status: stopped"), Some("interrupted"));
+        assert_eq!(task_status_from_output("status: running"), Some("in_progress"));
+        assert!(task_status_from_output("status: weird").is_none());
+        assert!(task_status_from_output("no status").is_none());
     }
 
     #[test]

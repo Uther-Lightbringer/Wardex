@@ -43,6 +43,12 @@ async fn codex_acp_handshake_smoke() {
     handshake("codex", "codex-acp").await;
 }
 
+#[tokio::test]
+#[ignore = "requires local opencode CLI"]
+async fn opencode_acp_handshake_smoke() {
+    handshake("opencode", "opencode").await;
+}
+
 /// spawn → initialize → session/new. Asserts the handshake completes without
 /// StartFailed and the process speaks ACP (is_initialized). claude/codex are
 /// npm .cmd shims, so this also exercises the cmd.exe /c wrapping path.

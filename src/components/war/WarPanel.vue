@@ -1,30 +1,31 @@
 <script setup lang="ts">
-// One accordion panel of the info dock (docs/panels.md §3).
-// Unified L2 iron-frame look — panel authors only write the content slot:
-//   title bar: frame_iron_bar nine-slice, fixed 28px, collapse arrow (▶/▼,
-//     200ms rotate), hover brightening
-//   content:   frame_iron_panel nine-slice with hole glass, 200ms collapse
-//     slide animation, lazily mounted (collapsed = unmounted, no requests)
-//   grip:      6px hot zone on the bottom edge, three-stripe iron grip,
-//     drag to resize (min 80px / max 60% of the dock height); content gets
-//     pointer-events: none while dragging
-import { computed, defineAsyncComponent, ref, watch } from 'vue';
-import type { PanelDef } from '../../panels/registry';
+// The ONE drawer panel of the info dock (docs/panels.md §3).
+// Unified L2 fat-frame look — panel authors only write the content slot:
+//   title bar: frame_fat_bar nine-slice, fixed 28px, collapse arrow (▶ =
+//     slide back to the right), hover brightening, click anywhere collapses
+//   content:   frame_fat_bar nine-slice (plain rivet rectangle, no top
+//     crest — measured T23/R26/B22/L25, hole clean) with hole glass, 250ms
+//     drawer slide (translateX), lazily mounted (closed = unmounted)
+//   grip:      6px hot zone on the LEFT edge, three-stripe iron grip,
+//     drag to resize (min 200px / max 60% of the chat area width); content
+//     gets pointer-events: none while dragging
+import { defineAsyncComponent, ref, watch } from 'vue';
+import { PANEL_MAX_W, type PanelDef } from '../../panels/registry';
 import WarFrame from './WarFrame.vue';
 
-const MIN_H = 80;
+const MIN_W = 200;
 
 const props = defineProps<{
   def: PanelDef;
   open: boolean;
-  height: number;
-  dockHeight: number; // px — for the 60% max constraint
+  width: number;
+  dockWidth: number; // px (chat area width) — for the 60% max constraint
 }>();
 
 const emit = defineEmits<{
   (e: 'toggle'): void;
-  (e: 'resize', h: number): void;
-  (e: 'resizeEnd', h: number): void;
+  (e: 'resize', w: number): void;
+  (e: 'resizeEnd', w: number): void;
 }>();
 
 // Lazy mount: the component code is only imported after the first expand;
@@ -44,22 +45,22 @@ watch(
   { immediate: true },
 );
 
-const bodyH = computed(() => (props.open ? props.height : 0));
-
-// ---- drag-to-resize ----
+// ---- drag-to-resize (left edge, X axis) ----
 const dragging = ref(false);
-let dragStartY = 0;
-let dragStartH = 0;
+let dragStartX = 0;
+let dragStartW = 0;
 
-function clampH(h: number): number {
-  const max = props.dockHeight > 0 ? props.dockHeight * 0.6 : Number.MAX_SAFE_INTEGER;
-  return Math.max(MIN_H, Math.min(max, h));
+function clampW(w: number): number {
+  // PANEL_MAX_W keeps the whole right column ≤ the 300px action bay, so the
+  // chat area is never squeezed; the 60% rule still applies on narrow windows.
+  const max = props.dockWidth > 0 ? Math.min(props.dockWidth * 0.6, PANEL_MAX_W) : PANEL_MAX_W;
+  return Math.max(MIN_W, Math.min(max, w));
 }
 
 function onGripDown(e: PointerEvent): void {
   dragging.value = true;
-  dragStartY = e.clientY;
-  dragStartH = props.height;
+  dragStartX = e.clientX;
+  dragStartW = props.width;
   (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 }
 
@@ -69,46 +70,47 @@ function onGripMove(e: PointerEvent): void {
     onGripUp();
     return;
   }
-  emit('resize', clampH(dragStartH + (e.clientY - dragStartY)));
+  // Left-edge grip: dragging left widens, dragging right narrows.
+  emit('resize', clampW(dragStartW - (e.clientX - dragStartX)));
 }
 
 function onGripUp(): void {
   if (!dragging.value) return;
   dragging.value = false;
-  emit('resizeEnd', props.height);
+  emit('resizeEnd', props.width);
 }
 </script>
 
 <template>
-  <div class="war-panel" :class="{ 'war-panel--open': open }">
+  <div
+    class="war-panel"
+    :class="{ 'war-panel--open': open }"
+    :style="{ width: width + 'px' }"
+  >
     <!-- title bar -->
-    <div
-      class="war-panel__bar"
-      :class="{ static: def.alwaysOpen }"
-      @click="def.alwaysOpen ? undefined : emit('toggle')"
-    >
+    <div class="war-panel__bar" @click="emit('toggle')">
       <div class="war-panel__bar-frame"></div>
       <img v-if="def.icon" class="war-panel__icon" :src="def.icon" draggable="false" />
       <span class="war-panel__title">{{ def.title }}</span>
       <span class="war-panel__spacer"></span>
-      <span v-if="!def.alwaysOpen" class="war-panel__arrow" :class="{ open }">▶</span>
+      <span class="war-panel__arrow">▶</span>
     </div>
 
-    <!-- content (200ms collapse slide) -->
-    <div class="war-panel__body" :style="{ height: bodyH + 'px' }">
+    <!-- content -->
+    <div class="war-panel__body">
       <WarFrame
         v-if="everOpened"
         class="war-panel__frame"
         :class="{ dragging }"
-        src="/assets/ui/frames/frame_iron_panel.png"
-        :slice="[96, 110, 69, 108]"
-        :hole="[56, 25, 21, 24]"
+        src="/assets/ui/frames/frame_fat_bar.png"
+        :slice="[23, 26, 22, 25]"
+        :hole="[23, 26, 22, 25]"
       >
         <component :is="asyncComp" v-if="open && asyncComp" />
       </WarFrame>
     </div>
 
-    <!-- resize grip -->
+    <!-- resize grip (left edge) -->
     <div
       v-if="open"
       class="war-panel__grip war-resize-handle"
@@ -125,6 +127,17 @@ function onGripUp(): void {
 .war-panel {
   position: relative;
   flex: none;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  /* drawer slide: hidden off the right edge, slides in when open (420ms,
+     synchronized with the dock width animation in WarDock) */
+  transform: translateX(100%);
+  transition: transform 420ms ease;
+}
+
+.war-panel--open {
+  transform: translateX(0);
 }
 
 .war-panel__bar {
@@ -135,6 +148,7 @@ function onGripUp(): void {
   padding: 0 14px;
   gap: 6px;
   user-select: none;
+  cursor: pointer;
 }
 
 /* Open state: the title tucks INTO the panel frame — the bar overlaps the
@@ -142,25 +156,25 @@ function onGripUp(): void {
    read as part of the iron panel instead of a separate floating strip. */
 .war-panel--open .war-panel__bar {
   z-index: 6;
-  margin-bottom: -40px;
+  margin-bottom: -26px;
 }
 
 .war-panel--open .war-panel__bar-frame {
   opacity: 0;
 }
 
-.war-panel__bar:not(.static):hover {
+.war-panel__bar:hover {
   filter: brightness(1.18);
 }
 
 .war-panel__bar-frame {
   position: absolute;
   inset: 0;
-  /* frame_iron_bar source slice 62/110/70/108 drawn as a thin title strip */
+  /* frame_fat_bar source slice 28/32/28/32 drawn as a thin title strip */
   border-style: solid;
   border-color: transparent;
-  border-width: 4px 12px;
-  border-image: url('/assets/ui/frames/frame_iron_bar.png') 62 110 70 108 stretch;
+  border-width: 4px 8px;
+  border-image: url('/assets/ui/frames/frame_fat_bar.png') 28 32 28 32 stretch;
   box-sizing: border-box;
   pointer-events: none;
 }
@@ -186,20 +200,16 @@ function onGripUp(): void {
   flex: 1;
 }
 
+/* Drawer arrow: points right = slide back to the right (collapse). */
 .war-panel__arrow {
   position: relative;
   color: var(--war-text-dim);
   font-size: 10px;
-  transition: transform 200ms;
-}
-
-.war-panel__arrow.open {
-  transform: rotate(90deg);
 }
 
 .war-panel__body {
-  overflow: hidden;
-  transition: height 200ms ease;
+  flex: 1;
+  min-height: 0;
 }
 
 .war-panel__frame {
@@ -211,21 +221,24 @@ function onGripUp(): void {
 }
 
 .war-panel__grip {
-  position: relative;
-  height: 6px;
-  margin-top: -3px; /* hot zone straddles the content frame's bottom edge */
+  position: absolute;
+  left: -3px; /* hot zone straddles the content frame's left edge */
+  top: 0;
+  bottom: 0;
+  width: 6px;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   justify-content: center;
   gap: 1px;
+  cursor: col-resize;
   touch-action: none;
   z-index: 5;
 }
 
 .war-panel__grip span {
-  width: 36px;
-  height: 1px;
+  width: 1px;
+  height: 36px;
   background: #6a5a3f;
   opacity: 0;
   transition: opacity 120ms;

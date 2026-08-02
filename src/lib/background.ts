@@ -2,13 +2,13 @@
 // Default: bundled LodolonFall.jpg. background.json next to the exe overrides
 // it (resolved by the Rust `background_config` command, old main.cpp rules);
 // in browser/dev preview we fall back to fetching /background.json.
-// `type: "video"` was removed and `type: "model"` (Three.js glTF) is a
-// deferred TODO — both map to image.
+// `type: "video"` plays in a muted looping <video> (WebView2 native H.264);
+// `type: "model"` (Three.js glTF) is a deferred TODO and maps to image.
 
 import { cmd, fileSrc, isTauri } from './tauri';
 
 export interface BgConfig {
-  type: 'image' | 'model';
+  type: 'image' | 'video' | 'model';
   source: string;
 }
 
@@ -23,8 +23,8 @@ export async function loadBackground(): Promise<BgConfig> {
     try {
       const cfg = await cmd<{ type?: string; source?: string }>('background_config');
       if (cfg && typeof cfg.source === 'string' && cfg.source) {
-        if (cfg.type === 'image') {
-          return { type: 'image', source: mapSource(cfg.source) };
+        if (cfg.type === 'image' || cfg.type === 'video') {
+          return { type: cfg.type, source: mapSource(cfg.source) };
         }
         // model (deferred) / anything else → default image
       }
@@ -38,8 +38,13 @@ export async function loadBackground(): Promise<BgConfig> {
     const res = await fetch('/background.json', { cache: 'no-store' });
     if (!res.ok) return DEFAULT_BG;
     const cfg = (await res.json()) as { type?: string; source?: string };
-    if (cfg && cfg.type === 'image' && typeof cfg.source === 'string' && cfg.source) {
-      return { type: 'image', source: mapSource(cfg.source) };
+    if (
+      cfg &&
+      (cfg.type === 'image' || cfg.type === 'video') &&
+      typeof cfg.source === 'string' &&
+      cfg.source
+    ) {
+      return { type: cfg.type, source: mapSource(cfg.source) };
     }
     return DEFAULT_BG;
   } catch {

@@ -7,17 +7,21 @@ import type { Component } from 'vue';
 
 export type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 
+/** Max drawer panel width (px). The right grid column also hosts the 300px
+ * action bay; keeping rail(44) + panel + window-rail clearance(34) ≤ 300
+ * means the column NEVER grows, so opening a drawer never squeezes the
+ * chat area. 300 − 44 − 34 = 222. */
+export const PANEL_MAX_W = 222;
+
 export interface PanelDef {
   id: string; // 'git' | 'files' | 'db' | ... globally unique
   title: string; // Chinese title: 版本控制 / 工作区文件 / 数据库
   icon?: string; // /assets/... icon, optional
   component: () => Promise<{ default: Component }>; // lazy — not loaded while collapsed
   defaultOpen: boolean;
-  defaultHeight: number; // px, used when there is no panelLayout memory
+  defaultWidth: number; // px, used when there is no panelLayout memory
   order: number; // default ordering (v1: fixed, drag-reorder deferred)
   refreshOn: RefreshTrigger[];
-  /** Pinned open at the top, no collapse arrow (the agent panel). */
-  alwaysOpen?: boolean;
 }
 
 export const panelRegistry: PanelDef[] = [
@@ -25,18 +29,26 @@ export const panelRegistry: PanelDef[] = [
     id: 'agent',
     title: '会话信息',
     component: () => import('./AgentPanel.vue'),
-    defaultOpen: true,
-    defaultHeight: 180,
+    defaultOpen: false,
+    defaultWidth: 220,
     order: 10,
     refreshOn: ['sessionSwitch'],
-    alwaysOpen: true, // pinned top, never collapses (docs/panels.md §2)
+  },
+  {
+    id: 'tasks',
+    title: '后台任务',
+    component: () => import('./TasksPanel.vue'),
+    defaultOpen: false,
+    defaultWidth: 220,
+    order: 12,
+    refreshOn: ['turnEnd', 'sessionSwitch'],
   },
   {
     id: 'reminders',
     title: '提醒',
     component: () => import('./RemindersPanel.vue'),
     defaultOpen: false,
-    defaultHeight: 200,
+    defaultWidth: 220,
     order: 15,
     refreshOn: ['turnEnd', 'sessionSwitch', 'manual'],
   },
@@ -44,8 +56,8 @@ export const panelRegistry: PanelDef[] = [
     id: 'git',
     title: '版本控制',
     component: () => import('./GitPanel.vue'),
-    defaultOpen: true,
-    defaultHeight: 260, // roomier default for the diff view (drag-resize persists)
+    defaultOpen: false,
+    defaultWidth: 222, // capped by PANEL_MAX_W (drag-resize persists)
     order: 20,
     refreshOn: ['turnEnd', 'sessionSwitch', 'expand', 'manual'],
   },
@@ -54,7 +66,7 @@ export const panelRegistry: PanelDef[] = [
     title: '工作区文件',
     component: () => import('./FilesPanel.vue'),
     defaultOpen: false,
-    defaultHeight: 260,
+    defaultWidth: 222,
     order: 30,
     refreshOn: ['sessionSwitch', 'expand', 'manual'],
   },

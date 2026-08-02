@@ -74,9 +74,18 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 
 <template>
   <div class="app">
-    <!-- background stack: gradient base → image → dim gradient (§8.2) -->
+    <!-- background stack: gradient base → image/video → dim gradient (§8.2) -->
     <div class="bg-base"></div>
     <img v-if="bg.type === 'image'" class="bg-img" :src="bg.source" draggable="false" />
+    <video
+      v-else-if="bg.type === 'video'"
+      class="bg-video"
+      :src="bg.source"
+      autoplay
+      muted
+      loop
+      playsinline
+    ></video>
     <!-- TODO(phase-4): model background (Three.js glTF, 45s orbiting camera) -->
     <div class="bg-dim"></div>
 
@@ -122,7 +131,8 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
   background: linear-gradient(#0e2a22, #0a1a16 60%, #04070a);
 }
 
-.bg-img {
+.bg-img,
+.bg-video {
   position: absolute;
   inset: 0;
   width: 100%;

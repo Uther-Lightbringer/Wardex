@@ -108,8 +108,9 @@ async function refreshModels(): Promise<void> {
         // Bulk-declare the endpoint's models in config.toml under this
         // agent's own provider namespace: the CLI picker then lists them and
         // chat-page switching hot-applies via set_config_option instead of
-        // respawning. Stale aliases of this agent are pruned. kimi CLI only;
-        // unsaved new agents skip (no id to namespace under).
+        // respawning. The sync FULL-CLEANS every wardex-* namespace first —
+        // only this refresh's set survives; kimi's own config is untouched.
+        // kimi CLI only; unsaved new agents skip (no id to namespace under).
         if (draft.provider === 'kimi' && selectedId.value && ids.length > 0) {
           try {
             await cmd('sync_agent_models', {
@@ -703,7 +704,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
               />
             </div>
             <div v-if="draft.provider === 'kimi' && draft.baseUrl.trim()" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              点「刷新」会把模型列表按 Agent 命名空间批量写入 ~/.kimi-code/config.toml（apiKey 明文），上下文长度统一为该值 ×1024，0 = 256K
+              点「刷新」会先清掉 config.toml 里所有 wardex-* 同步的 provider/模型（含其他 Agent 的残留），再按本 Agent 命名空间写入本次拉到的列表（apiKey 明文）；kimi 官方配置不动。上下文长度统一为该值 ×1024，0 = 256K
             </div>
 
             <div v-if="draft.provider === 'kimi'" class="cfg__field">

@@ -16,7 +16,16 @@ export async function cmd<T>(
     if (fallback !== undefined) return fallback;
     throw new Error(`cmd(${name}): Tauri runtime not available`);
   }
-  return invoke<T>(name, args);
+  // Switch-lag instrumentation: backend bodies measured <50ms while the
+  // frontend saw ~1s — log slow IPC round trips per command to catch where
+  // the dispatch stalls (temporary).
+  const t0 = performance.now();
+  try {
+    return await invoke<T>(name, args);
+  } finally {
+    const dt = performance.now() - t0;
+    if (dt > 100) console.info(`[ipc] ${name}: ${dt.toFixed(1)}ms`);
+  }
 }
 
 /** Local file → asset-protocol URL (attachments, avatars, preview images). */

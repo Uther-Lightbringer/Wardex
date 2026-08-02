@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Commit detail dialog (GitLab-style): opened by clicking a commit in the
-// version-control panel's 历史 tab. Left: the commit's changed files with
+// Diff detail dialog (GitLab-style): opened by clicking a commit in the
+// version-control panel's 历史 tab or a changed file in the 更改 tab. Left: the commit's changed files with
 // +add/−del counts; right: the selected file's unified diff (old/new line
 // numbers, +/- sign column, green/red row tints, hunk headers).
 // Data comes from git_diff_commit (one fetch for the whole commit — file
