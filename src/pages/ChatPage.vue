@@ -370,7 +370,9 @@ const sessionUsage = computed(() => {
   /* right column is content-sized so the dock's width animation (44px rail
      ↔ 44px+drawer) pushes the chat area narrower instead of overlaying it */
   grid-template-columns: 188px 1fr auto;
-  grid-template-rows: 1fr max(124px, 18.5%);
+  /* bottom bar height: docs/features/chat.md §1 botH elastic formula
+     (menuBtnH=276/4.87≈57, minBotH≈124, menuBtnH*2+76≈190, gap 8, minTopH=240) */
+  grid-template-rows: 1fr max(124px, min(max(190px, 18.5%), calc(100% - 248px)));
   gap: 8px;
   height: 100%;
   padding: 2px 0 8px 8px; /* rail x=8 clears the permanent window rail */
@@ -420,8 +422,10 @@ const sessionUsage = computed(() => {
   grid-column: 3;
   /* fixed width: WarFrame content is absolutely positioned (no intrinsic
      size), so in the `auto` column it would collapse to the dock's 44px
-     rail width when the drawer is closed */
-  width: 300px;
+     rail width when the drawer is closed. Wide enough that the two menu
+     buttons reach the canonical MENU_BTN_W=276 (frame 354 − insets 26/26
+     − content padding 10/10 ≈ 282 usable, 98% → 276). */
+  width: 354px;
   justify-self: end;
 }
 
