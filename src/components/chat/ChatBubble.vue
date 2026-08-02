@@ -119,6 +119,14 @@ const procSummary = computed(() => {
 });
 
 /** Streaming-only: what the agent is doing right now (tail segment). */
+// Tool titles from ACP can carry the whole command (opencode titles often
+// are the invocation) — elide them so the process line stays short; the CSS
+// nowrap/ellipsis on .seg-proc is the hard backstop, the full name is in the
+// process dialog.
+const TOOL_HINT_MAX = 24;
+function elideToolName(s: string): string {
+  return s.length <= TOOL_HINT_MAX ? s : s.slice(0, TOOL_HINT_MAX) + '…';
+}
 const activityHint = computed(() => {
   if (!props.streaming) return '';
   const tail = segs.value[segs.value.length - 1];
@@ -126,7 +134,7 @@ const activityHint = computed(() => {
   if (tail.kind === 'thinking') return '思考中…';
   if (tail.kind === 'tool') {
     const st = tail.status ? ` [${tail.status}]` : '';
-    return `▶ ${toolName(tail)}${st}`;
+    return `▶ ${elideToolName(toolName(tail))}${st}`;
   }
   return '';
 });
@@ -734,9 +742,10 @@ const visibleAtts = computed(() =>
   overflow-wrap: break-word;
 }
 
-/* ---- process summary line (final rows; opens ProcessDialog) ---- */
+/* ---- process summary line (never wraps: ellipsis beyond the bubble width) ---- */
 .seg-proc {
   width: fit-content;
+  max-width: 100%;
   margin: 2px 0 6px;
   padding: 2px 10px;
   background: #12151c44;
@@ -744,6 +753,9 @@ const visibleAtts = computed(() =>
   border-radius: 2px;
   color: #d0d6e0;
   user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .seg-proc:hover {
