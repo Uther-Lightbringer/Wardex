@@ -212,7 +212,13 @@ function onThumbMove(e: PointerEvent): void {
 }
 
 /* thumb: 9-slice (18px caps + 14px sides fixed, flat middle stretches) so the
-   end caps and rounded corners never distort no matter how long it gets */
+   end caps and rounded corners never distort no matter how long it gets.
+   Horizontal borders are 10px (not the 14px slice) so 10+10 = the 20px
+   element width exactly: 14+14=28 would exceed it, and Chromium then lays the
+   art out at 28px and clips it at 20px — the visible art shifts ~3px right
+   and the right cap is cut off. The side slices compress 14→10 (0.71x),
+   which only narrows the subtle edge shading; caps/corners are vertical and
+   unaffected. */
 .war-scroll__thumb {
   position: absolute;
   left: -2px; /* thumb art (68px wide source) slightly overlaps the track */
@@ -220,7 +226,7 @@ function onThumbMove(e: PointerEvent): void {
   box-sizing: border-box;
   border-style: solid;
   border-color: transparent;
-  border-width: 18px 14px;
+  border-width: 18px 10px;
   border-image: url('/assets/ui/scroll/scroll_thumb.png') 18 14 fill stretch;
   user-select: none;
   touch-action: none;
