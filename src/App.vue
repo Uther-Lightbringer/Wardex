@@ -7,6 +7,8 @@
 // the old cached-Loader behaviour. All navigation runs through the nav store
 // three-stage transition (770ms up / popUp SFX 1280ms gate / 750ms drop).
 import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { getVersion } from '@tauri-apps/api/app';
+import { isTauri } from './lib/tauri';
 import MainMenuPage from './pages/MainMenuPage.vue';
 import ConfigPage from './pages/ConfigPage.vue';
 import SessionSelectPage from './pages/SessionSelectPage.vue';
@@ -29,6 +31,7 @@ const projects = useProjectsStore();
 const chat = useChatStore();
 
 const bg = ref<BgConfig>(DEFAULT_BG);
+const version = ref('0.3');
 
 const overlayPages: { id: PageId; comp: unknown }[] = [
   { id: 'config', comp: ConfigPage },
@@ -67,6 +70,7 @@ onMounted(() => {
   void projects.load();
   void loadBackground().then((c) => (bg.value = c));
   onResize();
+  if (isTauri) void getVersion().then((v) => (version.value = v));
   window.addEventListener('resize', onResize);
 });
 onBeforeUnmount(() => window.removeEventListener('resize', onResize));
@@ -110,7 +114,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
     <!-- banner notification -->
     <div v-if="ui.bannerText" class="banner">{{ ui.bannerText }}</div>
 
-    <div class="version">WarDex v0.3 · Tauri 重写</div>
+    <div class="version">WarDex v{{ version }} · Tauri 重写</div>
 
     <!-- 打开项目 folder browser -->
     <FolderBrowserDialog v-model:open="ui.folderDialogOpen" @folder-chosen="onFolderChosen" />
@@ -204,7 +208,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 
 .version {
   position: absolute;
-  left: 10px;
+  left: 68px; /* rail width 58px + 10px margin, clear of the left iron rail */
   bottom: 10px;
   z-index: 30;
   color: #5a6472;
