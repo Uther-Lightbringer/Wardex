@@ -1,14 +1,34 @@
 <script setup lang="ts">
 // Session info panel (features/chat.md §6.2): agentName · provider, model,
-// message count + created/updated timestamps, per-session token usage
-// (front-end sum of already-loaded rows — no extra IPC), work directory,
-// session summary, and the sticky lastError line (startup errors like "no
-// usable default agent" surface here).
-import { computed } from 'vue';
+// message count + created/updated timestamps, per-session token usage from
+// the backend usage.json aggregate (`session_usage`: resident-memory sum over
+// that session's records — covers backfilled history, which the in-row
+// message usages don't), work directory, session summary, and the sticky
+// lastError line (startup errors like "no usable default agent" surface
+// here).
+import { computed, onMounted, ref, watch } from 'vue';
 import { useChatStore } from '../stores/chat';
 import { usePrefsStore } from '../stores/prefs';
 import { useUiStore } from '../stores/ui';
+import { cmd, isTauri } from '../lib/tauri';
 import { formatTokens } from '../lib/format';
+
+interface SessionUsage {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedReadTokens: number;
+  cachedWriteTokens: number;
+  thoughtTokens: number;
+  contextTokens: number;
+}
+
+interface InfoRow {
+  k: string;
+  v: string;
+  hint?: string;
+}
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
@@ -34,67 +54,103 @@ const agentLine = computed(() => {
   return `${meta.value.agentName || 'Agent'} · ${meta.value.provider}`;
 });
 
-const modelLine = computed(() => (meta.value?.model ? `模型 ${meta.value.model}` : ''));
-
-const statsLine = computed(() => {
-  if (!meta.value) return '';
-  return `消息 ${meta.value.messageCount} · 更新 ${stamp(meta.value.updatedAt)}`;
+// 基础信息组：模型 / 消息数 / 创建 / 更新（空值行自动省略）。
+const infoRows = computed<InfoRow[]>(() => {
+  const m = meta.value;
+  if (!m) return [];
+  const rows: InfoRow[] = [];
+  if (m.model) rows.push({ k: '模型', v: m.model });
+  rows.push({ k: '消息', v: `${m.messageCount} 条` });
+  rows.push({ k: '创建', v: stamp(m.createdAt) });
+  rows.push({ k: '更新', v: stamp(m.updatedAt) });
+  return rows;
 });
 
-const createdLine = computed(() =>
-  meta.value ? `创建于 ${stamp(meta.value.createdAt)}` : '',
+// ---- usage: one `session_usage` IPC per session switch / structural rows
+// change (turn end). Backend aggregates its resident usage.json records —
+// including backfilled history — so old sessions show cached/thought too.
+const usage = ref<SessionUsage | null>(null);
+let usageSeq = 0;
+
+async function loadUsage(): Promise<void> {
+  const sid = chat.sessionId;
+  if (!sid || !isTauri) return;
+  const seq = ++usageSeq;
+  try {
+    const u = await cmd<SessionUsage | null>('session_usage', { sessionId: sid }, null);
+    if (seq === usageSeq) usage.value = u;
+  } catch {
+    /* keep the previous value */
+  }
+}
+
+watch(
+  () => chat.sessionId,
+  () => {
+    usage.value = null;
+    void loadUsage();
+  },
 );
+// Structural rows replacement = a turn finished / messages reloaded → the
+// backend record for that turn is already appended. (Streaming chunks mutate
+// rows in place, so no extra IPC during generation.)
+watch(
+  () => chat.rows,
+  () => {
+    if (chat.sessionId) void loadUsage();
+  },
+);
+onMounted(() => void loadUsage());
 
-// Cached computed over already-loaded rows: no backend round-trip, so it
-// stays in sync with the title-row usage at zero extra cost.
-const sessionUsage = computed(() => {
-  let input = 0;
-  let output = 0;
-  for (const r of chat.rows) {
-    if (r.role !== 'assistant' || !r.usage) continue;
-    input += r.usage.inputTokens;
-    output += r.usage.outputTokens;
-  }
-  if (input === 0 && output === 0) return '';
-  return `tokens ↑${formatTokens(input)} ↓${formatTokens(output)}`;
+// 用量统计组：tokens / 回合 / 缓存读写 / 思考 / 上下文（零值行省略）。
+// 上下文为估算值：最新一轮 input，kimi 每次请求带全量上下文，故最末轮
+// input ≈ 当前上下文大小（含缓存前缀）。
+const usageRows = computed<InfoRow[]>(() => {
+  const u = usage.value;
+  if (!u) return [];
+  const rows: InfoRow[] = [];
+  if (u.inputTokens > 0 || u.outputTokens > 0)
+    rows.push({ k: 'tokens', v: `↑${formatTokens(u.inputTokens)} ↓${formatTokens(u.outputTokens)}` });
+  if (u.turns > 0) rows.push({ k: '回合', v: `${u.turns}` });
+  if (u.cachedReadTokens > 0)
+    rows.push({ k: '缓存读', v: `↑${formatTokens(u.cachedReadTokens)}` });
+  if (u.cachedWriteTokens > 0)
+    rows.push({ k: '缓存写', v: `↑${formatTokens(u.cachedWriteTokens)}` });
+  if (u.thoughtTokens > 0)
+    rows.push({ k: '思考', v: `↑${formatTokens(u.thoughtTokens)}` });
+  if (u.contextTokens > 0)
+    rows.push({
+      k: '上下文',
+      v: `≈${formatTokens(u.contextTokens)}`,
+      hint: '估算值：最新一轮输入量（含缓存前缀）',
+    });
+  return rows;
 });
-
-// 缓存读写（cachedRead/cachedWrite 合计）+ 思考 token 合计 + 当前上下文
-// 估算（最近一轮 input，kimi 每次请求带全量上下文，故最末轮 input ≈ 当前
-// 上下文大小，含缓存前缀）。
-const cacheLine = computed(() => {
-  let cachedRead = 0;
-  let cachedWrite = 0;
-  let thought = 0;
-  let ctx = 0;
-  for (const r of chat.rows) {
-    if (r.role !== 'assistant' || !r.usage) continue;
-    cachedRead += r.usage.cachedReadTokens ?? 0;
-    cachedWrite += r.usage.cachedWriteTokens ?? 0;
-    thought += r.usage.thoughtTokens ?? 0;
-    if (r.usage.inputTokens > 0) ctx = r.usage.inputTokens;
-  }
-  const parts: string[] = [];
-  if (cachedRead > 0) parts.push(`缓存读 ↑${formatTokens(cachedRead)}`);
-  if (cachedWrite > 0) parts.push(`缓存写 ↑${formatTokens(cachedWrite)}`);
-  if (thought > 0) parts.push(`思考 ↑${formatTokens(thought)}`);
-  if (ctx > 0) parts.push(`上下文 ≈ ${formatTokens(ctx)}`);
-  return parts.join(' · ');
-});
-
-const cacheHint =
-  '缓存读：各轮 cachedRead 合计；缓存写：cachedWrite 合计；上下文为估算值（最近一轮输入量，含缓存前缀）';
 </script>
 
 <template>
   <div class="ainfo">
     <template v-if="meta">
       <div class="ainfo__agent" :style="{ fontSize: prefs.fs(13) + 'px' }">{{ agentLine }}</div>
-      <div v-if="modelLine" class="ainfo__stats" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ modelLine }}</div>
-      <div class="ainfo__stats" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ statsLine }}</div>
-      <div class="ainfo__stats" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ createdLine }}</div>
-      <div v-if="sessionUsage" class="ainfo__stats" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ sessionUsage }}</div>
-      <div v-if="cacheLine" class="ainfo__stats" :title="cacheHint" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ cacheLine }}</div>
+
+      <div class="ainfo__sep"></div>
+      <div class="ainfo__grid" :style="{ fontSize: prefs.fs(11) + 'px' }">
+        <template v-for="r in infoRows" :key="r.k">
+          <div class="ainfo__k">{{ r.k }}</div>
+          <div class="ainfo__v" :title="r.hint">{{ r.v }}</div>
+        </template>
+      </div>
+
+      <template v-if="usageRows.length">
+        <div class="ainfo__sep"></div>
+        <div class="ainfo__grid" :style="{ fontSize: prefs.fs(11) + 'px' }">
+          <template v-for="r in usageRows" :key="r.k">
+            <div class="ainfo__k">{{ r.k }}</div>
+            <div class="ainfo__v" :title="r.hint">{{ r.v }}</div>
+          </template>
+        </div>
+      </template>
+
       <div class="ainfo__sep"></div>
       <div class="ainfo__label" :style="{ fontSize: prefs.fs(11) + 'px' }">工作目录</div>
       <div class="ainfo__path" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ meta.workDir || meta.projectDir }}</div>
@@ -106,6 +162,7 @@ const cacheHint =
       >
         关联项目目录…
       </div>
+
       <template v-if="meta.summary">
         <div class="ainfo__sep"></div>
         <div class="ainfo__label" :style="{ fontSize: prefs.fs(11) + 'px' }">会话摘要</div>
@@ -140,8 +197,23 @@ const cacheHint =
   overflow: hidden;
 }
 
-.ainfo__stats {
+.ainfo__grid {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 2px;
+  align-items: baseline;
+}
+
+.ainfo__k {
   color: var(--war-text-muted);
+  white-space: nowrap;
+}
+
+.ainfo__v {
+  color: var(--war-text-dim);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ainfo__sep {

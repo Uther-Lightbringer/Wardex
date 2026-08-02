@@ -1089,6 +1089,14 @@ fn usage_report(state: State<'_, AppState>) -> Value {
     serde_json::to_value(stores.usage.report()).unwrap_or(Value::Null)
 }
 
+/// Per-session usage for the 会话信息 panel: one in-memory aggregation over
+/// that session's records (cheap; no disk IO, UsageStore stays resident).
+#[tauri::command]
+fn session_usage(state: State<'_, AppState>, session_id: String) -> Value {
+    let stores = lock(&state.stores);
+    serde_json::to_value(stores.usage.for_session(&session_id)).unwrap_or(Value::Null)
+}
+
 #[tauri::command]
 fn usage_backfill(state: State<'_, AppState>) -> Value {
     let mut stores = lock(&state.stores);
@@ -1386,6 +1394,7 @@ pub fn run() {
             prompt_remove,
             usage_report,
             usage_backfill,
+            session_usage,
             get_prefs,
             background_config,
             set_user_name,

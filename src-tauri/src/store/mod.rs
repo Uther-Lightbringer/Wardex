@@ -40,7 +40,7 @@ pub use sessions::{
     SessionIndexRow, SessionMeta, SessionStore, SessionsError,
 };
 pub use todos::{TodoRow, TodoStore, TodosError};
-pub use usage::{UsageRecord, UsageReport, UsageStore, UsageError};
+pub use usage::{SessionUsageView, UsageRecord, UsageReport, UsageStore, UsageError};
 
 /// All singleton stores plus the startup initialization order
 /// (architecture.md §4): layout first, then each domain loads tolerantly.

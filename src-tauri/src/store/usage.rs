@@ -114,6 +114,22 @@ pub struct SessionReport {
     pub totals: UsageTotals,
 }
 
+/// Per-session usage for the info panel (`session_usage` command): totals
+/// plus cached/thought token sums and the context estimate (latest record's
+/// input — kimi prompts carry the full context each round).
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsageView {
+    pub turns: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_read_tokens: u64,
+    pub cached_write_tokens: u64,
+    pub thought_tokens: u64,
+    pub context_tokens: u64,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageReport {
@@ -167,6 +183,29 @@ impl UsageStore {
             .filter(|r| r.session_id == session_id)
             .map(|r| r.ts)
             .min()
+    }
+
+    /// Aggregate ONE session's records (append order = time order, so the
+    /// last matching record is the latest turn). Returns None when the
+    /// session has no usage records at all.
+    pub fn for_session(&self, session_id: &str) -> Option<SessionUsageView> {
+        let mut v = SessionUsageView::default();
+        let mut found = false;
+        for r in &self.records {
+            if r.session_id != session_id {
+                continue;
+            }
+            found = true;
+            v.turns += 1;
+            v.input_tokens += r.input_tokens;
+            v.output_tokens += r.output_tokens;
+            v.total_tokens += r.total_tokens;
+            v.cached_read_tokens += r.cached_read_tokens.unwrap_or(0);
+            v.cached_write_tokens += r.cached_write_tokens.unwrap_or(0);
+            v.thought_tokens += r.thought_tokens.unwrap_or(0);
+            v.context_tokens = r.input_tokens;
+        }
+        found.then_some(v)
     }
 
     pub fn save(&self, paths: &Paths) -> Result<(), UsageError> {
@@ -283,5 +322,32 @@ mod tests {
         assert_eq!(report.sessions[0].session_id, "s1");
         assert_eq!(report.sessions[0].agent_name, "Kimi");
         assert_eq!(report.sessions[1].session_id, "s2");
+    }
+
+    #[test]
+    fn for_session_aggregates_one_session() {
+        let mut store = UsageStore::default();
+        let mut r1 = rec("s1", "a1", "Kimi", "k2", 100);
+        r1.cached_read_tokens = Some(40);
+        r1.thought_tokens = Some(10);
+        let mut r2 = rec("s1", "a1", "Kimi", "k2", 300);
+        r2.cached_read_tokens = Some(200);
+        r2.cached_write_tokens = Some(30);
+        let mut r3 = rec("s2", "a2", "Claude", "sonnet", 200);
+        r3.cached_read_tokens = Some(150);
+        store.records.extend([r1, r2, r3]);
+
+        let v = store.for_session("s1").expect("session has records");
+        assert_eq!(v.turns, 2);
+        assert_eq!(v.input_tokens, 200);
+        assert_eq!(v.output_tokens, 200);
+        assert_eq!(v.total_tokens, 400);
+        assert_eq!(v.cached_read_tokens, 240);
+        assert_eq!(v.cached_write_tokens, 30);
+        assert_eq!(v.thought_tokens, 10);
+        // Latest record's input wins the context estimate.
+        assert_eq!(v.context_tokens, 150);
+
+        assert!(store.for_session("nope").is_none());
     }
 }
