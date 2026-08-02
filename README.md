@@ -19,6 +19,16 @@ WarDex 是一款 Windows 桌面端 AI 编程助手 GUI，采用魔兽争霸 III 
 - [NSIS 安装器](https://github.com/Uther-Lightbringer/Wardex/releases/latest/download/WarDex_0.0.1_x64-setup.exe)
 - [便携版 ZIP](https://github.com/Uther-Lightbringer/Wardex/releases/latest/download/WarDex-win64-0.0.1.zip)（解压即可运行，附 `make-desktop-shortcut.bat` 创建桌面快捷方式）
 
+## 截图
+
+| 主菜单 | AI 聊天 |
+|---|---|
+| ![主菜单](docs/screenshots/main.jpg) | ![AI 聊天](docs/screenshots/AIChat.jpg) |
+
+| 打开项目 |
+|---|
+| ![打开项目](docs/screenshots/openProject.jpg) |
+
 ## 技术栈
 
 | 层 | 技术 |
