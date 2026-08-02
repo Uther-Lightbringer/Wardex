@@ -967,7 +967,7 @@ const visibleAtts = computed(() =>
   color: #a0a8b8;
   font-family: SimSun, serif;
   font-size: 11px;
-  cursor: pointer;
+  cursor: url('/assets/ui/misc/cursor_green_32.png') 1 0, pointer;
   opacity: 0;
   transition: opacity 0.15s;
 }

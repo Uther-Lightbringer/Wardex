@@ -21,6 +21,7 @@ import { cmd, fileSrc, isTauri, openUrl } from '../lib/tauri';
 import { useNavStore } from '../stores/nav';
 import { FONT_SCALE_STEPS, usePrefsStore } from '../stores/prefs';
 import {
+  goModelId,
   isBareCliPath,
   maskKey,
   useAgentsStore,
@@ -104,23 +105,26 @@ async function refreshModels(): Promise<void> {
           baseUrl: draft.baseUrl.trim(),
           apiKey,
         });
-        ids.forEach((id) => out.add(id));
+        // OpenCode Go 端点（https://opencode.ai/zen/go/v1）：裸 id 自动补
+        // `opencode-go/` 前缀，否则拿到的 deepseek-v4-flash 等无法被引用。
+        const modelIds = ids.map((id) => goModelId(draft.baseUrl, id));
+        modelIds.forEach((id) => out.add(id));
         // Bulk-declare the endpoint's models in config.toml under this
         // agent's own provider namespace: the CLI picker then lists them and
         // chat-page switching hot-applies via set_config_option instead of
         // respawning. The sync FULL-CLEANS every wardex-* namespace first —
         // only this refresh's set survives; kimi's own config is untouched.
         // kimi CLI only; unsaved new agents skip (no id to namespace under).
-        if (draft.provider === 'kimi' && selectedId.value && ids.length > 0) {
+        if (draft.provider === 'kimi' && selectedId.value && modelIds.length > 0) {
           try {
             await cmd('sync_agent_models', {
               agentId: selectedId.value,
               baseUrl: draft.baseUrl.trim(),
               apiKey,
-              models: ids,
+              models: modelIds,
               maxContextK: clampContextK(draft.maxContextK) || 256,
             });
-            modelFetchMsg.value = `已同步 ${ids.length} 个模型到 config.toml`;
+            modelFetchMsg.value = `已同步 ${modelIds.length} 个模型到 config.toml`;
           } catch (e) {
             modelFetchMsg.value = String(e);
           }

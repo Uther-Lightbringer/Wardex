@@ -207,7 +207,6 @@ onBeforeUnmount(() => {
   justify-content: center;
   margin: 0 3px;
   padding: 12px 0;
-  cursor: pointer;
   user-select: none;
 }
 

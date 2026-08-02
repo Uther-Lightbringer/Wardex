@@ -331,7 +331,6 @@ watch(() => chat.workspaceRefreshSeq, refresh); // 刷新工作区 button
 .gitp__list-wrap {
   flex: 1;
   min-height: 0;
-  max-height: 156px; /* ≈4 rows + scrollbar (features/chat.md §6.3) */
   display: flex;
 }
 

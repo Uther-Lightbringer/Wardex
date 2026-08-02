@@ -148,7 +148,6 @@ function onGripUp(): void {
   padding: 0 14px;
   gap: 6px;
   user-select: none;
-  cursor: pointer;
 }
 
 /* Open state: the title tucks INTO the panel frame — the bar overlaps the

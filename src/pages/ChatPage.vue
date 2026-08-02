@@ -483,7 +483,7 @@ const sessionUsage = computed(() => {
 
 .chat__model-dd {
   flex: none;
-  width: 210px; /* model ids run long (kimi-code/kimi-for-coding); text ellipsizes */
+  width: 260px; /* model ids run long (opencode-go/deepseek-v4-flash); hover shows full via title */
   height: 30px;
 }
 

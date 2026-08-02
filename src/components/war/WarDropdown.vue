@@ -62,9 +62,18 @@ function select(index: number): void {
 function measure(): void {
   const r = root.value?.getBoundingClientRect();
   if (!r) return;
+  let w = Math.max(r.width, 120);
+  // Auto-width: widen the popup so the longest option text fits in one line
+  // (scrollWidth of the list is the natural measure — border-image popup needs
+  // ~30px extra for the two borders). Capped so pathological lists don't run
+  // off the screen. Runs once per open on a handful of rows: negligible cost.
+  const inner = pop.value?.querySelector('.war-dd__pop-inner') as HTMLElement | null;
+  if (inner && inner.scrollWidth + 30 > w) {
+    w = Math.min(inner.scrollWidth + 30, Math.max(460, Math.floor(window.innerWidth * 0.9)));
+  }
   popStyle.value = {
     left: `${r.left}px`,
-    width: `${Math.max(r.width, 120)}px`,
+    width: `${w}px`,
     ...(props.dropUp
       ? { bottom: `${window.innerHeight - r.top + 2}px` }
       : { top: `${r.bottom + 2}px` }),
@@ -118,7 +127,7 @@ onBeforeUnmount(() => {
     <!-- closed-state bar (border layer + label that spans the full width) -->
     <div class="war-dd__bar" @click="toggle">
       <div class="war-dd__bar-frame"></div>
-      <span class="war-dd__bar-text" :style="{ fontSize: textSize + 'px' }">{{ shownText }}</span>
+      <span class="war-dd__bar-text" :style="{ fontSize: textSize + 'px' }" :title="shownText">{{ shownText }}</span>
       <!-- gold arrow as a separate element: baked-in arrows get mangled by
            border-image edge stretching (double-arrow artifact in WebView2) -->
       <img class="war-dd__arrow" src="/assets/ui/dropdown/dropdown_arrow.png" alt="" />

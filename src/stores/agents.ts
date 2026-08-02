@@ -81,6 +81,21 @@ export function maskKey(key: string): string {
   return chars.slice(0, 3).join('') + '****' + chars.slice(-4).join('');
 }
 
+/** OpenCode Go 端点识别：Base URL 命中 opencode.ai 的 zen/go 即需要前缀。 */
+export function isOpenCodeGoBaseUrl(baseUrl: string): boolean {
+  return baseUrl.trim().includes('opencode.ai/zen/go');
+}
+
+/**
+ * OpenCode Go 模型 ID 规范（docs/zh-cn/go.md）：模型引用需带
+ * `opencode-go/<model-id>` 前缀。`fetch_models` 返回的是裸 id（如
+ * `deepseek-v4-flash`），此处按需补齐前缀；非 Go 端点原样返回。
+ */
+export function goModelId(baseUrl: string, id: string): string {
+  if (!isOpenCodeGoBaseUrl(baseUrl)) return id;
+  return id.startsWith('opencode-go/') ? id : `opencode-go/${id}`;
+}
+
 /**
  * isBareCliPath (spec §9.2): empty, or the provider's defaultCommand with an
  * optional .exe/.cmd suffix. Bare paths are (re)probed automatically; the
@@ -194,10 +209,12 @@ export const useAgentsStore = defineStore('agents', {
           baseUrl,
           apiKey: a?.apiKey ?? '',
         });
+        // OpenCode Go 端点：裸 id 补 `opencode-go/` 前缀，与配置页刷新一致。
+        const prefixed = ids.map((id) => goModelId(baseUrl, id));
         // The agent may have been edited mid-flight; only adopt the result
         // when the endpoint identity is unchanged.
         if (this.byId(agentId)?.baseUrl.trim() === baseUrl) {
-          this.modelsByAgent = { ...this.modelsByAgent, [agentId]: ids };
+          this.modelsByAgent = { ...this.modelsByAgent, [agentId]: prefixed };
         }
       } catch (e) {
         console.warn(`[agents] fetch_models(${agentId}) failed, keeping cache`, e);
