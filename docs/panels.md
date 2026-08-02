@@ -27,7 +27,7 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 
 - **抽屉式右栏**（非手风琴）：折叠态为右缘一条 44px 竖排按钮栏（每面板一个按钮，图标或竖排中文标题）。点击按钮 → 该面板从右侧**滑入**（250ms ease），聊天区被挤窄（网格 `188px 1fr auto`，抽屉占据布局空间，**非 overlay** 浮层）。
 - **互斥展开**：同一时刻至多一个面板打开；点击已打开面板的按钮或其标题条 → 折叠收回。
-- **打开状态不持久化**：`panelLayout` 不记 `open`；应用启动时全部面板折叠。已移除旧的 `alwaysOpen`（agent 面板常驻）概念。
+- **打开状态不持久化**：`panelLayout` 不记 `open`；应用启动时仅 `defaultOpen: true` 的面板展开（当前为「会话信息」），其余全部折叠；用户关闭后下次启动仍会重新展开。已移除旧的 `alwaysOpen`（agent 面板常驻且不可关）概念。
 - **懒挂载**：折叠的面板不挂载组件、不取数据（[performance.md](./performance.md) §1.4 不可见不工作）；首次展开才动态 import + 拉数据。
 - **拖拽调宽**：展开面板**左沿**有拖拽手柄（铁框风格，见 §3），pointer 拖拽实时改宽度；约束 min 200px / max 聊天区宽度的 60%。拖拽过程中内容区 `pointer-events: none` 防误触。
 - **布局记忆**：每个面板的 `{width, order}` 按面板 id 持久化到 `user_prefs.json` 的 `panelLayout` 字段：
@@ -52,7 +52,7 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 | `files` | 工作区文件 | 文件树（点击预览/右键系统打开） | sessionSwitch, expand, manual |
 | `tasks` | 后台任务 | agent 后台任务列表（`src/panels/TasksPanel.vue`）：subagent 管道中 `kind='task'` 条目，来源为 `task_id:` 启动应答与 TaskList/TaskOutput 更新；会话切换恢复走新 Tauri 命令 `get_subagents`（镜像 `RuntimeSnap.subagents`，chat store `openSession` 中拉取，与 `pending_permission` 同模式）。registry：`defaultOpen: false, defaultWidth: 320, order: 12` | turnEnd, sessionSwitch |
 
-所有面板 `defaultOpen: false`（抽屉打开状态不持久化，启动全折叠，见 §1.2）。git 对比、数据库等为后续批次，按 §4 指南加入。
+所有面板 `defaultOpen: false` 改为仅「会话信息」为 `defaultOpen: true`（启动即展开，关闭不持久化，见 §1.2）。git 对比、数据库等为后续批次，按 §4 指南加入。
 
 ## 3. 铁框三级视觉语言
 
@@ -94,7 +94,7 @@ type RefreshTrigger = 'turnEnd' | 'sessionSwitch' | 'expand' | 'manual';
 ## 5. 实现检查清单（框架本身）
 
 - [ ] WarDock/WarPanel 组件：44px 按钮栏 + 250ms ease 抽屉滑入，互斥展开，网格 `188px 1fr auto` 挤压式（非 overlay）
-- [ ] 打开状态瞬态：启动全折叠，不持久化；无 `alwaysOpen` 特例
+- [ ] 打开状态瞬态：启动仅 `defaultOpen` 面板展开（会话信息），其余折叠；不持久化；无 `alwaysOpen` 特例
 - [ ] 左沿拖拽手柄：min 200px / max 60% 聊天区宽、pointerup 后 300ms 防抖持久化到 `panelLayout[id].width`
 - [ ] panelLayout 读写并入 user_prefs（[data-formats.md](./data-formats.md) §7 字段说明），旧 `open`/`height` 键忽略不迁移
 - [ ] 懒挂载：动态 import + 折叠卸载

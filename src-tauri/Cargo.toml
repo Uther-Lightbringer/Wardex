@@ -50,6 +50,8 @@ fern = "0.7"
 ureq = { version = "2", features = ["tls", "json"] }
 # Parse ~/.kimi-code/config.toml [models] aliases (models.rs).
 toml = "0.8"
+# Regex-mode project code search (store/workspace.rs search_code).
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

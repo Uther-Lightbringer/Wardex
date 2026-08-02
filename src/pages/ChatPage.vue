@@ -18,6 +18,7 @@ import QueuePanel from '../components/chat/QueuePanel.vue';
 import SubagentPanel from '../components/chat/SubagentPanel.vue';
 import PermissionDialog from '../components/chat/PermissionDialog.vue';
 import FilePreviewDialog from '../components/chat/FilePreviewDialog.vue';
+import CodeSearchOverlay from '../components/chat/CodeSearchOverlay.vue';
 import { useNavStore } from '../stores/nav';
 import { usePrefsStore } from '../stores/prefs';
 import { useChatStore } from '../stores/chat';
@@ -63,10 +64,26 @@ const actionBtnW = computed(() =>
 // ---- rail inline-rename ref: Esc belongs to the input while renaming ----
 const rail = ref<{ renaming: string } | null>(null);
 
+// ---- Ctrl+F code search / Ctrl+\ interface lookup overlay ----
+const codeSearchKind = ref<'code' | 'iface' | null>(null);
+
 function onPageKey(e: KeyboardEvent): void {
   // The page stays mounted (v-show) after leaving — only handle Esc while
   // actually visible. Dialogs capture-stop Esc first, so they close first.
   if (nav.page !== 'chat') return;
+  if (e.ctrlKey && e.key.toLowerCase() === 'f') {
+    // Block the WebView2 find bar: Ctrl+F is project code search here. The
+    // overlay's own capture handler refocuses its input when already open.
+    e.preventDefault();
+    if (!chat.previewPath) codeSearchKind.value = 'code';
+    return;
+  }
+  if (e.ctrlKey && e.key === '\\') {
+    // Ctrl+\ → Java interface lookup (V1: heuristic declaration scan).
+    e.preventDefault();
+    if (!chat.previewPath) codeSearchKind.value = 'iface';
+    return;
+  }
   if (e.key === 'Escape' && !rail.value?.renaming) {
     void nav.goMain();
   }
@@ -338,6 +355,7 @@ const sessionUsage = computed(() => {
     <!-- modals -->
     <PermissionDialog />
     <FilePreviewDialog />
+    <CodeSearchOverlay v-if="codeSearchKind" :kind="codeSearchKind" @close="codeSearchKind = null" />
   </PageShell>
 </template>
 

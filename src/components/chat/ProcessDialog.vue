@@ -135,6 +135,16 @@ watch(
                   </div>
                 </div>
 
+                <!-- process prose (folded earlier text) -->
+                <div v-else-if="s.kind === 'text'" class="pd__step pd__step--text">
+                  <div class="pd__step-head" :style="{ fontSize: prefs.fs(12) + 'px' }" @click="toggle(i)">
+                    {{ openIdx[i] ? '▼' : '▶' }} 过程正文
+                  </div>
+                  <div v-if="openIdx[i]" class="pd__thinking-body" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                    {{ s.text }}
+                  </div>
+                </div>
+
                 <!-- tool -->
                 <div v-else class="pd__step pd__step--tool">
                   <div class="pd__step-head" :style="{ fontSize: prefs.fs(12) + 'px' }" @click="toggle(i)">
@@ -264,6 +274,11 @@ watch(
   border: 1px solid #3a4a40;
 }
 
+.pd__step--text {
+  background: #10151f44;
+  border: 1px solid #2a3a52;
+}
+
 .pd__step-head {
   color: #d0d6e0;
   user-select: none;
@@ -271,6 +286,10 @@ watch(
 
 .pd__step--thinking .pd__step-head {
   color: #c8b890;
+}
+
+.pd__step--text .pd__step-head {
+  color: #9fb6d4;
 }
 
 .pd__step-head:hover {

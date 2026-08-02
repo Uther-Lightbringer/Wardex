@@ -1498,17 +1498,27 @@ impl Actor {
         self.turn_usage_live = None; // stale usage must not leak into a new turn
         // 首条用户消息：发给 agent 的文本前注入提醒工具引导语（只进
         // prompt，不进显示的用户行；pending_prompt 路径复用同一文本）。
+        // 另：终端命令上下文（cmd.rs）在命令结束时挂起，随这一次 prompt
+        // 一次性注入（drain），让 agent 知道用户执行了什么。
         let prompt_text = {
             let mut stores = lock_ok(&self.stores);
             stores.sessions.ensure_open(&self.session_id);
+            let cmd_ctx = {
+                let pending = stores.sessions.drain_cmd_context(&self.session_id);
+                if pending.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n\n", pending.join("\n\n"))
+                }
+            };
             let first_user = stores
                 .sessions
                 .messages(&self.session_id)
                 .is_none_or(|ms| !ms.iter().any(|m| m.role == "user"));
             if first_user {
-                format!("{REMINDER_GUIDE_PREFIX}\n\n{text}")
+                format!("{cmd_ctx}{REMINDER_GUIDE_PREFIX}\n\n{text}")
             } else {
-                text.clone()
+                format!("{cmd_ctx}{text}")
             }
         };
         let (user_row, asst_row) = {
@@ -2547,8 +2557,9 @@ fn last_row(stores: &StoreRegistry, session_id: &str) -> Option<MessageRow> {
 }
 
 /// Frontend-facing JSON view of a message row (camelCase keys matching the
-/// disk format, data-formats.md §4.1).
-fn row_json(session_id: &str, row: &MessageRow) -> Value {
+/// disk format, data-formats.md §4.1). pub(crate): cmd.rs reuses it for
+/// command rows (chat://messageAppended / chat://bubbleSet).
+pub(crate) fn row_json(session_id: &str, row: &MessageRow) -> Value {
     json!({
         "sessionId": session_id,
         "row": {
@@ -2563,6 +2574,7 @@ fn row_json(session_id: &str, row: &MessageRow) -> Value {
             "segments": row.segments,
             "attachments": row.attachments,
             "kind": row.kind,
+            "exitCode": row.exit_code,
         }
     })
 }

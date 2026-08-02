@@ -27,6 +27,7 @@
 
 pub mod acp;
 pub mod chat;
+pub mod cmd;
 pub mod inspect;
 pub mod mcp_reminder;
 pub mod models;
@@ -38,7 +39,7 @@ pub mod usage_backfill;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use chat::{ChatManager, EventSink};
 use store::{AgentPatch, PanelLayoutEntry, Paths, StoreRegistry};
@@ -98,6 +99,7 @@ struct AppState {
     stores: Arc<Mutex<StoreRegistry>>,
     probe: tokio::sync::Mutex<probe::CliProbe>,
     tester: probe::AgentTester,
+    runs: cmd::CommandRunner,
 }
 
 struct TauriSink(tauri::AppHandle);
@@ -329,7 +331,44 @@ async fn clear_queue(state: State<'_, AppState>, session_id: String) -> Result<(
 
 #[tauri::command]
 fn session_messages(state: State<'_, AppState>, session_id: String) -> Vec<Value> {
-    state.chat.session_messages(&session_id)
+    let mut rows = state.chat.session_messages(&session_id);
+    // Command rows persisted mid-run are stale after an app restart (the
+    // runner is gone); never show a "streaming" command as running forever.
+    if !state.runs.has_active_run(&session_id) {
+        for r in &mut rows {
+            if let Some(obj) = r.as_object_mut() {
+                if obj.get("kind").and_then(Value::as_str) == Some("command")
+                    && obj.get("status").and_then(Value::as_str) == Some("streaming")
+                {
+                    obj.insert("status".to_string(), Value::String("interrupted".to_string()));
+                }
+            }
+        }
+    }
+    rows
+}
+
+/// Terminal command (Composer `!` prefix, cmd.rs): spawn cmd.exe in the
+/// project dir, append a kind=="command" row and stream output via
+/// term://output; returns the run id. `stores` is cloned first so no State
+/// borrow survives the await.
+#[tauri::command(async)]
+async fn run_command(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    command: String,
+    work_dir: String,
+) -> Result<String, String> {
+    let stores = state.stores.clone();
+    let runs = state.runs.clone();
+    runs.run(app, stores, &session_id, &command, &work_dir).await
+}
+
+#[tauri::command(async)]
+async fn kill_command(state: State<'_, AppState>, run_id: String) -> Result<(), String> {
+    let runs = state.runs.clone();
+    runs.kill(&run_id).await
 }
 
 #[tauri::command(async)]
@@ -660,6 +699,61 @@ async fn workspace_files(root: String, filter: String) -> Result<Vec<String>, St
     })
     .await
     .map_err(err)
+}
+
+/// Project-wide code search (Ctrl+F overlay on the chat page). Runs on the
+/// blocking pool; results are {file, hits[{line, text}]} — line 0 marks a
+/// filename-only match. `mode` = content | filename | both; `exts` = file
+/// extension whitelist (leading dot/wildcard stripped, case-insensitive,
+/// empty = all text files); `regex` treats the query as a case-insensitive
+/// regex (invalid patterns return an error).
+///
+/// NOTE: separate String/Vec args (not one struct) — Tauri v2 resolves each
+/// parameter by its own key in the invoke payload; a single struct arg would
+/// require a `params` key instead (see the InvalidArgs failure this caused).
+#[tauri::command]
+async fn search_code(
+    root: String,
+    query: String,
+    mode: Option<String>,
+    exts: Option<Vec<String>>,
+    regex: Option<bool>,
+) -> Result<Value, String> {
+    let mode = match mode.as_deref().unwrap_or("content") {
+        "filename" => store::workspace::SearchMode::Filename,
+        "both" => store::workspace::SearchMode::Both,
+        _ => store::workspace::SearchMode::Content,
+    };
+    let exts = exts.unwrap_or_default();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let exts: Vec<String> = exts
+            .iter()
+            .map(|e| e.trim().trim_start_matches('*').trim_start_matches('.').to_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect();
+        let opts = store::workspace::CodeSearchOptions {
+            mode,
+            exts: &exts,
+            regex: regex.unwrap_or(false),
+        };
+        store::workspace::search_code(std::path::Path::new(&root), &query, &opts)
+    })
+    .await
+    .map_err(err)?;
+    let v = result.map_err(err)?;
+    Ok(serde_json::to_value(v).map_err(err)?)
+}
+
+/// Java `interface` declarations (Ctrl+\ overlay). Heuristic text scan,
+/// results {file, line, name, text}; empty query lists every declaration.
+#[tauri::command]
+async fn search_java_interfaces(root: String, query: String) -> Result<Value, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        store::workspace::search_java_interfaces(std::path::Path::new(&root), &query)
+    })
+    .await
+    .map_err(err)?;
+    Ok(serde_json::to_value(result).map_err(err)?)
 }
 
 #[tauri::command]
@@ -1098,6 +1192,7 @@ pub fn run() {
                 stores,
                 probe: tokio::sync::Mutex::new(probe::CliProbe::new()),
                 tester: probe::AgentTester::new(),
+                runs: cmd::CommandRunner::new(),
             });
             log::info!(
                 "startup: chat manager + state ready ({:?}, total {:?})",
@@ -1133,6 +1228,9 @@ pub fn run() {
             session_messages,
             runtime_states,
             unread_sessions,
+            // terminal commands (`!` prefix)
+            run_command,
+            kill_command,
             // sessions / search
             list_sessions,
             sessions_for_project,
@@ -1163,6 +1261,8 @@ pub fn run() {
             preview_file,
             save_preview,
             workspace_files,
+            search_code,
+            search_java_interfaces,
             git_branch,
             git_log,
             git_status,

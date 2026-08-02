@@ -261,6 +261,260 @@ fn read_head(path: &Path, max: u64) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
+// codeSearch: project-wide search (Ctrl+F overlay on the chat page).
+// Modes: content-only, filename-only or both (filename rows carry line 0).
+// Plain queries are case-insensitive substrings; `regex` mode treats the
+// query as a case-insensitive regex. Honoring the same ignore list and
+// binary/ext skip rules as the rest of the workspace module; an explicit
+// extension filter narrows the walk further. Capped on scanned bytes,
+// matched files, hits per file and total hits so a large project can never
+// stall the UI.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeHit {
+    /// 1-based line number; **0 = filename-only match** (no content hit).
+    pub line: i64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeMatch {
+    pub file: String,
+    pub hits: Vec<CodeHit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Match against file contents only.
+    Content,
+    /// Match against relative file paths only.
+    Filename,
+    /// Filename matches first, then content matches.
+    Both,
+}
+
+pub struct CodeSearchOptions<'a> {
+    pub mode: SearchMode,
+    /// Restrict scanned files to these extensions (no leading dot, lowercase,
+    /// e.g. "java"). Empty = every text file.
+    pub exts: &'a [String],
+    /// Treat the query as a case-insensitive regex.
+    pub regex: bool,
+}
+
+/// Files matched at most (the hit cap usually binds first).
+pub const CODE_SEARCH_MAX_FILES: usize = 60;
+/// Hits per file so one file can't flood the results.
+pub const CODE_SEARCH_PER_FILE_HITS: usize = 8;
+/// Total bytes scanned across files before giving up (responsiveness).
+const CODE_SEARCH_BUDGET: u64 = 64 * 1024 * 1024;
+/// Longest line text forwarded to the UI (minified files).
+const CODE_SEARCH_LINE_CAP: usize = 300;
+
+enum Matcher {
+    Plain(String),
+    Regex(regex::Regex),
+}
+
+impl Matcher {
+    fn is_match(&self, text: &str) -> bool {
+        match self {
+            Matcher::Plain(ql) => text.to_lowercase().contains(ql),
+            Matcher::Regex(r) => r.is_match(text),
+        }
+    }
+}
+
+pub fn search_code(
+    root: &Path,
+    query: &str,
+    opts: &CodeSearchOptions<'_>,
+) -> Result<Vec<CodeMatch>, String> {
+    let q = query.trim();
+    if q.is_empty() || !root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let matcher = if opts.regex {
+        Matcher::Regex(
+            regex::RegexBuilder::new(q)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| format!("正则表达式无效：{e}"))?,
+        )
+    } else {
+        Matcher::Plain(q.to_lowercase())
+    };
+    let mut out: Vec<CodeMatch> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let mut scanned: u64 = 0;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= CODE_SEARCH_MAX_FILES {
+                return Ok(out);
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_ignored_name(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                stack.push(path);
+                continue;
+            }
+            let ext = ext_of(&path);
+            if is_binary_ext(&ext) || is_image_ext(&ext) {
+                continue;
+            }
+            if !opts.exts.is_empty() && !opts.exts.contains(&ext) {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let mut hits: Vec<CodeHit> = Vec::new();
+            if opts.mode != SearchMode::Content && matcher.is_match(&rel_str) {
+                hits.push(CodeHit { line: 0, text: String::new() });
+            }
+            if opts.mode != SearchMode::Filename && hits.len() < CODE_SEARCH_PER_FILE_HITS {
+                let Ok(meta) = fs::metadata(&path) else {
+                    continue;
+                };
+                if meta.len() > CODE_SEARCH_BUDGET {
+                    continue;
+                }
+                scanned += meta.len();
+                if scanned > CODE_SEARCH_BUDGET {
+                    return Ok(out);
+                }
+                let Ok(bytes) = fs::read(&path) else {
+                    continue;
+                };
+                if bytes.contains(&0) {
+                    continue;
+                }
+                let text = decode_text(&bytes);
+                for (i, raw) in text.split('\n').enumerate() {
+                    if hits.len() >= CODE_SEARCH_PER_FILE_HITS {
+                        break;
+                    }
+                    if matcher.is_match(raw) {
+                        let t = raw.strip_suffix('\r').unwrap_or(raw);
+                        hits.push(CodeHit {
+                            line: (i + 1) as i64,
+                            text: t.chars().take(CODE_SEARCH_LINE_CAP).collect(),
+                        });
+                    }
+                }
+            }
+            if !hits.is_empty() {
+                out.push(CodeMatch { file: rel_str, hits });
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// searchJavaInterfaces (Ctrl+\ overlay, V1 heuristic — no AST): scan .java
+// files for `interface` declarations with a regex. Comments/strings can
+// produce false positives (accepted for V1; a tree-sitter index is the
+// planned replacement). Empty query lists every declaration; otherwise the
+// interface NAME must contain the query (case-insensitive).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InterfaceHit {
+    pub file: String,
+    pub line: i64,
+    pub name: String,
+    pub text: String,
+}
+
+/// Declarations returned at most.
+pub const INTERFACE_MAX: usize = 60;
+/// Total bytes scanned across files before giving up.
+const INTERFACE_BUDGET: u64 = 64 * 1024 * 1024;
+
+pub fn search_java_interfaces(root: &Path, query: &str) -> Vec<InterfaceHit> {
+    let q = query.trim().to_lowercase();
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let re = regex::Regex::new(r"(?i)\binterface\s+([A-Za-z_$][A-Za-z0-9_$]*)").unwrap();
+    let mut out: Vec<InterfaceHit> = Vec::new();
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let mut scanned: u64 = 0;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if out.len() >= INTERFACE_MAX {
+                return out;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_ignored_name(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                stack.push(path);
+                continue;
+            }
+            if ext_of(&path) != "java" {
+                continue;
+            }
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            if meta.len() > INTERFACE_BUDGET {
+                continue;
+            }
+            scanned += meta.len();
+            if scanned > INTERFACE_BUDGET {
+                return out;
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            if bytes.contains(&0) {
+                continue;
+            }
+            let text = decode_text(&bytes);
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            for (i, raw) in text.split('\n').enumerate() {
+                if out.len() >= INTERFACE_MAX {
+                    return out;
+                }
+                let t = raw.strip_suffix('\r').unwrap_or(raw);
+                if let Some(caps) = re.captures(t) {
+                    let iname = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+                    if q.is_empty() || iname.to_lowercase().contains(&q) {
+                        out.push(InterfaceHit {
+                            file: rel_str.clone(),
+                            line: (i + 1) as i64,
+                            name: iname,
+                            text: t.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // previewFile / savePreviewText (§11.4). Input is an ABSOLUTE path from the
 // workspace tree — no root containment check (old behavior).
 // ---------------------------------------------------------------------------
@@ -420,4 +674,110 @@ pub fn git_branch_for(dir: &str) -> String {
     }
     // detached HEAD → short SHA
     head.chars().take(7).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tree(root: &std::path::Path) {
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("src/App.java"), "package a;\ninterface Demo { void run(); }\n").unwrap();
+        fs::write(root.join("src/Impl.java"), "class Impl implements Demo {}\n").unwrap();
+        fs::write(root.join("src/notes.md"), "# notes\n").unwrap();
+        fs::write(root.join("node_modules/pkg/Dep.java"), "interface Hidden {}\n").unwrap();
+        fs::write(root.join("blob.bin"), [0u8, 1, 2, 3]).unwrap();
+    }
+
+    fn opts<'a>(mode: SearchMode) -> CodeSearchOptions<'a> {
+        CodeSearchOptions { mode, exts: &[], regex: false }
+    }
+
+    #[test]
+    fn search_finds_lines_case_insensitively_and_skips_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let res = search_code(dir.path(), "interface", &opts(SearchMode::Content)).unwrap();
+        assert_eq!(res.len(), 1, "only App.java has 'interface'; node_modules/binaries skipped");
+        assert!(res.iter().all(|m| !m.file.contains("node_modules")));
+        assert_eq!(res[0].file, "src/App.java");
+        assert_eq!(res[0].hits[0].line, 2);
+    }
+
+    #[test]
+    fn search_empty_query_returns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        assert!(search_code(dir.path(), "  ", &opts(SearchMode::Content)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_reports_relative_paths_and_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let res = search_code(dir.path(), "run", &opts(SearchMode::Content)).unwrap();
+        assert_eq!(res[0].file, "src/App.java");
+        assert_eq!(res[0].hits[0].line, 2);
+        assert_eq!(res[0].hits[0].text, "interface Demo { void run(); }");
+    }
+
+    #[test]
+    fn filename_mode_matches_paths_with_line_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let res = search_code(dir.path(), "impl", &opts(SearchMode::Filename)).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].file, "src/Impl.java");
+        assert_eq!(res[0].hits[0].line, 0);
+    }
+
+    #[test]
+    fn both_mode_matches_name_first_then_content() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let res = search_code(dir.path(), "App", &opts(SearchMode::Both)).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].hits[0].line, 0, "filename match carries line 0");
+        assert_eq!(res[0].hits.len(), 1, "'App' appears in no content line");
+    }
+
+    #[test]
+    fn ext_filter_narrows_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let exts = vec!["java".to_string()];
+        let o = CodeSearchOptions { mode: SearchMode::Content, exts: &exts, regex: false };
+        let res = search_code(dir.path(), "notes", &o).unwrap();
+        assert!(res.is_empty(), ".md excluded by ext filter");
+        let o2 = CodeSearchOptions { mode: SearchMode::Content, exts: &exts, regex: false };
+        let res = search_code(dir.path(), "interface", &o2).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].file, "src/App.java");
+    }
+
+    #[test]
+    fn regex_mode_matches_and_rejects_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let o = CodeSearchOptions { mode: SearchMode::Content, exts: &[], regex: true };
+        let res = search_code(dir.path(), r"void\s+run\(\)", &o).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].file, "src/App.java");
+        assert!(search_code(dir.path(), "(", &o).is_err(), "unbalanced '(' is an invalid regex");
+    }
+
+    #[test]
+    fn interfaces_found_by_name_or_listed_all() {
+        let dir = tempfile::tempdir().unwrap();
+        tree(dir.path());
+        let res = search_java_interfaces(dir.path(), "");
+        assert_eq!(res.len(), 1, "only App.java declares an interface; node_modules skipped");
+        assert!(res.iter().all(|h| h.file != "node_modules/pkg/Dep.java"), "ignored dirs skipped");
+        let by_name = search_java_interfaces(dir.path(), "dem");
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].name, "Demo");
+        assert_eq!(by_name[0].line, 2);
+        assert!(search_java_interfaces(dir.path(), "zzz").is_empty());
+    }
 }

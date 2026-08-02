@@ -7,10 +7,24 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useChatStore, type Subagent } from '../stores/chat';
 import { usePrefsStore } from '../stores/prefs';
+import SubagentDialog from '../components/chat/SubagentDialog.vue';
 import WarScrollBar from '../components/war/WarScrollBar.vue';
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
+
+// Detail dialog: the selected entry is looked up LIVE by id so the dialog
+// keeps tracking status/output updates while it is open (same pattern as
+// SubagentPanel).
+const dlgOpen = ref(false);
+const dlgId = ref('');
+const dlgEntry = computed<Subagent | null>(
+  () => chat.subagents.find((s) => s.id === dlgId.value) ?? null,
+);
+function openDetail(s: Subagent): void {
+  dlgId.value = s.id;
+  dlgOpen.value = true;
+}
 
 const listEl = ref<HTMLElement | null>(null);
 const now = ref(Date.now());
@@ -92,7 +106,7 @@ function meta(s: Subagent): string {
         <div v-if="tasks.length === 0" class="taskp__empty" :style="{ fontSize: prefs.fs(12) + 'px' }">
           （暂无后台任务）
         </div>
-        <div v-for="t in tasks" :key="t.id" class="taskp__row" :class="{ 'taskp__row--done': t.status === 'completed' }">
+        <div v-for="t in tasks" :key="t.id" class="taskp__row" :class="{ 'taskp__row--done': t.status === 'completed' }" title="点击查看任务书与报告" @click="openDetail(t)">
           <span class="taskp__dot" :class="[dotClass(t), { breath: breathing(t) }]"></span>
           <span class="taskp__id" :style="{ fontSize: prefs.fs(10) + 'px' }" :title="t.taskId || t.id">
             {{ shortId(t) }}
@@ -105,6 +119,7 @@ function meta(s: Subagent): string {
       </div>
       <WarScrollBar :target="listEl" />
     </div>
+    <SubagentDialog v-model:open="dlgOpen" :entry="dlgEntry" />
   </div>
 </template>
 
@@ -142,6 +157,11 @@ function meta(s: Subagent): string {
   align-items: center;
   gap: 6px;
   padding: 3px 0;
+  cursor: pointer;
+}
+
+.taskp__row:hover {
+  background: #32509633;
 }
 
 .taskp__row--done .taskp__title,

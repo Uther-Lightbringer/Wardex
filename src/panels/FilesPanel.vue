@@ -34,6 +34,21 @@ const loaded = new Set<string>(); // rel paths of expanded dirs ('' = root)
 
 // ---- scroll target (WC3 WarScrollBar) ----
 const listEl = ref<HTMLElement | null>(null);
+const bigListEl = ref<HTMLElement | null>(null);
+
+// ---- expand overlay: the 222px dock drawer is too narrow for deep trees -
+// opens the same tree state in a large centered dialog (Esc / mask close).
+const big = ref(false);
+function onBigKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    big.value = false;
+  }
+}
+watch(big, (v) => {
+  if (v) window.addEventListener('keydown', onBigKey, true);
+  else window.removeEventListener('keydown', onBigKey, true);
+});
 
 const root = computed(() => chat.meta?.workDir || chat.meta?.projectDir || chat.projectDir);
 
@@ -149,6 +164,7 @@ const emptyText = computed(() =>
   <div class="tree">
     <div class="tree__bar">
       <span class="tree__refresh" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="reload">刷新</span>
+      <span class="tree__refresh" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="big = true">放大</span>
     </div>
     <div class="tree__list-wrap">
       <div ref="listEl" class="tree__list">
@@ -190,6 +206,67 @@ const emptyText = computed(() =>
       @select="onMenuSelect"
     />
   </div>
+
+  <!-- expand overlay: the same tree at a large size for many/deep files.
+       Teleported out of the drawer — the drawer's translateX transform would
+       otherwise capture position:fixed. -->
+  <Teleport to="body">
+    <div v-if="big" class="files-big-mask" @mousedown.self="big = false">
+    <div class="files-big">
+      <WarFrame
+        class="files-big__frame"
+        src="/assets/ui/frames/frame_fat_bar.png"
+        :slice="[23, 26, 22, 25]"
+        :hole="[23, 26, 22, 25]"
+      >
+        <div class="files-big__col">
+          <div class="files-big__bar">
+            <img
+              class="files-big__icon"
+              src="/assets/wc3_extracted/ui/icon-folder.png"
+              draggable="false"
+            />
+            <span class="files-big__title" :style="{ fontSize: prefs.fs(14) + 'px' }">工作区文件</span>
+            <span class="files-big__spacer"></span>
+            <span class="files-big__tool" :style="{ fontSize: prefs.fs(12) + 'px' }" @click="reload">刷新</span>
+            <span class="files-big__tool" :style="{ fontSize: prefs.fs(12) + 'px' }" @click="big = false">✕ 关闭</span>
+          </div>
+          <div class="files-big__wrap">
+            <div ref="bigListEl" class="tree__list">
+              <div v-if="rows.length === 0" class="tree__empty" :style="{ fontSize: prefs.fs(13) + 'px' }">
+                {{ emptyText }}
+              </div>
+              <div
+                v-for="(row, i) in rows"
+                :key="row.rel"
+                class="tree__row"
+                :style="{ paddingLeft: row.depth * 14 + 2 + 'px' }"
+                @click="onRowClick(row, i)"
+                @contextmenu.prevent="onContextMenu($event, row)"
+              >
+                <span v-if="row.dir" class="tree__arrow">{{ row.expanded ? '▼' : '▶' }}</span>
+                <span v-else class="tree__arrow-file"></span>
+                <img
+                  class="tree__icon"
+                  :src="row.dir ? '/assets/wc3_extracted/ui/icon-folder.png' : '/assets/wc3_extracted/ui/icon-file.png'"
+                  draggable="false"
+                />
+                <span
+                  class="tree__name"
+                  :class="{ dir: row.dir }"
+                  :style="{ fontSize: prefs.fs(14) + 'px' }"
+                  :title="row.rel"
+                  >{{ row.name }}</span
+                >
+              </div>
+            </div>
+            <WarScrollBar :target="bigListEl" />
+          </div>
+        </div>
+      </WarFrame>
+    </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -205,6 +282,7 @@ const emptyText = computed(() =>
   flex: none;
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
 }
 
 .tree__refresh {
@@ -275,5 +353,80 @@ const emptyText = computed(() =>
 
 .tree__name.dir {
   color: #e8d9a0;
+}
+
+/* ---- expand overlay ---- */
+.files-big-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: #000000b0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.files-big {
+  width: min(880px, 92vw);
+  height: min(640px, 78vh);
+}
+
+.files-big__frame {
+  width: 100%;
+  height: 100%;
+}
+
+.files-big__col {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 4px;
+}
+
+.files-big__bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.files-big__icon {
+  width: 18px;
+  height: 18px;
+}
+
+.files-big__title {
+  color: var(--war-gold);
+  font-family: SimSun, serif;
+  font-weight: bold;
+  text-shadow:
+    -1px 0 var(--war-outline-brown), 1px 0 var(--war-outline-brown),
+    0 -1px var(--war-outline-brown), 0 1px var(--war-outline-brown);
+}
+
+.files-big__spacer {
+  flex: 1;
+}
+
+.files-big__tool {
+  color: var(--war-gold);
+  font-family: SimSun, serif;
+  user-select: none;
+}
+
+.files-big__tool:hover {
+  color: var(--war-gold-bright);
+}
+
+.files-big__wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.files-big__wrap .tree__row {
+  height: 26px;
 }
 </style>

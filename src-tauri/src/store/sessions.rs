@@ -44,6 +44,9 @@ const DEFAULT_TITLE: &str = "新会话";
 const PLACEHOLDER: &str = "…";
 const EMPTY_REPLY: &str = "（空回复）";
 
+/// Command rows: head budget of retained output (mirrors cmd.rs forward cap).
+pub const CMD_OUTPUT_MAX: usize = 64 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionsError {
     #[error("io/json error: {0}")]
@@ -136,6 +139,10 @@ pub struct MessageRow {
     /// Absent in old files; the key is only written when non-empty.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub kind: String,
+    /// Command rows only (kind=="command"): process exit code, filled once
+    /// the run finishes; absent while running / after an app restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 /// Wire shape of one JSONL line. `status` defaults to "done" when the key is
@@ -158,6 +165,7 @@ struct MessageLine {
     attachments: Vec<String>,
     usage: Option<TurnUsage>,
     kind: String,
+    exit_code: Option<i32>,
 }
 
 impl Default for MessageLine {
@@ -175,6 +183,7 @@ impl Default for MessageLine {
             attachments: Vec::new(),
             usage: None,
             kind: String::new(),
+            exit_code: None,
         }
     }
 }
@@ -198,6 +207,7 @@ impl MessageLine {
             attachments: self.attachments,
             usage: self.usage,
             kind: self.kind,
+            exit_code: self.exit_code,
         };
         if row.segments.is_empty() {
             synthesize_legacy_segments(&mut row);
@@ -263,6 +273,9 @@ fn message_line_value(row: &MessageRow, include_segments: bool) -> Value {
     o.insert("status".to_string(), Value::String(row.status.clone()));
     o.insert("thinking".to_string(), Value::String(row.thinking.clone()));
     o.insert("toolCalls".to_string(), Value::Array(row.tool_calls.clone()));
+    if let Some(code) = row.exit_code {
+        o.insert("exitCode".to_string(), Value::Number(code.into()));
+    }
     Value::Object(o)
 }
 
@@ -345,6 +358,12 @@ pub struct SessionStore {
     open: HashMap<String, OpenSession>,
     /// LRU order: front = most recently used.
     lru: VecDeque<String>,
+    /// Transient per-session terminal-command context (cmd.rs): at each
+    /// command's end a "[Wardex 终端]" block is pushed here; the runtime
+    /// drains it into the NEXT user prompt (runtime.rs start_send) so the
+    /// agent sees what the user ran. In-memory only, never persisted — an
+    /// app restart simply loses the pending blocks.
+    pending_cmd_context: HashMap<String, Vec<String>>,
 }
 
 impl SessionStore {
@@ -357,6 +376,7 @@ impl SessionStore {
             index: Vec::new(),
             open: HashMap::new(),
             lru: VecDeque::new(),
+            pending_cmd_context: HashMap::new(),
         };
         store.discard_empty_sessions();
         store.reload_index();
@@ -613,6 +633,7 @@ impl SessionStore {
             return Ok(false);
         }
         self.release_session(session_id);
+        self.pending_cmd_context.remove(session_id);
         let dir = self.paths.session_dir(session_id);
         if dir.exists() && fs::remove_dir_all(&dir).is_err() {
             return Err(SessionsError::DeleteFailed);
@@ -909,6 +930,93 @@ impl SessionStore {
         append_text_segment(&mut row.segments, chunk);
         row.status = "streaming".to_string();
         true
+    }
+
+    /// Streaming output chunk for a command row (kind=="command") — MEMORY
+    /// ONLY, zero disk I/O. The command text stays in `content`; output
+    /// accumulates in the trailing text segment, capped at the head 64KB
+    /// (R4 budget; the run's final snapshot is written once at exit).
+    pub fn append_command_output(&mut self, session_id: &str, row_id: &str, chunk: &str) -> bool {
+        if !self.ensure_open(session_id) || chunk.is_empty() {
+            return false;
+        }
+        let Some(open) = self.open.get_mut(session_id) else {
+            return false;
+        };
+        let Some(row) = open
+            .messages
+            .iter_mut()
+            .find(|r| r.id == row_id && r.kind == "command")
+        else {
+            return false;
+        };
+        let tail = row
+            .segments
+            .last()
+            .and_then(|s| s.get("text"))
+            .and_then(Value::as_str)
+            .map(|t| t.len())
+            .unwrap_or(0);
+        if tail >= CMD_OUTPUT_MAX {
+            return false; // beyond the head budget: dropped in memory too
+        }
+        append_text_segment(&mut row.segments, chunk);
+        true
+    }
+
+    /// Finalize a command row: status + exit code (plus the truncation note),
+    /// then REWRITE the file — the command's single disk write.
+    pub fn finalize_command_row(
+        &mut self,
+        session_id: &str,
+        row_id: &str,
+        status: &str,
+        exit_code: Option<i32>,
+        truncated: bool,
+    ) -> Result<bool, SessionsError> {
+        if !self.ensure_open(session_id) {
+            return Ok(false);
+        }
+        let content_for_meta;
+        {
+            let Some(open) = self.open.get_mut(session_id) else {
+                return Ok(false);
+            };
+            let Some(row) = open
+                .messages
+                .iter_mut()
+                .find(|r| r.id == row_id && r.kind == "command")
+            else {
+                return Ok(false);
+            };
+            row.status = status.to_string();
+            row.exit_code = exit_code;
+            if truncated {
+                append_text_segment(&mut row.segments, "\n…（输出超过 64KB，已截断，仅保留前 64KB）");
+            }
+            content_for_meta = row.content.clone();
+        }
+        self.rewrite_messages_file(session_id)?;
+        self.update_meta_after_write(session_id, &content_for_meta, None)?;
+        Ok(true)
+    }
+
+    /// Queue a terminal-command context block (cmd.rs finalize) for the next
+    /// user prompt. Transient, per-session, in-memory only.
+    pub fn push_cmd_context(&mut self, session_id: &str, block: String) {
+        self.pending_cmd_context
+            .entry(session_id.to_string())
+            .or_default()
+            .push(block);
+    }
+
+    /// Take and clear the pending terminal-command blocks of a session —
+    /// called once per send (runtime.rs start_send) so the command context
+    /// rides along with exactly ONE prompt.
+    pub fn drain_cmd_context(&mut self, session_id: &str) -> Vec<String> {
+        self.pending_cmd_context
+            .remove(session_id)
+            .unwrap_or_default()
     }
 
     /// Streaming thinking chunk — MEMORY ONLY, zero disk I/O.

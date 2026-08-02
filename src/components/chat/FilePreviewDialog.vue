@@ -14,6 +14,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import type { EditorView as CmEditorView } from 'codemirror';
 import type { Compartment } from '@codemirror/state';
 import { cmd, openPath } from '../../lib/tauri';
+import { copyText } from '../../lib/clipboard';
 import { renderMarkdown } from '../../lib/markdown';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
@@ -227,6 +228,17 @@ async function buildEditor(): Promise<void> {
       ],
     }),
   });
+  // Jump to the search-result line when the preview was opened with one
+  // (chat.previewLine; 0 = top of file, clamped to the doc).
+  const jumpLine = chat.previewLine;
+  if (jumpLine > 0) {
+    const target = Math.min(jumpLine, cm.state.doc.lines);
+    const line = cm.state.doc.line(target);
+    cm.dispatch({
+      selection: { anchor: line.from },
+      effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
+    });
+  }
   cm.focus();
 }
 
@@ -381,6 +393,12 @@ function onEdgeUp(): void {
 }
 
 function onKey(e: KeyboardEvent): void {
+  // Context menu first: Esc closes it without closing the dialog.
+  if (e.key === 'Escape' && ctxMenu.value) {
+    e.stopPropagation();
+    ctxMenu.value = null;
+    return;
+  }
   if (e.key === 'Escape' && phase.value !== 'closed') {
     e.stopPropagation();
     close();
@@ -389,11 +407,199 @@ function onKey(e: KeyboardEvent): void {
 watch(
   phase,
   (p) => {
-    if (p !== 'closed') window.addEventListener('keydown', onKey, true);
-    else window.removeEventListener('keydown', onKey, true);
+    if (p !== 'closed') {
+      window.addEventListener('keydown', onKey, true);
+      window.addEventListener('mousedown', onAnyDown, true);
+    } else {
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('mousedown', onAnyDown, true);
+    }
   },
   { immediate: true },
 );
+
+// ---- context menu (all text bodies: CodeMirror / markdown raw / rendered)
+// Common items: 复制 / 剪切 / 粘贴 (clipboard), plus 插入引用到输入框, which
+// queues `@relpath:from-to` via the chat store (the Composer appends it and
+// the send-time expansion turns it into a 【引用文件：…】 block). Selection
+// data is captured when the menu OPENS (a click elsewhere would collapse the
+// browser selection). Rendered markdown is read-only: copy + whole-file
+// reference only (no reliable selection→source-line mapping).
+interface CtxItem {
+  label: string;
+  disabled?: boolean;
+  run: () => void;
+}
+
+const ctxMenu = ref<{ x: number; y: number; items: CtxItem[] } | null>(null);
+const mdRawEl = ref<HTMLTextAreaElement | null>(null);
+
+/** Project-relative forward-slash path; null when outside the project
+ * (the @reference expansion is root-anchored, so out-of-project files
+ * cannot be referenced). */
+function relFromAbs(abs: string): string | null {
+  const root = chat.projectDir.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+  if (!root) return null;
+  const p = abs.replace(/\\/g, '/');
+  if (!p.toLowerCase().startsWith(root + '/')) return null;
+  return p.slice(root.length + 1);
+}
+
+/** Mirror of chat.insertRef's token shape for the menu label. */
+function refLabel(rel: string, from: number, to: number): string {
+  const base = `@${rel}`;
+  if (from <= 0 && to <= 0) return `${base}（全文）`;
+  return from === to ? `${base}:${from}` : `${base}:${from}-${to}`;
+}
+
+function openCtxMenu(e: MouseEvent, items: CtxItem[]): void {
+  if (items.length === 0) return;
+  ctxMenu.value = {
+    x: Math.min(e.clientX, window.innerWidth - 240),
+    y: Math.min(e.clientY, window.innerHeight - items.length * 28 - 24),
+    items,
+  };
+}
+
+function runCtxItem(it: CtxItem): void {
+  ctxMenu.value = null;
+  if (it.disabled) return;
+  it.run();
+}
+
+async function readClipboard(): Promise<string> {
+  try {
+    return await navigator.clipboard.readText();
+  } catch {
+    return '';
+  }
+}
+
+/** 1-based line of a character position in `text`. */
+function posToLine(text: string, pos: number): number {
+  let line = 1;
+  const end = Math.max(0, Math.min(pos, text.length));
+  for (let i = 0; i < end; i++) {
+    if (text[i] === '\n') line++;
+  }
+  return line;
+}
+
+/** CodeMirror text body. */
+function onCtxCm(e: MouseEvent): void {
+  ctxMenu.value = null;
+  if (!cm) return;
+  const sel = cm.state.selection.main;
+  const selected = sel.from < sel.to;
+  const doc = cm.state.doc;
+  const rel = relFromAbs(path.value);
+  const items: CtxItem[] = [
+    {
+      label: '复制',
+      disabled: !selected,
+      run: () => void copyText(doc.sliceString(sel.from, sel.to)),
+    },
+    {
+      label: '剪切',
+      disabled: !selected || !editable.value,
+      run: () => {
+        void copyText(doc.sliceString(sel.from, sel.to));
+        cm?.dispatch({ changes: { from: sel.from, to: sel.to, insert: '' } });
+      },
+    },
+    {
+      label: '粘贴',
+      disabled: !editable.value,
+      run: async () => {
+        const t = await readClipboard();
+        if (t) cm?.dispatch({ changes: { from: sel.from, to: sel.to, insert: t } });
+      },
+    },
+  ];
+  if (rel) {
+    const from = doc.lineAt(sel.from).number;
+    const to = doc.lineAt(sel.to).number;
+    items.push({
+      label: `插入引用到输入框 ${refLabel(rel, from, to)}`,
+      disabled: !selected,
+      run: () => chat.insertRef(rel, from, to),
+    });
+  }
+  openCtxMenu(e, items);
+}
+
+/** Markdown raw textarea (editable unless truncated). */
+function onCtxRaw(e: MouseEvent): void {
+  ctxMenu.value = null;
+  const ta = mdRawEl.value;
+  if (!ta) return;
+  const s = ta.selectionStart;
+  const t = ta.selectionEnd;
+  const selected = s < t;
+  const rel = relFromAbs(path.value);
+  const items: CtxItem[] = [
+    {
+      label: '复制',
+      disabled: !selected,
+      run: () => void copyText(raw.value.slice(s, t)),
+    },
+    {
+      label: '剪切',
+      disabled: !selected || !editable.value,
+      run: () => {
+        void copyText(raw.value.slice(s, t));
+        raw.value = raw.value.slice(0, s) + raw.value.slice(t);
+        onEdit();
+      },
+    },
+    {
+      label: '粘贴',
+      disabled: !editable.value,
+      run: async () => {
+        const clip = await readClipboard();
+        if (clip) {
+          raw.value = raw.value.slice(0, s) + clip + raw.value.slice(t);
+          onEdit();
+        }
+      },
+    },
+  ];
+  if (rel) {
+    const from = posToLine(raw.value, s);
+    const to = posToLine(raw.value, Math.max(0, t - 1));
+    items.push({
+      label: `插入引用到输入框 ${refLabel(rel, from, to)}`,
+      disabled: !selected,
+      run: () => chat.insertRef(rel, from, to),
+    });
+  }
+  openCtxMenu(e, items);
+}
+
+/** Rendered markdown (read-only): copy the DOM selection, insert a
+ * whole-file reference (no reliable selection→source-line mapping). */
+function onCtxMd(e: MouseEvent): void {
+  ctxMenu.value = null;
+  const selText = window.getSelection()?.toString() ?? '';
+  const rel = relFromAbs(path.value);
+  const items: CtxItem[] = [
+    { label: '复制', disabled: !selText, run: () => void copyText(selText) },
+  ];
+  if (rel) {
+    items.push({
+      label: `插入引用到输入框 ${refLabel(rel, 0, 0)}`,
+      run: () => chat.insertRef(rel, 0, 0),
+    });
+  }
+  openCtxMenu(e, items);
+}
+
+function onAnyDown(e: MouseEvent): void {
+  // Clicks inside the context menu itself must not close it before the
+  // item's click handler runs (mousedown → menu removal → no click).
+  if ((e.target as HTMLElement | null)?.closest?.('.pv__ctx')) return;
+  ctxMenu.value = null;
+}
 </script>
 
 <template>
@@ -456,7 +662,7 @@ watch(
         </div>
 
         <!-- text body (CodeMirror: line numbers + syntax highlighting) -->
-        <div v-if="kind === 'text'" class="pv__body">
+        <div v-if="kind === 'text'" class="pv__body" @contextmenu.prevent="onCtxCm">
           <div ref="cmHost" class="pv__cm"></div>
         </div>
 
@@ -464,12 +670,14 @@ watch(
         <div v-else-if="kind === 'markdown'" class="pv__body">
           <textarea
             v-if="mdShowRaw"
+            ref="mdRawEl"
             v-model="raw"
             class="pv__editor pv__editor--full"
             spellcheck="false"
             @input="onEdit"
+            @contextmenu.prevent="onCtxRaw"
           ></textarea>
-          <div v-else class="pv__md md-body" v-html="mdHtml"></div>
+          <div v-else class="pv__md md-body" v-html="mdHtml" @contextmenu.prevent="onCtxMd"></div>
         </div>
 
         <!-- image body -->
@@ -480,6 +688,24 @@ watch(
         <!-- footer -->
         <div class="pv__footer">
           <WarButton skin="dialog" :width="150" text="关闭" @activated="close" />
+        </div>
+      </div>
+
+      <!-- context menu: clipboard ops + insert selection as an @reference -->
+      <div
+        v-if="ctxMenu"
+        class="pv__ctx"
+        :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+        @mousedown.stop
+      >
+        <div
+          v-for="(it, i) in ctxMenu.items"
+          :key="i"
+          class="pv__ctx-item"
+          :class="{ dis: it.disabled }"
+          @click.stop="runCtxItem(it)"
+        >
+          {{ it.label }}
         </div>
       </div>
     </div>
@@ -626,5 +852,42 @@ watch(
   display: flex;
   justify-content: center;
   padding-top: 2px;
+}
+
+.pv__ctx {
+  position: fixed;
+  z-index: 95;
+  min-width: 220px;
+  max-width: 420px;
+  background: #0b0d12f2;
+  border: 1px solid var(--war-gold);
+  padding: 4px 0;
+  font-family: SimSun, serif;
+}
+
+.pv__ctx-item {
+  padding: 5px 10px;
+  color: var(--war-text);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  user-select: none;
+}
+
+.pv__ctx-item:hover {
+  background: #3a4a6a55;
+  color: var(--war-gold-bright);
+}
+
+.pv__ctx-item.dis {
+  color: var(--war-text-faint);
+  cursor: default;
+}
+
+.pv__ctx-item.dis:hover {
+  background: transparent;
+  color: var(--war-text-faint);
 }
 </style>

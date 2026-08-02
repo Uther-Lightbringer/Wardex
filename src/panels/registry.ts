@@ -29,7 +29,7 @@ export const panelRegistry: PanelDef[] = [
     id: 'agent',
     title: '会话信息',
     component: () => import('./AgentPanel.vue'),
-    defaultOpen: false,
+    defaultOpen: true, // startup-expanded (WarDock opens the first such panel)
     defaultWidth: 220,
     order: 10,
     refreshOn: ['sessionSwitch'],

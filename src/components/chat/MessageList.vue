@@ -194,7 +194,9 @@ function avatarUrl(row: { role: string }): string {
 }
 
 function isStreaming(index: number): boolean {
-  return index === chat.rows.length - 1 && chat.streamRow?.id === chat.rows[index]?.id;
+  // NOT rows.length-1 based: a terminal-command row can sit after the
+  // streaming assistant row; the in-flight row is wherever it is.
+  return chat.streamRow?.id === chat.rows[index]?.id;
 }
 
 defineExpose({ scrollToEnd });

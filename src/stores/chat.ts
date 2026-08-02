@@ -55,6 +55,8 @@ export interface ChatMessage {
   usage?: TurnUsage;
   /** Row marker for non-interactive sends ('reminder'); absent = normal. */
   kind?: string;
+  /** Command rows only: process exit code, filled at run end (Rust cmd.rs). */
+  exitCode?: number | null;
 }
 
 export interface ChatStatus {
@@ -185,6 +187,12 @@ interface StreamTarget {
   el: HTMLElement;
 }
 
+/** Live DOM node of a streaming command row's output <pre> (term://output). */
+interface TermTarget {
+  rowId: string;
+  el: HTMLElement;
+}
+
 let listenersReady = false;
 const unlisteners: UnlistenFn[] = [];
 
@@ -221,19 +229,38 @@ export const useChatStore = defineStore('chat', {
     drafts: {} as Record<string, { text: string; attachments: string[] }>,
     /** Live DOM node of the streaming segment (R1 incremental append). */
     streamTarget: null as StreamTarget | null,
+    /** Live DOM node of a streaming command row's output (term://output). */
+    termTarget: null as TermTarget | null,
+    /** rowId → runId of live terminal runs (cancel button lookup; fed by
+     * term://output, dropped on term://exit). */
+    runsByRow: {} as Record<string, string>,
     /** File preview dialog state (FilesPanel opens, dialog renders). */
     previewPath: '',
+    /** Line to jump to after the preview opens (0 = top of file). */
+    previewLine: 0,
+    /** Preview right-click → composer insert queue (@token). The Composer
+     * watches seq/token and appends it to its draft; seq makes a repeated
+     * identical token fire the watcher again. */
+    pendingRefInsert: { seq: 0, token: '' } as { seq: number; token: string },
   }),
   getters: {
     /** Slash commands of the active session (composer `/` completion). */
     commands(): SlashCommand[] {
       return this.commandsBySession[this.sessionId] ?? [];
     },
-    /** The row currently receiving stream chunks (last assistant, busy). */
+    /**
+     * The assistant row currently receiving stream chunks. NOT necessarily
+     * the last row: a terminal-command row (kind 'command') can be appended
+     * while a turn is still streaming, so look for the last in-flight
+     * assistant row instead of assuming rows[last].
+     */
     streamRow(): ChatMessage | null {
       if (!this.status.busy && !this.status.retryActive) return null;
-      const last = this.rows[this.rows.length - 1];
-      return last && last.role === 'assistant' ? last : null;
+      for (let i = this.rows.length - 1; i >= 0; i--) {
+        const r = this.rows[i];
+        if (r.role === 'assistant' && (r.status === 'pending' || r.status === 'streaming')) return r;
+      }
+      return null;
     },
     sendLabel(): string {
       if (this.status.busy) {
@@ -261,6 +288,50 @@ export const useChatStore = defineStore('chat', {
           'acp://turn',
           (e) => this.onTurn(e.payload),
         ),
+        // ---- terminal command runs (Composer `!` prefix, cmd.rs) ----
+        // The backend owns the row's authoritative content; the frontend
+        // only streams text into the live DOM node (R1, same as acp://chunk)
+        // and keeps rowId → runId for the cancel button.
+        await listen<{ sessionId: string; runId: string; rowId: string; text: string }>(
+          'term://output',
+          (e) => {
+            if (e.payload.sessionId !== this.sessionId) return;
+            const { rowId, runId, text } = e.payload;
+            if (this.runsByRow[rowId] !== runId) {
+              this.runsByRow = { ...this.runsByRow, [rowId]: runId };
+            }
+            const row = this.rows.find((r) => r.id === rowId);
+            if (!row) return;
+            if (!row.segments) row.segments = [];
+            // In-place extension: no reactive trigger (R1); the bubble's DOM
+            // node is fed directly below, off-window bubbles self-heal from
+            // the segments on re-mount.
+            row.segments.push({ kind: 'text', text } as ChatSegment);
+            const t = this.termTarget;
+            if (t && t.rowId === rowId && t.el.isConnected) {
+              t.el.appendChild(document.createTextNode(text));
+            }
+          },
+        ),
+        await listen<{
+          sessionId: string;
+          runId: string;
+          rowId: string;
+          code: number | null;
+          killed: boolean;
+          truncated: boolean;
+        }>('term://exit', (e) => {
+          const { rowId, runId } = e.payload;
+          if (this.runsByRow[rowId] === runId) {
+            const rest = { ...this.runsByRow };
+            delete rest[rowId];
+            this.runsByRow = rest;
+          }
+          if (this.termTarget?.rowId === rowId) this.termTarget = null;
+          // No scrollSeq bump: the final bubbleSet keeps the header+status
+          // height, and a forced scroll would yank the user away from
+          // reading the output they scrolled up to inspect.
+        }),
         await listen<PermissionRequest>('acp://permission', (e) => {
           sessions.markPermPending(e.payload.sessionId, true);
           if (e.payload.sessionId === this.sessionId) this.permission = e.payload;
@@ -330,14 +401,19 @@ export const useChatStore = defineStore('chat', {
 
     // ---- streaming merge (mirrors sessions.rs append_text_segment) ----
 
-    /** The assistant row that stream events append to. If the last row is not
-     * an in-flight assistant row (pending placeholder or reloaded 'streaming'
-     * row), synthesize one instead of dropping the event. */
+    /** The assistant row that stream events append to. If no in-flight
+     * assistant row exists (pending placeholder or reloaded 'streaming' row),
+     * synthesize one instead of dropping the event. Like streamRow but
+     * WITHOUT the busy gate: a chunk can land before the chat://status push
+     * that flips busy. */
     ensureStreamRow(): ChatMessage {
-      const last = this.rows[this.rows.length - 1];
-      // 'streaming' too: rows reloaded via loadMessages() carry the persisted
-      // mid-stream status; treating them as foreign would synth a 2nd bubble.
-      if (last && last.role === 'assistant' && (last.status === 'pending' || last.status === 'streaming')) return last;
+      for (let i = this.rows.length - 1; i >= 0; i--) {
+        const r = this.rows[i];
+        // 'streaming' too: rows reloaded via loadMessages() carry the
+        // persisted mid-stream status; treating them as foreign would synth
+        // a 2nd bubble.
+        if (r.role === 'assistant' && (r.status === 'pending' || r.status === 'streaming')) return r;
+      }
       const row = markRaw({
         id: `synth-${Date.now()}-${this.rows.length}`,
         role: 'assistant',
@@ -404,14 +480,18 @@ export const useChatStore = defineStore('chat', {
       this.turnSeq += 1;
       if (p.sessionId !== this.sessionId) return;
       this.streamTarget = null;
-      const last = this.rows[this.rows.length - 1];
-      if (last && last.role === 'assistant') {
+      // The turn's row may not be the last one (a command row can sit after
+      // it) — flip the in-flight assistant row wherever it is.
+      for (let i = this.rows.length - 1; i >= 0; i--) {
+        const r = this.rows[i];
+        if (r.role !== 'assistant' || (r.status !== 'pending' && r.status !== 'streaming')) continue;
         // Status flip triggers the one-time markdown render of the bubble.
         // usage rides along on this structural replacement only (R1: no
         // per-chunk updates).
         const next = [...this.rows];
-        next[next.length - 1] = markRaw({ ...last, status: p.status, usage: p.usage ?? last.usage });
+        next[i] = markRaw({ ...r, status: p.status, usage: p.usage ?? r.usage });
         this.rows = next;
+        return;
       }
     },
 
@@ -419,6 +499,45 @@ export const useChatStore = defineStore('chat', {
     registerStreamTarget(rowId: string, kind: string, el: HTMLElement | null): void {
       if (el) this.streamTarget = { rowId, kind, el };
       else if (this.streamTarget?.rowId === rowId) this.streamTarget = null;
+    },
+
+    // ---- terminal commands (`!` prefix, Rust cmd.rs) ----
+
+    /** Run `cmd /c <command>` in the project dir; the backend appends a
+     * kind=='command' row and streams term://output. Never touches the
+     * agent context. Returns true only when the backend accepted. */
+    async runCommand(command: string): Promise<boolean> {
+      if (!this.sessionId) {
+        this.status = { ...this.status, lastError: '没有打开的会话' };
+        return false;
+      }
+      try {
+        await cmd('run_command', {
+          sessionId: this.sessionId,
+          command,
+          workDir: this.projectDir,
+        });
+        this.scrollSeq += 1;
+        return true;
+      } catch (e) {
+        this.status = { ...this.status, lastError: String(e) };
+        return false;
+      }
+    },
+
+    async killRun(runId: string): Promise<void> {
+      if (!runId) return;
+      try {
+        await cmd('kill_command', { runId });
+      } catch (e) {
+        console.warn('[chat] kill_command failed', e);
+      }
+    },
+
+    /** The streaming command bubble registers its live output <pre>. */
+    registerTermTarget(rowId: string, el: HTMLElement | null): void {
+      if (el) this.termTarget = { rowId, el };
+      else if (this.termTarget?.rowId === rowId) this.termTarget = null;
     },
 
     // ---- session lifecycle ----
@@ -760,12 +879,28 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
-    openPreview(path: string): void {
+    openPreview(path: string, line = 0): void {
       this.previewPath = path;
+      this.previewLine = line;
     },
 
     closePreview(): void {
       this.previewPath = '';
+      this.previewLine = 0;
+    },
+
+    /** Queue an @reference token for the composer (§3.3 syntax, e.g.
+     * @src/App.java:12-30; from/to ≤ 0 → whole file @src/App.java). The
+     * preview dialog context menu calls this with the project-relative path
+     * and the selected line range. */
+    insertRef(path: string, from: number, to: number): void {
+      const token =
+        from <= 0 && to <= 0
+          ? `@${path}`
+          : from === to
+            ? `@${path}:${from}`
+            : `@${path}:${from}-${to}`;
+      this.pendingRefInsert = { seq: this.pendingRefInsert.seq + 1, token };
     },
 
     /** Attachment bar rules (§3.5): ≤6, deduped case-insensitively. */

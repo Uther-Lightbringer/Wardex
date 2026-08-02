@@ -37,7 +37,51 @@ const isUser = computed(() => props.row.role === 'user');
 /** Reminder-triggered user rows render as a centered system line (no avatar,
  * no bubble frame, no branch button); copy is not offered there. */
 const isReminder = computed(() => props.row.kind === 'reminder');
+/** Terminal-command rows (`!` prefix, cmd.rs) render as a full-width block:
+ * command header + streaming/final output, no avatar. */
+const isCommand = computed(() => props.row.kind === 'command');
 const fs = (n: number) => prefs.fs(n);
+
+// ---- command row helpers ----
+const termRunning = computed(() => isCommand.value && props.row.status === 'streaming');
+/** Output = the row's text segments (content keeps the command itself).
+ * Deliberately a METHOD, not a computed: segments are mutated in place by
+ * the store (R1, non-reactive) so a computed would cache the mount-time
+ * value and clobber the live DOM text on any re-render. Reading fresh per
+ * render keeps the text node in sync with the store. */
+function termOutputText(): string {
+  return (props.row.segments ?? [])
+    .filter((s) => s.kind === 'text')
+    .map((s) => s.text ?? '')
+    .join('');
+}
+const termCode = computed(() => props.row.exitCode ?? undefined);
+/** runId of the live run (cancel button); undefined = no live run / stale. */
+const runId = computed(() => (isCommand.value ? chat.runsByRow[props.row.id] : undefined));
+const termStatusLabel = computed(() => {
+  if (termRunning.value) return '运行中…';
+  if (props.row.status === 'interrupted') return '已中断';
+  if (props.row.status === 'error') return '失败';
+  return '';
+});
+const termStatusCls = computed(() => {
+  if (props.row.status === 'error') return 'err';
+  if (props.row.status === 'interrupted') return 'int';
+  return '';
+});
+
+function killTerm(): void {
+  if (runId.value) void chat.killRun(runId.value);
+}
+
+/** Command output is collapsed by default; the header's "▶ 输出" toggles
+ * it. While collapsed the output keeps accumulating (store + backend); the
+ * <pre> renders the full text on expand. */
+const outOpen = ref(false);
+
+function toggleOut(): void {
+  outOpen.value = !outOpen.value;
+}
 
 // ---- status / header ----
 
@@ -101,20 +145,30 @@ const planSegs = computed(() =>
 );
 
 // ---- process line (streaming AND final rows share one step display) ----
-// Thinking/tool segments collapse to a single "⚙ N 个步骤" line; clicking
+// The FINAL text segment (when it is the tail) is the "result" shown inline;
+// any earlier text is process prose and folds into the steps (⚙ line +
+// ProcessDialog) together with thinking/tool segments. Clicking the line
 // opens ProcessDialog with the step list (live while streaming). Streaming
 // rows append a current-activity hint and a random flavor line.
-const structSegs = computed(() => segs.value.filter((s) => s.kind !== 'text' && !isPlan(s)));
+const resultText = computed<ChatSegment | null>(() => {
+  const tail = segs.value[segs.value.length - 1];
+  return tail?.kind === 'text' ? tail : null;
+});
+const structSegs = computed(() =>
+  segs.value.filter((s) => s !== resultText.value && !isPlan(s)),
+);
 const textSegs = computed(() =>
-  segs.value.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'text'),
+  resultText.value ? [{ s: resultText.value, i: segs.value.length - 1 }] : [],
 );
 const procOpen = ref(false);
 const procSummary = computed(() => {
   const think = structSegs.value.filter((s) => s.kind === 'thinking').length;
-  const tools = structSegs.value.length - think;
+  const tools = structSegs.value.filter((s) => s.kind === 'tool').length;
+  const texts = structSegs.value.filter((s) => s.kind === 'text').length;
   const parts: string[] = [];
   if (think > 0) parts.push(`思考×${think}`);
   if (tools > 0) parts.push(`工具×${tools}`);
+  if (texts > 0) parts.push(`过程正文×${texts}`);
   return `⚙ ${structSegs.value.length} 个步骤（${parts.join(' · ')}）`;
 });
 
@@ -139,8 +193,9 @@ const activityHint = computed(() => {
   return '';
 });
 
-// Streaming-only flavor lines: a random fixed phrase trails the activity
-// hint, re-picked on every structural event (new segment / tool upsert).
+// Streaming-only flavor lines: a random fixed phrase shown on its OWN second
+// line of the process pill, re-picked on every structural event (new segment
+// / tool upsert) — its left edge never moves, so no layout jitter.
 const FLAVOR_LINES = [
   '天灾军团正在集结……',
   '为了联盟！',
@@ -213,6 +268,24 @@ function registerLive(): void {
 onMounted(registerLive);
 onUpdated(registerLive);
 onBeforeUnmount(() => chat.registerStreamTarget(props.row.id, '', null));
+
+// ---- command row live output registration (term://output append) ----
+// While the run streams, the output <pre> is the DOM append target; on
+// mount/re-render it is (re)registered, on unmount / row finalization it is
+// released.
+const termOutEl = ref<HTMLElement | null>(null);
+
+function syncTermTarget(): void {
+  if (isCommand.value && termRunning.value && outOpen.value) {
+    chat.registerTermTarget(props.row.id, termOutEl.value);
+  } else {
+    chat.registerTermTarget(props.row.id, null);
+  }
+}
+onMounted(syncTermTarget);
+onUpdated(syncTermTarget);
+watch(outOpen, syncTermTarget);
+onBeforeUnmount(() => chat.registerTermTarget(props.row.id, null));
 
 // ---- inline-image lightbox (markdown ![](…) embeds) ----
 // v-html content can't carry Vue handlers, so clicks are delegated from the
@@ -319,8 +392,48 @@ const visibleAtts = computed(() =>
 </script>
 
 <template>
+  <!-- terminal-command row (`!` prefix): full-width block, no avatar -->
+  <div v-if="isCommand" class="bubble-term">
+    <div class="bubble-term__head">
+      <span class="bubble-term__prompt" :style="{ fontSize: fs(12) + 'px' }">&gt;</span>
+      <span class="bubble-term__cmd" :style="{ fontSize: fs(12) + 'px' }">{{ props.row.content }}</span>
+      <span
+        v-if="termStatusLabel"
+        class="bubble-term__status"
+        :class="termStatusCls"
+        :style="{ fontSize: fs(11) + 'px' }"
+        >{{ termStatusLabel }}</span
+      >
+      <span
+        v-if="!termRunning && termCode !== undefined"
+        class="bubble-term__code"
+        :style="{ fontSize: fs(11) + 'px' }"
+        >退出码 {{ termCode }}</span
+      >
+      <span
+        v-if="termRunning && runId"
+        class="bubble-term__kill"
+        :style="{ fontSize: fs(11) + 'px' }"
+        title="终止命令（含子进程）"
+        @click="killTerm"
+        >取消</span
+      >
+      <span
+        class="bubble-term__toggle"
+        :style="{ fontSize: fs(11) + 'px' }"
+        title="展开/收起命令输出"
+        @click="toggleOut"
+        >{{ outOpen ? '▼ 收起' : '▶ 输出' }}</span
+      >
+      <span class="bubble-term__time" :style="{ fontSize: fs(11) + 'px' }">{{ timeText }}</span>
+    </div>
+    <pre v-if="outOpen" ref="termOutEl" class="bubble-term__out" :style="{ fontSize: fs(12) + 'px' }">{{
+      termOutputText()
+    }}</pre>
+  </div>
+
   <!-- reminder-triggered user row: centered system line, no avatar/branch -->
-  <div v-if="isReminder" class="bubble-sys">
+  <div v-else-if="isReminder" class="bubble-sys">
     <span class="bubble-sys__text" :style="{ fontSize: fs(12) + 'px' }">
       <span class="bubble-sys__label">提醒</span>{{ displayBody }}
     </span>
@@ -403,11 +516,11 @@ const visibleAtts = computed(() =>
             :style="{ fontSize: fs(12) + 'px' }"
             @click="procOpen = true"
           >
-            <span>{{ procSummary }}</span>
-            <template v-if="streaming">
-              <span v-if="activityHint" class="seg-proc__hint">{{ activityHint }}</span>
-              <span v-if="flavor" class="seg-proc__flavor">{{ flavor }}</span>
-            </template>
+            <div class="seg-proc__main">
+              <span class="seg-proc__summary">{{ procSummary }}</span>
+              <span v-if="streaming && activityHint" class="seg-proc__hint"> · {{ activityHint }}</span>
+            </div>
+            <div v-if="streaming && flavor" class="seg-proc__flavor">{{ flavor }}</div>
           </div>
           <div v-for="{ s, i } in textSegs" :key="i" class="seg-text">
             <span
@@ -522,6 +635,97 @@ const visibleAtts = computed(() =>
 .bubble-sys__time {
   color: var(--war-text-faint);
   user-select: none;
+}
+
+/* terminal-command block (`!` prefix): full-width, terminal green accents */
+.bubble-term {
+  width: 100%;
+  border: 1px solid #3f7a52;
+  background: #0d1116f0;
+  border-radius: 3px;
+  margin: 2px 0;
+  font-family: Consolas, monospace;
+}
+
+.bubble-term__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid #1a2230;
+}
+
+.bubble-term__prompt {
+  color: #5cb380;
+  font-weight: bold;
+  user-select: none;
+}
+
+.bubble-term__cmd {
+  flex: 1;
+  min-width: 0;
+  color: var(--war-gold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: text;
+}
+
+.bubble-term__status {
+  color: #5cb380;
+  flex: none;
+  user-select: none;
+}
+
+.bubble-term__status.err {
+  color: var(--war-error);
+}
+
+.bubble-term__status.int {
+  color: var(--war-interrupted);
+}
+
+.bubble-term__code {
+  color: var(--war-text-faint);
+  flex: none;
+  user-select: none;
+}
+
+.bubble-term__kill {
+  color: #ff8a70;
+  flex: none;
+  user-select: none;
+  padding: 0 4px;
+}
+
+.bubble-term__kill:hover {
+  color: var(--war-error);
+}
+
+.bubble-term__toggle {
+  color: var(--war-text-muted);
+  flex: none;
+  user-select: none;
+  padding: 0 4px;
+}
+
+.bubble-term__toggle:hover {
+  color: var(--war-gold);
+}
+
+.bubble-term__time {
+  color: var(--war-text-faint);
+  flex: none;
+  user-select: none;
+}
+
+.bubble-term__out {
+  margin: 0;
+  padding: 6px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  color: #c8d6c8;
+  user-select: text;
 }
 
 .bubble-row {
@@ -742,10 +946,16 @@ const visibleAtts = computed(() =>
   overflow-wrap: break-word;
 }
 
-/* ---- process summary line (never wraps: ellipsis beyond the bubble width) ---- */
+/* ---- process summary pill: full bubble width, TWO lines. Line 1 = counts
+   + activity hint on one row (nowrap/ellipsis backstop). Line 2 = random
+   flavor phrase on its own line — its left edge is constant, so hint length
+   changes never shove it around and it never needs truncation. ---- */
 .seg-proc {
-  width: fit-content;
-  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: calc(100% - 24px); /* inset each side so the bubble's gold edge shows */
+  min-width: 0;
   margin: 2px 0 6px;
   padding: 2px 10px;
   background: #12151c44;
@@ -753,9 +963,7 @@ const visibleAtts = computed(() =>
   border-radius: 2px;
   color: #d0d6e0;
   user-select: none;
-  white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .seg-proc:hover {
@@ -763,11 +971,34 @@ const visibleAtts = computed(() =>
   border-color: var(--war-gold-dim);
 }
 
+.seg-proc__main {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.seg-proc__summary,
+.seg-proc__hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .seg-proc__hint {
   color: var(--war-gold);
 }
 
 .seg-proc__flavor {
+  margin-top: 2px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--war-text-muted);
 }
 

@@ -31,6 +31,10 @@ onMounted(() => {
     chatWidth.value = target.clientWidth;
   });
   ro.observe(target);
+  // Startup: expand the registry's default-open panel (会话信息). Still
+  // transient — closing it is not persisted, next start re-opens it.
+  const def = defs.value.find((d) => d.defaultOpen);
+  if (def) openPanel(def);
 });
 onBeforeUnmount(() => ro?.disconnect());
 

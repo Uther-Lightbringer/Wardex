@@ -31,6 +31,33 @@ const inputEl = ref<HTMLTextAreaElement | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const composing = ref(false);
 
+// ---- terminal command mode (`!` prefix, cmd.rs) ----
+// Leading `!` (or fullwidth `！` — IME users type it from the Chinese
+// keyboard layout) routes the input to LOCAL execution instead of the
+// agent: Enter runs the command, output streams back as a kind=="command"
+// chat row (term://output), never entering the agent context.
+const TERM_PREFIX_RE = /^[!！]/;
+
+const termMode = computed(() => {
+  const t = text.value.trimStart();
+  return TERM_PREFIX_RE.test(t) && t.length > 1;
+});
+const termCmd = computed(() => text.value.trimStart().replace(TERM_PREFIX_RE, '').trim());
+
+function maybeTermHint(): void {
+  try {
+    if (localStorage.getItem('wardex-term-hint')) return;
+    localStorage.setItem('wardex-term-hint', '1');
+    showNotice('终端命令模式：Enter 执行 · 删除 ! 或 ！ 恢复消息输入');
+  } catch {
+    /* localStorage unavailable — hint skipped */
+  }
+}
+
+watch(termMode, (v, p) => {
+  if (v && !p) maybeTermHint();
+});
+
 // ---- per-session draft (text + attachments), in-memory ----
 // Switching sessions saves the outgoing draft under the old sessionId and
 // restores the target's; deleted/cleared sessions simply have no entry.
@@ -43,6 +70,25 @@ watch(
     chat.attachments = [...(d?.attachments ?? [])];
     pickerOpen.value = false;
     slashOpen.value = false;
+  },
+);
+
+// ---- external ref insert (preview context menu → @token) ----
+// The preview dialog queues a token through chat.pendingRefInsert; append it
+// to the draft at the end and park the cursor after it. The existing @-picker
+// machinery then resolves the path normally (exact match closes the picker).
+watch(
+  () => [chat.pendingRefInsert.seq, chat.pendingRefInsert.token] as const,
+  ([seq, token]) => {
+    if (!seq || !token) return;
+    const sep = text.value && !text.value.endsWith('\n') ? ' ' : '';
+    text.value += sep + token;
+    void Promise.resolve().then(() => {
+      if (inputEl.value) {
+        inputEl.value.selectionStart = inputEl.value.selectionEnd = text.value.length;
+        inputEl.value.focus();
+      }
+    });
   },
 );
 
@@ -111,6 +157,11 @@ function onKeydown(e: KeyboardEvent): void {
     return;
   }
   if (e.key === 'Enter' && !e.shiftKey && !composing.value && !e.isComposing) {
+    if (termMode.value) {
+      e.preventDefault();
+      void runTermCommand();
+      return;
+    }
     if (slashOpen.value) {
       e.preventDefault();
       pickSlash(slashIndex.value);
@@ -338,6 +389,13 @@ function currentToken(): RefToken | null {
 
 let pickerDebounce: ReturnType<typeof setTimeout> | null = null;
 function updatePicker(): void {
+  // Terminal mode: `@` references and `/` commands mean nothing to a local
+  // shell — disable both pickers.
+  if (termMode.value) {
+    pickerOpen.value = false;
+    activeToken.value = null;
+    return;
+  }
   const token = currentToken();
   if (!token || !chat.projectDir || !isTauri) {
     pickerOpen.value = false;
@@ -411,8 +469,11 @@ const slashOpen = ref(false);
 const slashIndex = ref(0);
 
 /** Commands matching the draft when it is exactly "/<filter>" (first token,
- * no whitespace yet). Empty unless the agent advertised commands. */
+ * no whitespace yet). Empty unless the agent advertised commands. In
+ * terminal mode the `/` picker is disabled (local shell has no agent
+ * commands). */
 const slashItems = computed(() => {
+  if (termMode.value) return [];
   const m = text.value.match(/^\/(\S*)$/);
   if (!m) return [];
   const f = m[1].toLowerCase();
@@ -551,12 +612,42 @@ function onModeChange(i: number): void {
   }
 }
 
-// ---- send (§3.2) ----
+// ---- send (§3.2) / terminal run (`!`) ----
 const sendEnabled = computed(() => {
   if (!chat.sessionId) return false;
+  if (termMode.value) return termCmd.value.length > 0;
   if (chat.status.busy && chat.status.queueLength >= 10) return false;
   return text.value.trim().length > 0 || chat.attachments.length > 0;
 });
+
+/** Enter path: terminal mode runs locally (cmd.rs), otherwise the normal
+ * agent send. */
+async function submit(): Promise<void> {
+  if (termMode.value) await runTermCommand();
+  else await send();
+}
+
+async function runTermCommand(): Promise<void> {
+  if (!chat.sessionId) {
+    showNotice('没有打开的会话');
+    return;
+  }
+  if (!chat.projectDir) {
+    showNotice('请先绑定项目目录');
+    return;
+  }
+  if (!termCmd.value) {
+    showNotice('请输入要执行的命令（! 后跟命令）');
+    return;
+  }
+  const ok = await chat.runCommand(termCmd.value);
+  if (ok) {
+    text.value = '';
+    chat.saveDraft(chat.sessionId, '', []); // executed → drop any stored draft
+    pickerOpen.value = false;
+  }
+  inputEl.value?.focus();
+}
 
 async function send(): Promise<void> {
   const draft = text.value.trim();
@@ -655,7 +746,10 @@ function onExpandConfirm(v: string): void {
         ref="inputEl"
         v-model="text"
         class="composer__field"
-        placeholder="输入消息…（@ 引用文件，Ctrl+V 粘贴图片）"
+        :class="{ term: termMode }"
+        :placeholder="
+          termMode ? '执行终端命令…（Enter 执行，不发给 AI）' : '输入消息…（@ 引用文件，Ctrl+V 粘贴图片）'
+        "
         :style="{ fontSize: prefs.fs(14) + 'px' }"
         @input="onInput"
         @keydown="onKeydown"
@@ -690,9 +784,9 @@ function onExpandConfirm(v: string): void {
         :width="150"
         :art-aspect="5"
         skin="blue"
-        :text="chat.sendLabel"
+        :text="termMode ? '▶ 执行' : chat.sendLabel"
         :enabled="sendEnabled"
-        @activated="send"
+        @activated="submit"
       />
     </div>
 
@@ -814,6 +908,16 @@ function onExpandConfirm(v: string): void {
 
 .composer__field:focus {
   border-color: var(--war-gold-input);
+}
+
+/* terminal mode: green border + caret so the mode reads at a glance */
+.composer__field.term {
+  border-color: #3f7a52;
+  caret-color: #5cb380;
+}
+
+.composer__field.term:focus {
+  border-color: #5cb380;
 }
 
 .composer__field::placeholder {
