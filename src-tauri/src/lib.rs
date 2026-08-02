@@ -932,18 +932,19 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
 }
 
 /// Background config, resolved next to the exe (old main.cpp:96-122 rules):
-/// default image; background.json overrides {type, source}; relative source
-/// anchors at the exe dir; file:/absolute sources are returned as plain
-/// filesystem paths (the webview converts them via the asset protocol);
-/// qrc: passes through (frontend maps to bundled /assets); `video` plays
-/// in a muted looping <video> (WebView2 has native H.264, no FFmpeg).
+/// default muted-looping video (background-default.mp4); background.json
+/// overrides {type, source}; relative source anchors at the exe dir;
+/// file:/absolute sources are returned as plain filesystem paths (the
+/// webview converts them via the asset protocol); qrc: passes through
+/// (frontend maps to bundled /assets); `video` plays in a muted looping
+/// <video> (WebView2 has native H.264, no FFmpeg).
 #[tauri::command]
 fn background_config() -> Value {
-    const DEFAULT_SOURCE: &str = "qrc:/qt/qml/WarDex/assets/background/LodolonFall.jpg";
+    const DEFAULT_SOURCE: &str = "qrc:/qt/qml/WarDex/assets/background/background-default.mp4";
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let mut bg_type = "image".to_string();
+    let mut bg_type = "video".to_string();
     let mut bg_source = DEFAULT_SOURCE.to_string();
     if let Some(dir) = exe_dir {
         if let Ok(text) = std::fs::read_to_string(dir.join("background.json")) {

@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to background.json next to wardex.exe. type: image | video (mp4, muted loop) | model (deferred).",
-  "type": "image",
-  "source": "qrc:/qt/qml/WarDex/assets/background/LodolonFall.jpg"
+  "_comment": "Copy to background.json next to wardex.exe. type: image | video (mp4, muted loop) | model (deferred). Default: bundled video /assets/background/background-default.mp4.",
+  "type": "video",
+  "source": "qrc:/qt/qml/WarDex/assets/background/background-default.mp4"
 }

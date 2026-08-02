@@ -1,7 +1,8 @@
 // Background configuration (docs/ui-design.md §8, docs/assets.md).
-// Default: bundled LodolonFall.jpg. background.json next to the exe overrides
-// it (resolved by the Rust `background_config` command, old main.cpp rules);
-// in browser/dev preview we fall back to fetching /background.json.
+// Default: bundled background-default.mp4 (muted looping video). background.json
+// next to the exe overrides it (resolved by the Rust `background_config` command,
+// old main.cpp rules); in browser/dev preview we fall back to fetching
+// /background.json.
 // `type: "video"` plays in a muted looping <video> (WebView2 native H.264);
 // `type: "model"` (Three.js glTF) is a deferred TODO and maps to image.
 
@@ -13,8 +14,8 @@ export interface BgConfig {
 }
 
 export const DEFAULT_BG: BgConfig = {
-  type: 'image',
-  source: '/assets/background/LodolonFall.jpg',
+  type: 'video',
+  source: '/assets/background/background-default.mp4',
 };
 
 /** Resolve the background: exe-adjacent background.json via Rust first. */
