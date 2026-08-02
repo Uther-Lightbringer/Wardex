@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// Process detail dialog (features/chat.md §2.2): opened from a final chat
-// bubble's "⚙ N 个步骤" line. Lists the turn's thinking/tool segments in
-// arrival order — one line each, click to expand the payload inline.
-// Streaming rows never come here (their blocks stay inline for the
-// live-append contract). Esc / mask click closes.
+// Process detail dialog (features/chat.md §2.2): opened from a chat bubble's
+// "⚙ N 个步骤" line (streaming AND final rows). Lists the turn's
+// thinking/tool segments in arrival order — one line each, click to expand
+// the payload inline. While a thinking tail is still streaming, a 250ms
+// ticker re-reads its store text (R1 appends are non-reactive) so the open
+// dialog stays live. Esc / mask click closes.
 import { reactive, ref, watch, onBeforeUnmount } from 'vue';
 import type { ChatSegment } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
@@ -52,13 +53,58 @@ function onKey(e: KeyboardEvent): void {
 watch(
   () => props.open,
   (v) => {
-    if (v) window.addEventListener('keydown', onKey, true);
-    else window.removeEventListener('keydown', onKey, true);
+    if (v) {
+      window.addEventListener('keydown', onKey, true);
+      tick();
+      if (!ticker) ticker = setInterval(tick, TICK_MS);
+    } else {
+      window.removeEventListener('keydown', onKey, true);
+      stopTicker();
+    }
   },
 );
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true));
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey, true);
+  stopTicker();
+});
 
 const listEl = ref<HTMLElement | null>(null);
+
+// Live tail text (R1: thinking chunks extend the store non-reactively — a
+// 250ms ticker re-reads the tail into a local ref so an open dialog stays
+// current without re-rendering the list). Only active while open.
+const TICK_MS = 250;
+const liveText = ref('');
+let ticker: ReturnType<typeof setInterval> | null = null;
+
+function stopTicker(): void {
+  if (ticker) {
+    clearInterval(ticker);
+    ticker = null;
+  }
+}
+
+/** Keep the feed pinned to the bottom while the user is already at the bottom. */
+function pinBottom(): void {
+  const el = listEl.value;
+  if (!el) return;
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) el.scrollTop = el.scrollHeight;
+}
+
+function tick(): void {
+  const segs = props.segments;
+  const tail = segs[segs.length - 1];
+  if (tail?.kind === 'thinking') liveText.value = tail.text ?? '';
+  pinBottom();
+}
+
+// New steps while open: keep the feed pinned when already near the bottom.
+watch(
+  () => props.segments.length,
+  () => {
+    if (props.open) pinBottom();
+  },
+);
 </script>
 
 <template>
@@ -85,7 +131,7 @@ const listEl = ref<HTMLElement | null>(null);
                     {{ openIdx[i] ? '▼' : '▶' }} 思考过程
                   </div>
                   <div v-if="openIdx[i]" class="pd__thinking-body" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                    {{ s.text }}
+                    {{ i === segments.length - 1 ? liveText : s.text }}
                   </div>
                 </div>
 

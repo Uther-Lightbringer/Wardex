@@ -96,12 +96,15 @@ function onAgentPick(i: number): void {
   void chat.switchAgent(a.id);
 }
 
-// ---- title row: thinking-effort dropdown (ACP configOptions, kimi) ----
-// Shown only when the CLI advertised a "thinking" picker for this session
-// (kimi always does; per-model support_efforts decide the choices — e.g.
-// deepseek-reasoner exposes on/off style levels). Other ACP CLIs that do
-// not advertise it simply never see the dropdown.
-const thinkingOpt = computed(() => chat.configOptions.find((o) => o.id === 'thinking'));
+// ---- title row: thinking-effort dropdown (ACP configOptions) ----
+// Shown only when the CLI advertised a thinking picker for this session.
+// kimi reports `id:"thinking"` (support_efforts decide the choices — e.g.
+// deepseek-reasoner exposes on/off style levels); opencode reports
+// `id:"effort"` (its model variants). Other ACP CLIs that advertise
+// neither simply never see the dropdown.
+const thinkingOpt = computed(() =>
+  chat.configOptions.find((o) => o.id === 'thinking' || o.id === 'effort'),
+);
 const thinkingOptions = computed(() => (thinkingOpt.value?.options ?? []).map((o) => o.name));
 const thinkingIndex = computed(() =>
   (thinkingOpt.value?.options ?? []).findIndex((o) => o.value === thinkingOpt.value?.currentValue),
@@ -114,7 +117,7 @@ const thinkingDisplay = computed(() => {
 function onThinkingPick(i: number): void {
   const o = thinkingOpt.value?.options[i];
   if (!o || o.value === thinkingOpt.value?.currentValue) return;
-  void chat.setConfigOption('thinking', o.value);
+  void chat.setConfigOption(thinkingOpt.value?.id ?? 'thinking', o.value);
 }
 
 // ---- title row: model dropdown (ACP configOptions "model" picker +
@@ -232,13 +235,6 @@ const sessionUsage = computed(() => {
               <span v-if="sessionUsage" class="chat__usage" :style="{ fontSize: prefs.fs(11) + 'px' }">
                 {{ sessionUsage }}
               </span>
-              <span
-                v-if="chat.sessionId"
-                class="chat__seg-toggle"
-                :style="{ fontSize: prefs.fs(11) + 'px' }"
-                @click="chat.setAllSegsOpen(!chat.segCollapseOpen)"
-                >{{ chat.segCollapseOpen ? '⊟ 全部折叠' : '⊞ 全部展开' }}</span
-              >
             </div>
             <div class="chat__list">
               <MessageList v-if="chat.sessionId" />
@@ -447,18 +443,6 @@ const sessionUsage = computed(() => {
   color: var(--war-text-muted);
   font-family: SimSun, serif;
   white-space: nowrap;
-}
-
-.chat__seg-toggle {
-  flex: none;
-  color: var(--war-text-muted);
-  font-family: SimSun, serif;
-  user-select: none;
-  white-space: nowrap;
-}
-
-.chat__seg-toggle:hover {
-  color: var(--war-gold);
 }
 
 .chat__dd-row {

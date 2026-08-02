@@ -1,19 +1,19 @@
 <script setup lang="ts">
 // Chat bubble (ui-design.md §4.7, features/chat.md §2.2).
 //
-// R1 streaming contract: while `streaming` is true, text/thinking segments
-// render as PLAIN TEXT and the trailing segment's DOM node is registered
-// with the chat store (registerStreamTarget) so chunks append directly to
-// the text node — this component does NOT re-render per chunk (the segment
-// text mutation is in-place and non-reactive). When the turn goes final the
-// row object is replaced, the component re-renders once, and text segments
+// R1 streaming contract: while `streaming` is true, text segments render as
+// PLAIN TEXT and the trailing text segment's DOM node is registered with the
+// chat store (registerStreamTarget) so chunks append directly to the text
+// node — this component does NOT re-render per chunk (the segment text
+// mutation is in-place and non-reactive). When the turn goes final the row
+// object is replaced, the component re-renders once, and text segments
 // switch to memoized markdown HTML.
 //
-// segOpen expansion state is component-local keyed by segment INDEX: the
-// segment list is append-only so indexes are stable, and since incremental
-// appends never recreate this component, blocks the user opened mid-stream
-// stay open (ChatBubble.qml:113-123 parity).
-import { computed, onBeforeUnmount, onMounted, onUpdated, reactive, ref, watch } from 'vue';
+// Streaming and final rows share ONE step display: thinking/tool segments
+// collapse to a single "⚙ N 个步骤" line; clicking opens ProcessDialog with
+// the live step list. While streaming the line appends a current-activity
+// hint (思考中… / last tool) and a random flavor line (FLAVOR_LINES).
+import { computed, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue';
 import { fileSrc, openPath } from '../../lib/tauri';
 import { renderMarkdown, renderUserMarkdown } from '../../lib/markdown';
 import { copyText } from '../../lib/clipboard';
@@ -100,10 +100,10 @@ const planSegs = computed(() =>
   segs.value.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'tool' && isPlan(s)),
 );
 
-// ---- process dialog (final rows: thinking/tool blocks move OUT of the bubble) ----
-// Final rows show a single "⚙ N 个步骤" line; clicking opens ProcessDialog
-// with the full step list. Streaming rows keep the inline one-line blocks —
-// the live-append contract (data-live-seg) needs the tail segment mounted.
+// ---- process line (streaming AND final rows share one step display) ----
+// Thinking/tool segments collapse to a single "⚙ N 个步骤" line; clicking
+// opens ProcessDialog with the step list (live while streaming). Streaming
+// rows append a current-activity hint and a random flavor line.
 const structSegs = computed(() => segs.value.filter((s) => s.kind !== 'text' && !isPlan(s)));
 const textSegs = computed(() =>
   segs.value.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'text'),
@@ -118,6 +118,52 @@ const procSummary = computed(() => {
   return `⚙ ${structSegs.value.length} 个步骤（${parts.join(' · ')}）`;
 });
 
+/** Streaming-only: what the agent is doing right now (tail segment). */
+const activityHint = computed(() => {
+  if (!props.streaming) return '';
+  const tail = segs.value[segs.value.length - 1];
+  if (!tail) return '';
+  if (tail.kind === 'thinking') return '思考中…';
+  if (tail.kind === 'tool') {
+    const st = tail.status ? ` [${tail.status}]` : '';
+    return `▶ ${toolName(tail)}${st}`;
+  }
+  return '';
+});
+
+// Streaming-only flavor lines: a random fixed phrase trails the activity
+// hint, re-picked on every structural event (new segment / tool upsert).
+const FLAVOR_LINES = [
+  '天灾军团正在集结……',
+  '为了联盟！',
+  '为了部落！',
+  '敲响警钟！',
+  '战争已经打响。',
+  '力量与荣耀！',
+  '敌人在前进……',
+  '铁匠铺的炉火正旺。',
+  '圣光保佑我们。',
+  '黑暗即将降临。',
+  '准备战斗！',
+  '号角已吹响。',
+  '侦察骑兵已经出发。',
+  '箭塔已就位。',
+  '金币叮当作响。',
+];
+const flavor = ref('');
+let lastFlavorIdx = -1;
+watch(
+  () => segs.value,
+  () => {
+    if (!props.streaming || structSegs.value.length === 0) return;
+    let idx = Math.floor(Math.random() * FLAVOR_LINES.length);
+    if (FLAVOR_LINES.length > 1 && idx === lastFlavorIdx) idx = (idx + 1) % FLAVOR_LINES.length;
+    lastFlavorIdx = idx;
+    flavor.value = FLAVOR_LINES[idx];
+  },
+  { immediate: true },
+);
+
 /** Placeholder "…" during streaming; treated as empty once final. */
 const displayBody = computed(() => {
   const c = props.row.content ?? '';
@@ -125,51 +171,8 @@ const displayBody = computed(() => {
   return c;
 });
 
-// segOpen[i]: expansion of thinking/tool blocks (default collapsed).
-const segOpen = reactive<Record<number, boolean>>({});
-function toggleSeg(i: number): void {
-  segOpen[i] = !segOpen[i];
-}
-
-function collapseAllSegs(): void {
-  for (const k of Object.keys(segOpen)) segOpen[Number(k)] = false;
-}
-
-// Auto-collapse on turn end (一.4): blocks the user opened mid-stream snap
-// shut once the row reaches a final status. Historical rows load with a
-// final status and segOpen empty — already collapsed, the watcher never
-// fires for them.
-const FINAL_STATUSES = new Set(['done', 'error', 'interrupted']);
-watch(
-  () => props.row.status,
-  (now, was) => {
-    if (FINAL_STATUSES.has(now) && !FINAL_STATUSES.has(was ?? '')) collapseAllSegs();
-  },
-);
-
-// Global collapse/expand-all signal (一.10): the chat store owns a versioned
-// command; every mounted bubble applies it to its thinking/tool blocks.
-watch(
-  () => chat.segCollapseSeq,
-  () => {
-    const open = chat.segCollapseOpen;
-    segs.value.forEach((s, i) => {
-      if (s.kind === 'thinking' || s.kind === 'tool') segOpen[i] = open;
-    });
-  },
-);
-
 function toolName(s: ChatSegment): string {
   return String(s.name || s.title || s.kind || 'tool');
-}
-
-const TOOL_PAYLOAD_MAX = 64 * 1024; // R4: the in-memory payload is already
-// capped at 64KB by the backend; guard the display side the same way.
-function toolPayload(s: ChatSegment): string {
-  const v = s.rawInput ?? s.arguments ?? s.content ?? s.output ?? '';
-  let text = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
-  if (text.length > TOOL_PAYLOAD_MAX) text = text.slice(0, TOOL_PAYLOAD_MAX) + '\n…（已截断）';
-  return text;
 }
 
 // ---- markdown: rendered once per finished segment, memoized by content ----
@@ -381,94 +384,46 @@ const visibleAtts = computed(() =>
           >
         </div>
 
-        <!-- segments in arrival order -->
+        <!-- segments in arrival order: thinking/tool collapse to ONE process
+             line (streaming AND final alike); the dialog holds the live step
+             list. Text stays inline; the trailing text span carries
+             data-live-seg (R1 append target). -->
         <template v-if="segs.length > 0">
-          <!-- final rows: thinking/tool collapsed to ONE process line; the
-               dialog holds the full step list (text stays inline) -->
-          <template v-if="!streaming">
-            <div
-              v-if="structSegs.length > 0"
-              class="seg-proc"
-              :style="{ fontSize: fs(12) + 'px' }"
-              @click="procOpen = true"
+          <div
+            v-if="structSegs.length > 0"
+            class="seg-proc"
+            :style="{ fontSize: fs(12) + 'px' }"
+            @click="procOpen = true"
+          >
+            <span>{{ procSummary }}</span>
+            <template v-if="streaming">
+              <span v-if="activityHint" class="seg-proc__hint">{{ activityHint }}</span>
+              <span v-if="flavor" class="seg-proc__flavor">{{ flavor }}</span>
+            </template>
+          </div>
+          <div v-for="{ s, i } in textSegs" :key="i" class="seg-text">
+            <span
+              v-if="streaming || !mdEnabled"
+              class="seg-text__plain"
+              :data-live-seg="streaming && i === segs.length - 1 ? '' : undefined"
+              >{{ s.text }}</span
             >
-              {{ procSummary }}
+            <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
+          </div>
+          <!-- plan updates stay visible (checklist card) -->
+          <div v-for="{ s, i } in planSegs" :key="'plan' + i" class="seg-plan">
+            <div class="seg-plan__title" :style="{ fontSize: fs(12) + 'px' }">计划</div>
+            <div
+              v-for="(e, j) in planEntries(s)"
+              :key="j"
+              class="seg-plan__row"
+              :style="{ fontSize: fs(12) + 'px' }"
+            >
+              <span class="seg-plan__icon" :class="{ done: e.status === 'completed' }">{{ planIcon(e.status) }}</span>
+              {{ e.content }}
             </div>
-            <div v-for="{ s, i } in textSegs" :key="i" class="seg-text">
-              <span v-if="!mdEnabled" class="seg-text__plain">{{ s.text }}</span>
-              <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
-            </div>
-            <!-- plan updates stay visible on final rows (checklist card) -->
-            <div v-for="{ s, i } in planSegs" :key="'plan' + i" class="seg-plan">
-              <div class="seg-plan__title" :style="{ fontSize: fs(12) + 'px' }">计划</div>
-              <div
-                v-for="(e, j) in planEntries(s)"
-                :key="j"
-                class="seg-plan__row"
-                :style="{ fontSize: fs(12) + 'px' }"
-              >
-                <span class="seg-plan__icon" :class="{ done: e.status === 'completed' }">{{ planIcon(e.status) }}</span>
-                {{ e.content }}
-              </div>
-            </div>
-            <ProcessDialog v-model:open="procOpen" :segments="structSegs" :title="displayName + ' · ' + timeText" />
-          </template>
-
-          <!-- streaming: inline one-line blocks (live-append contract) -->
-          <template v-else>
-          <template v-for="(s, i) in segs" :key="i">
-            <!-- thinking: warm collapsible block, collapsed by default -->
-            <div v-if="s.kind === 'thinking'" class="seg-thinking">
-              <div class="seg-thinking__head" :style="{ fontSize: fs(12) + 'px' }" @click="toggleSeg(i)">
-                {{ segOpen[i] ? '▼' : '▶' }} 思考过程
-              </div>
-              <div
-                v-if="segOpen[i]"
-                class="seg-thinking__body"
-                :class="{ 'no-md': streaming }"
-                :style="{ fontSize: fs(11) + 'px' }"
-                :data-live-seg="streaming && i === segs.length - 1 ? '' : undefined"
-                >{{ s.text }}</div
-              >
-            </div>
-
-            <!-- text: plain during streaming, markdown once final. The live
-                 segment marker sits ON the span so the store's appendData
-                 targets its text node directly (no stray sibling nodes). -->
-            <div v-else-if="s.kind === 'text'" class="seg-text">
-              <span
-                v-if="streaming || !mdEnabled"
-                class="seg-text__plain"
-                :data-live-seg="streaming && i === segs.length - 1 ? '' : undefined"
-                >{{ s.text }}</span
-              >
-              <div v-else class="seg-text__md md-body" v-html="markdownOf(s.text ?? '')"></div>
-            </div>
-
-            <!-- plan updates: visible checklist card (live-replaced by id) -->
-            <div v-else-if="isPlan(s)" class="seg-plan">
-              <div class="seg-plan__title" :style="{ fontSize: fs(12) + 'px' }">计划</div>
-              <div
-                v-for="(e, j) in planEntries(s)"
-                :key="j"
-                class="seg-plan__row"
-                :style="{ fontSize: fs(12) + 'px' }"
-              >
-                <span class="seg-plan__icon" :class="{ done: e.status === 'completed' }">{{ planIcon(e.status) }}</span>
-                {{ e.content }}
-              </div>
-            </div>
-
-            <!-- tool: single-line header, payload on expand -->
-            <div v-else class="seg-tool">
-              <div class="seg-tool__head" :style="{ fontSize: fs(12) + 'px' }" @click="toggleSeg(i)">
-                {{ segOpen[i] ? '▼' : '▶' }} · {{ toolName(s) }}
-                <span v-if="s.status" class="seg-tool__status">[{{ s.status }}]</span>
-              </div>
-              <pre v-if="segOpen[i]" class="seg-tool__payload" :style="{ fontSize: fs(11) + 'px' }">{{ toolPayload(s) }}</pre>
-            </div>
-          </template>
-          </template>
+          </div>
+          <ProcessDialog v-model:open="procOpen" :segments="structSegs" :title="displayName + ' · ' + timeText" />
         </template>
 
         <!-- fallback: user rows and the pending placeholder have no segments -->
@@ -796,35 +751,12 @@ const visibleAtts = computed(() =>
   border-color: var(--war-gold-dim);
 }
 
-/* ---- thinking block ---- */
-.seg-thinking {
-  background: #19151044;
-  border: 1px solid #4a4232;
-  border-radius: 2px;
-  margin: 4px 0;
-  padding: 4px 8px;
+.seg-proc__hint {
+  color: var(--war-gold);
 }
 
-.seg-thinking__head {
-  color: #c8b890;
-  user-select: none;
-}
-
-.seg-thinking__body {
-  color: #908878;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  margin-top: 4px;
-  user-select: text;
-}
-
-/* ---- tool block ---- */
-.seg-tool {
-  background: #12151c44;
-  border: 1px solid #3a4a40;
-  border-radius: 2px;
-  margin: 4px 0;
-  padding: 4px 8px;
+.seg-proc__flavor {
+  color: var(--war-text-muted);
 }
 
 /* ---- plan card (ACP plan updates) ---- */
@@ -854,25 +786,6 @@ const visibleAtts = computed(() =>
 
 .seg-plan__icon.done {
   color: #7ec88a;
-}
-
-.seg-tool__head {
-  color: #d0d6e0;
-  user-select: none;
-}
-
-.seg-tool__status {
-  color: var(--war-text-muted);
-  margin-left: 6px;
-}
-
-.seg-tool__payload {
-  color: var(--war-text-muted);
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  margin: 4px 0 0;
-  font-family: Consolas, monospace;
-  user-select: text;
 }
 
 /* ---- attachments ---- */

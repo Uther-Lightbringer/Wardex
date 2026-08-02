@@ -212,11 +212,6 @@ export const useChatStore = defineStore('chat', {
     turnSeq: 0,
     /** Bumped to request a scroll-to-end (send / session switch). */
     scrollSeq: 0,
-    /** Collapse/expand-all command for thinking/tool blocks (一.10): bubbles
-     * keep segOpen component-local; they watch segCollapseSeq and apply
-     * segCollapseOpen to every thinking/tool segment. */
-    segCollapseSeq: 0,
-    segCollapseOpen: false,
     /** Bumped by the 刷新工作区 action-bay button (files/git panels). */
     workspaceRefreshSeq: 0,
     /** Pending attachment paths (attachment bar floats above the composer). */
@@ -424,12 +419,6 @@ export const useChatStore = defineStore('chat', {
     registerStreamTarget(rowId: string, kind: string, el: HTMLElement | null): void {
       if (el) this.streamTarget = { rowId, kind, el };
       else if (this.streamTarget?.rowId === rowId) this.streamTarget = null;
-    },
-
-    /** 一.10: collapse/expand every thinking/tool block in all bubbles. */
-    setAllSegsOpen(open: boolean): void {
-      this.segCollapseOpen = open;
-      this.segCollapseSeq += 1;
     },
 
     // ---- session lifecycle ----
