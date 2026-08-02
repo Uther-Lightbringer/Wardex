@@ -7,10 +7,13 @@
 // refocuses the input.
 //
 // kind='code'  → search_code with mode/ext/regular-option controls.
-// kind='iface' → search_java_interfaces: interface-name lookup, no options
-// row, empty query lists every declaration.
+// kind='iface' → interface lookup backed by codegraph (external CLI). When
+// codegraph is missing the overlay shows an install card (copy command /
+// copy prompt / ask-the-AI / re-probe) with a 先用简易搜索 fallback that
+// reuses the heuristic text scan.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { cmd } from '../../lib/tauri';
+import { copyText } from '../../lib/clipboard';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
 import WarScrollBar from '../war/WarScrollBar.vue';
@@ -46,6 +49,120 @@ const chat = useChatStore();
 const prefs = usePrefsStore();
 
 const isIface = computed(() => props.kind === 'iface');
+
+// ---- codegraph integration (kind='iface') ----
+interface CodegraphStatus {
+  installed: boolean;
+  path?: string | null;
+  build: 'idle' | 'building' | 'done' | 'error';
+  buildError?: string;
+  indexExists: boolean;
+}
+
+const cgStatus = ref<CodegraphStatus | null>(null);
+const cgLoading = ref(false);
+const usingFallback = ref(false); // V1 text scan when codegraph is missing
+let cgTimer: ReturnType<typeof setInterval> | null = null;
+
+const INSTALL_CMD = 'npm install -g @optave/codegraph';
+const INSTALL_PROMPT =
+  '请帮我在当前电脑上安装 codegraph CLI（npm 包 @optave/codegraph）。请在终端依次执行：\n' +
+  '1. npm install -g @optave/codegraph\n' +
+  '2. codegraph --version 确认安装成功（需要 Node.js 22.6 及以上）\n' +
+  '安装完成后告诉我结果；如果遇到权限或 Node 版本问题，请一并处理。';
+
+/** Search usable for iface: the V1 fallback is on, or codegraph is installed
+ * with a finished build (no stale index). Always true for code kind. */
+const ifaceReady = computed(
+  () =>
+    usingFallback.value ||
+    (cgStatus.value?.installed === true &&
+      cgStatus.value.build !== 'building' &&
+      cgStatus.value.indexExists),
+);
+/** Searching against the codegraph index (vs the V1 text scan). */
+const ifaceUsingCodegraph = computed(
+  () => !usingFallback.value && cgStatus.value?.installed === true,
+);
+const showSearch = computed(() => (isIface.value ? ifaceReady.value : true));
+
+async function loadCgStatus(): Promise<void> {
+  if (!isIface.value || !chat.projectDir) return;
+  cgLoading.value = true;
+  try {
+    const s = await cmd<CodegraphStatus>('codegraph_status', { projectDir: chat.projectDir });
+    cgStatus.value = s;
+    if (s.installed) usingFallback.value = false; // now usable via codegraph
+    if (s.installed && s.build === 'building') startCgPoll();
+    else stopCgPoll();
+  } catch (e) {
+    cgStatus.value = null;
+    error.value = String(e);
+  }
+  cgLoading.value = false;
+}
+
+function startCgPoll(): void {
+  if (cgTimer) return;
+  cgTimer = setInterval(async () => {
+    try {
+      const s = await cmd<CodegraphStatus>('codegraph_status', { projectDir: chat.projectDir });
+      cgStatus.value = s;
+      if (s.build !== 'building') {
+        stopCgPoll();
+        if (s.indexExists && query.value.trim()) void run();
+      }
+    } catch {
+      /* transient — keep polling */
+    }
+  }, 1000);
+}
+
+function stopCgPoll(): void {
+  if (cgTimer) {
+    clearInterval(cgTimer);
+    cgTimer = null;
+  }
+}
+
+async function startBuild(): Promise<void> {
+  try {
+    await cmd('codegraph_build', { projectDir: chat.projectDir });
+    cgStatus.value = { ...(cgStatus.value as CodegraphStatus), build: 'building' };
+    startCgPoll();
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+async function reprobe(): Promise<void> {
+  try {
+    await cmd<{ installed: boolean }>('codegraph_reprobe');
+    await loadCgStatus();
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+function openPlot(): void {
+  void cmd('codegraph_plot', { projectDir: chat.projectDir }).catch((e) => {
+    error.value = String(e);
+  });
+}
+
+function copyTextToClip(s: string): void {
+  void copyText(s);
+}
+
+async function askAiInstall(): Promise<void> {
+  const ok = await chat.newSession();
+  if (!ok) {
+    error.value = '创建会话失败，请先选择一个项目';
+    return;
+  }
+  await chat.send(INSTALL_PROMPT, []);
+  emit('close'); // let the user watch the AI install it
+}
 
 const query = ref('');
 const flat = ref<FlatHit[]>([]);
@@ -154,7 +271,7 @@ function run(): void {
   const mySeq = ++seq;
   if (debounce) clearTimeout(debounce);
   error.value = '';
-  // iface mode lists everything on an empty query; code mode needs text.
+  // code mode needs text; iface-fallback lists everything on an empty query.
   if (!q.trim() && !isIface.value) {
     flat.value = [];
     done.value = false;
@@ -166,17 +283,38 @@ function run(): void {
   debounce = setTimeout(async () => {
     try {
       if (isIface.value) {
-        const res = await cmd<InterfaceHit[]>('search_java_interfaces', {
-          root: chat.projectDir,
-          query: q,
-        });
-        if (mySeq !== seq) return; // superseded by a newer keystroke
-        flat.value = res.map((h) => ({
-          file: h.file,
-          line: h.line,
-          text: h.text,
-          name: h.name,
-        }));
+        if (ifaceUsingCodegraph.value) {
+          // codegraph cannot list-all on an empty query — show a hint instead.
+          if (!q.trim()) {
+            flat.value = [];
+            done.value = true;
+            searching.value = false;
+            return;
+          }
+          const res = await cmd<InterfaceHit[]>('codegraph_query_interfaces', {
+            projectDir: chat.projectDir,
+            query: q,
+          });
+          if (mySeq !== seq) return; // superseded by a newer keystroke
+          flat.value = res.map((h) => ({
+            file: h.file,
+            line: h.line,
+            text: h.text,
+            name: h.name,
+          }));
+        } else {
+          const res = await cmd<InterfaceHit[]>('search_java_interfaces', {
+            root: chat.projectDir,
+            query: q,
+          });
+          if (mySeq !== seq) return; // superseded by a newer keystroke
+          flat.value = res.map((h) => ({
+            file: h.file,
+            line: h.line,
+            text: h.text,
+            name: h.name,
+          }));
+        }
       } else {
         const res = await cmd<CodeMatch[]>('search_code', {
           root: chat.projectDir,
@@ -205,6 +343,13 @@ function run(): void {
 }
 
 watch([query, mode, extInput, useRegex, isIface], run);
+
+watch(isIface, (v) => {
+  if (v) {
+    usingFallback.value = false;
+    void loadCgStatus();
+  }
+});
 
 function openAt(i: number): void {
   const hit = flat.value[i];
@@ -251,6 +396,7 @@ watch(index, () => {
 onMounted(() => {
   window.addEventListener('keydown', onKey, true);
   loadOpts();
+  if (isIface.value) void loadCgStatus();
   inputEl.value?.focus();
   inputEl.value?.select();
 });
@@ -258,6 +404,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey, true);
   if (debounce) clearTimeout(debounce);
+  stopCgPoll();
   seq++; // invalidate any in-flight search
 });
 </script>
@@ -271,106 +418,195 @@ onBeforeUnmount(() => {
           {{ isIface ? '查询接口' : '搜索代码' }}
         </div>
 
-        <div class="cs__bar">
-          <input
-            ref="inputEl"
-            v-model="query"
-            class="cs__input"
-            type="text"
-            spellcheck="false"
-            :placeholder="isIface ? '输入接口名（留空=列出全部）…' : '输入要搜索的内容…'"
-            :style="{ fontSize: prefs.fs(13) + 'px' }"
-          />
-          <span class="cs__meta" :style="{ fontSize: prefs.fs(11) + 'px' }">
-            <template v-if="searching">搜索中…</template>
-            <template v-else-if="done && !error">{{ resultCount() }} 条结果</template>
-          </span>
-        </div>
+        <!-- iface: codegraph status gates (install / build) -->
+        <template v-if="isIface && !showSearch">
+          <div class="cs__hint" v-if="!chat.projectDir" :style="{ fontSize: prefs.fs(12) + 'px' }">
+            当前会话未绑定项目，无法搜索
+          </div>
+          <div v-else-if="cgLoading" class="cs__hint" :style="{ fontSize: prefs.fs(12) + 'px' }">
+            正在检查 codegraph…
+          </div>
 
-        <!-- search options: mode chips / file-type filter / regex (code only) -->
-        <div v-if="!isIface" class="cs__opts" :style="{ fontSize: prefs.fs(11) + 'px' }">
-          <span
-            class="cs__opt-btn"
-            :class="{ on: modeContent }"
-            @click="toggleContent"
-            >内容</span
-          >
-          <span
-            class="cs__opt-btn"
-            :class="{ on: modeFilename }"
-            @click="toggleFilename"
-            >文件名</span
-          >
-          <span class="cs__opt-btn" :class="{ on: useRegex }" @click="useRegex = !useRegex"
-            >.* 正则</span
-          >
-          <span class="cs__opt-label">文件类型</span>
-          <input
-            v-model="extInput"
-            class="cs__ext"
-            type="text"
-            spellcheck="false"
-            placeholder="java,kt（留空=全部）"
-            :style="{ fontSize: prefs.fs(11) + 'px' }"
-          />
-        </div>
+          <div v-else-if="!cgStatus?.installed" class="cs-card">
+            <div class="cs-card__title" :style="{ fontSize: prefs.fs(14) + 'px' }">
+              需要安装 codegraph
+            </div>
+            <div class="cs-card__body" :style="{ fontSize: prefs.fs(12) + 'px' }">
+              接口查询依赖 codegraph（npm 包 @optave/codegraph，需要 Node.js 22.6+）。
+              安装后点击「重新检测」，或直接复制提示词让大模型帮你安装。
+            </div>
+            <div class="cs-card__row">
+              <button class="cs-card__btn" @click="copyTextToClip(INSTALL_CMD)">复制安装命令</button>
+              <button class="cs-card__btn" @click="copyTextToClip(INSTALL_PROMPT)">复制提示词</button>
+              <button class="cs-card__btn" @click="askAiInstall">让 AI 安装</button>
+              <button class="cs-card__btn" @click="reprobe">重新检测</button>
+            </div>
+            <div class="cs-card__link" @click="usingFallback = true">先用简易搜索（无需安装）</div>
+          </div>
 
-        <div class="cs__hint" v-if="!chat.projectDir" :style="{ fontSize: prefs.fs(12) + 'px' }">
-          当前会话未绑定项目，无法搜索
-        </div>
-
-        <div class="cs__scrollwrap" v-if="flat.length > 0">
-          <div ref="listEl" class="cs__list">
-            <div
-              v-for="(hit, i) in flat"
-              :key="i"
-              class="cs__row"
-              :class="{ 'cs__row--sel': i === index }"
-              @mousedown.prevent
-              @click="openAt(i)"
-            >
-              <div class="cs__row-top">
-                <span v-if="hit.name" class="cs__iface" :style="{ fontSize: prefs.fs(12) + 'px' }">
-                  {{ hit.name }}
-                </span>
-                <span class="cs__file" :style="{ fontSize: prefs.fs(12) + 'px' }">{{ hit.file }}</span>
-                <span v-if="hit.line > 0" class="cs__line" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                  {{ hit.line }}
-                </span>
-                <span v-else class="cs__line cs__line--name">文件名</span>
-              </div>
-              <div v-if="hit.line > 0" class="cs__snip" :style="{ fontSize: prefs.fs(12) + 'px' }">
-                <template v-for="(seg, si) in highlightSegments(hit.text, query)" :key="si">
-                  <span v-if="seg.hit" class="cs__hit">{{ seg.text }}</span>
-                  <template v-else>{{ seg.text }}</template>
-                </template>
-              </div>
+          <div v-else-if="cgStatus.build === 'building'" class="cs-card">
+            <div class="cs-card__title" :style="{ fontSize: prefs.fs(14) + 'px' }">
+              正在构建索引…
+            </div>
+            <div class="cs-card__body" :style="{ fontSize: prefs.fs(12) + 'px' }">
+              codegraph 正在分析项目文件，首次构建大项目可能需要数十秒。
+              可以关闭此窗口，完成后会自动可用。
             </div>
           </div>
-          <div class="cs__warbar">
-            <WarScrollBar :target="listEl" />
+
+          <div v-else-if="cgStatus.build === 'error'" class="cs-card">
+            <div class="cs-card__title cs-card__title--err" :style="{ fontSize: prefs.fs(14) + 'px' }">
+              索引构建失败
+            </div>
+            <div class="cs-card__body" :style="{ fontSize: prefs.fs(12) + 'px' }">
+              {{ cgStatus.buildError || '未知错误' }}
+            </div>
+            <div class="cs-card__row">
+              <button class="cs-card__btn on" @click="startBuild">重试</button>
+            </div>
           </div>
-        </div>
 
-        <div
-          v-else-if="error"
-          class="cs__hint cs__hint--err"
-          :style="{ fontSize: prefs.fs(12) + 'px' }"
-        >
-          {{ error }}
-        </div>
+          <div v-else class="cs-card">
+            <div class="cs-card__title" :style="{ fontSize: prefs.fs(14) + 'px' }">
+              尚未构建索引
+            </div>
+            <div class="cs-card__body" :style="{ fontSize: prefs.fs(12) + 'px' }">
+              首次使用需要先为当前项目构建 codegraph 索引。
+            </div>
+            <div class="cs-card__row">
+              <button class="cs-card__btn on" @click="startBuild">构建索引</button>
+            </div>
+          </div>
+        </template>
 
-        <div
-          v-else-if="done && !searching"
-          class="cs__hint"
-          :style="{ fontSize: prefs.fs(12) + 'px' }"
-        >
-          {{ isIface ? '未找到匹配的接口' : '未找到匹配内容' }}
-        </div>
+        <!-- search UI (code kind always; iface when ready) -->
+        <template v-else>
+          <div class="cs__bar">
+            <input
+              ref="inputEl"
+              v-model="query"
+              class="cs__input"
+              type="text"
+              spellcheck="false"
+              :placeholder="
+                isIface
+                  ? ifaceUsingCodegraph
+                    ? '输入接口名…'
+                    : '输入接口名（留空=列出全部）…'
+                  : '输入要搜索的内容…'
+              "
+              :style="{ fontSize: prefs.fs(13) + 'px' }"
+            />
+            <span class="cs__meta" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              <template v-if="searching">搜索中…</template>
+              <template v-else-if="done && !error && resultCount() > 0">{{ resultCount() }} 条结果</template>
+            </span>
+          </div>
 
-        <div class="cs__foot" :style="{ fontSize: prefs.fs(11) + 'px' }">
-          ↑/↓ 选择 · Enter 预览 · Esc 关闭
-        </div>
+          <!-- iface tools: graph + rebuild (+ fallback toggle) -->
+          <div v-if="isIface" class="cs__iface-tools" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            <button class="cs-card__btn" @click="openPlot">查看图谱</button>
+            <button class="cs-card__btn" @click="startBuild">重建索引</button>
+            <span v-if="usingFallback" class="cs-card__link" @click="usingFallback = false"
+              >启用 codegraph</span
+            >
+          </div>
+
+          <!-- search options: mode chips / file-type filter / regex (code only) -->
+          <div v-if="!isIface" class="cs__opts" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            <span
+              class="cs__opt-btn"
+              :class="{ on: modeContent }"
+              @click="toggleContent"
+              >内容</span
+            >
+            <span
+              class="cs__opt-btn"
+              :class="{ on: modeFilename }"
+              @click="toggleFilename"
+              >文件名</span
+            >
+            <span class="cs__opt-btn" :class="{ on: useRegex }" @click="useRegex = !useRegex"
+              >.* 正则</span
+            >
+            <span class="cs__opt-label">文件类型</span>
+            <input
+              v-model="extInput"
+              class="cs__ext"
+              type="text"
+              spellcheck="false"
+              placeholder="java,kt（留空=全部）"
+              :style="{ fontSize: prefs.fs(11) + 'px' }"
+            />
+          </div>
+
+          <div class="cs__hint" v-if="!chat.projectDir" :style="{ fontSize: prefs.fs(12) + 'px' }">
+            当前会话未绑定项目，无法搜索
+          </div>
+
+          <div class="cs__scrollwrap" v-if="flat.length > 0">
+            <div ref="listEl" class="cs__list">
+              <div
+                v-for="(hit, i) in flat"
+                :key="i"
+                class="cs__row"
+                :class="{ 'cs__row--sel': i === index }"
+                @mousedown.prevent
+                @click="openAt(i)"
+              >
+                <div class="cs__row-top">
+                  <span v-if="hit.name" class="cs__iface" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                    {{ hit.name }}
+                  </span>
+                  <span class="cs__file" :style="{ fontSize: prefs.fs(12) + 'px' }">{{ hit.file }}</span>
+                  <span v-if="hit.line > 0" class="cs__line" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                    {{ hit.line }}
+                  </span>
+                  <span v-else class="cs__line cs__line--name">文件名</span>
+                </div>
+                <div
+                  v-if="hit.line > 0 && hit.text"
+                  class="cs__snip"
+                  :style="{ fontSize: prefs.fs(12) + 'px' }"
+                >
+                  <template v-for="(seg, si) in highlightSegments(hit.text, query)" :key="si">
+                    <span v-if="seg.hit" class="cs__hit">{{ seg.text }}</span>
+                    <template v-else>{{ seg.text }}</template>
+                  </template>
+                </div>
+              </div>
+            </div>
+            <div class="cs__warbar">
+              <WarScrollBar :target="listEl" />
+            </div>
+          </div>
+
+          <div
+            v-else-if="error"
+            class="cs__hint cs__hint--err"
+            :style="{ fontSize: prefs.fs(12) + 'px' }"
+          >
+            {{ error }}
+          </div>
+
+          <div
+            v-else-if="done && !searching"
+            class="cs__hint"
+            :style="{ fontSize: prefs.fs(12) + 'px' }"
+          >
+            {{
+              isIface && ifaceUsingCodegraph && !query.trim()
+                ? '输入接口名开始搜索'
+                : isIface
+                  ? '未找到匹配的接口'
+                  : '未找到匹配内容'
+            }}
+          </div>
+
+          <div class="cs__foot" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            ↑/↓ 选择 · Enter 预览 · Esc 关闭
+          </div>
+        </template>
       </div>
     </div>
   </div>
@@ -603,6 +839,82 @@ onBeforeUnmount(() => {
 
 .cs__hint--err {
   color: #f08080;
+}
+
+.cs-card {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 0 16px;
+  text-align: center;
+}
+
+.cs-card__title {
+  color: var(--war-gold);
+  font-family: SimSun, serif;
+  font-weight: bold;
+}
+
+.cs-card__title--err {
+  color: #f08080;
+}
+
+.cs-card__body {
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  max-width: 440px;
+  line-height: 1.6;
+}
+
+.cs-card__row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.cs-card__btn {
+  padding: 4px 12px;
+  border: 1px solid #2a3344;
+  background: #0b0d12;
+  color: var(--war-text);
+  font-family: SimSun, serif;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cs-card__btn:hover {
+  border-color: var(--war-gold);
+  color: var(--war-gold);
+}
+
+.cs-card__btn.on {
+  border-color: var(--war-gold);
+  color: var(--war-gold);
+  background: #3a4a6a44;
+}
+
+.cs-card__link {
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  cursor: pointer;
+  text-decoration: underline;
+  user-select: none;
+}
+
+.cs-card__link:hover {
+  color: var(--war-gold-bright);
+}
+
+.cs__iface-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .cs__foot {

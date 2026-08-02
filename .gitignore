@@ -10,4 +10,5 @@ tools/out/
 background.json
 *.local.json
 .claude/
+.codegraph/
 

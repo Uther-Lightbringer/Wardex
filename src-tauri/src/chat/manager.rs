@@ -174,6 +174,18 @@ impl ChatManager {
     /// startNewSession (ChatController.cpp:688-721): default agent required,
     /// session created + warmed, previous empty session discarded.
     pub async fn create_session(&self, project_dir: &str) -> Result<String, ChatError> {
+        self.create_session_with(project_dir, "", true).await
+    }
+
+    /// Internal: `title` empty → default title. `active` false keeps the
+    /// current active session untouched (used by the project-due flow — the
+    /// new session runs in the background until the user acts on it).
+    async fn create_session_with(
+        &self,
+        project_dir: &str,
+        title: &str,
+        active: bool,
+    ) -> Result<String, ChatError> {
         let agent = {
             let stores = lock_ok(&self.stores);
             stores.agents.default_agent().cloned()
@@ -185,16 +197,23 @@ impl ChatManager {
         };
         let id = {
             let mut stores = lock_ok(&self.stores);
-            stores.sessions.create_session(&snapshot_of(&agent), project_dir)?
+            let id = stores.sessions.create_session(&snapshot_of(&agent), project_dir)?;
+            if !title.trim().is_empty() {
+                let _ = stores.sessions.rename_session(&id, title.trim());
+            }
+            id
         };
-        let prev = self.active_id();
         self.create_runtime(&id, agent);
-        lock_ok(&self.shared).active_id = id.clone();
+        if active {
+            let prev = self.active_id();
+            lock_ok(&self.shared).active_id = id.clone();
+            self.sink.emit("store://sessions", json!({}));
+            if !prev.is_empty() && prev != id {
+                self.discard_if_empty(&prev).await;
+            }
+        }
         self.send(&id, RuntimeCmd::EnsureAcp).await?; // warm in background
         self.sink.emit("store://sessions", json!({}));
-        if !prev.is_empty() && prev != id {
-            self.discard_if_empty(&prev).await;
-        }
         Ok(id)
     }
 
@@ -237,8 +256,8 @@ impl ChatManager {
         let deleted = {
             let mut stores = lock_ok(&self.stores);
             let paths = stores.paths.clone();
-            if let Err(e) = stores.reminders.remove_session(&paths, session_id) {
-                log::warn!("reminders remove_session failed: {e}");
+            if let Err(e) = stores.todos.remove_session(&paths, session_id) {
+                log::warn!("todos remove_session failed: {e}");
             }
             stores.sessions.delete_session(session_id)?
         };
@@ -273,8 +292,8 @@ impl ChatManager {
         {
             let mut stores = lock_ok(&self.stores);
             let paths = stores.paths.clone();
-            if let Err(e) = stores.reminders.remove_session(&paths, session_id) {
-                log::warn!("reminders remove_session failed: {e}");
+            if let Err(e) = stores.todos.remove_session(&paths, session_id) {
+                log::warn!("todos remove_session failed: {e}");
             }
             if let Err(e) = stores.sessions.delete_session(session_id) {
                 log::warn!("discard_if_empty delete failed: {e}");
@@ -292,6 +311,18 @@ impl ChatManager {
         session_id: &str,
         text: &str,
         attachments: &[String],
+    ) -> Result<SendOutcome, ChatError> {
+        self.send_prompt_kind(session_id, text, attachments, "").await
+    }
+
+    /// send_prompt with a row kind marker ("reminder" for the project-due
+    /// flow — the frontend sends the todo text in with kind="reminder").
+    pub async fn send_prompt_kind(
+        &self,
+        session_id: &str,
+        text: &str,
+        attachments: &[String],
+        kind: &str,
     ) -> Result<SendOutcome, ChatError> {
         let Some(tx) = self.entry_tx(session_id) else {
             return Err(ChatError::NoSession);
@@ -331,7 +362,7 @@ impl ChatManager {
             text: send_text,
             images,
             display,
-            kind: String::new(),
+            kind: kind.to_string(),
             ack: Some(ack_tx),
         })
         .await
@@ -356,6 +387,90 @@ impl ChatManager {
         if let Some(tx) = self.entry_tx(session_id) {
             let _ = tx.send(RuntimeCmd::RemindersReload).await;
         }
+    }
+
+    /// Tell every live runtime to re-arm its push-due timer (toggle/remove
+    /// may affect push rows of any session).
+    pub async fn reminders_reload_all(&self) {
+        let tx_list: Vec<_> = lock_ok(&self.registry)
+            .values()
+            .map(|e| e.tx.clone())
+            .collect();
+        for tx in tx_list {
+            let _ = tx.send(RuntimeCmd::RemindersReload).await;
+        }
+    }
+
+    /// App-level due scan (30s tick, lib.rs setup). Handles the rows that are
+    /// NOT the session runtimes' business:
+    ///   - popup rows (session + global scope): desktop notification + emit
+    ///     todos://due (dedup via notifiedAtMs)
+    ///   - project rows: auto-create a session in the project (named after
+    ///     the todo, active untouched), settle the row, then emit
+    ///     todos://projectDue so the frontend can ask the user how to proceed
+    /// push rows are left to the owning session runtime.
+    pub async fn tick_due_todos(&self) {
+        use crate::store::todos::{now_ms, TodoRow, SCOPE_PROJECT, SCOPE_SESSION};
+        let now = now_ms();
+        let due: Vec<TodoRow> = {
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            stores.todos.reload(&paths);
+            stores.todos.due_not_notified(now)
+        };
+        if due.is_empty() {
+            return;
+        }
+        for r in due {
+            match r.scope.as_str() {
+                SCOPE_PROJECT => self.fire_project_due(r).await,
+                SCOPE_SESSION => self.fire_popup_due(r, now),
+                _ => self.fire_popup_due(r, now),
+            }
+        }
+    }
+
+    /// Popup due: mark notified FIRST (persisted dedup guard), then notify.
+    fn fire_popup_due(&self, r: crate::store::todos::TodoRow, now: i64) {
+        let notified = {
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            stores
+                .todos
+                .mark_notified(&paths, &r.id, now)
+                .unwrap_or(false)
+        };
+        if !notified {
+            return; // another tick already surfaced it
+        }
+        self.sink.notify("待办到期", &r.title);
+        self.sink.emit("todos://due", json!({ "row": r }));
+    }
+
+    /// Project due: new detached session in the project, settle the row,
+    /// then let the frontend pop the three-way choice.
+    async fn fire_project_due(&self, r: crate::store::todos::TodoRow) {
+        // Name = the todo title (40 chars cap).
+        let title: String = r.title.trim().chars().take(40).collect();
+        let session_id = match self.create_session_with(&r.project_dir, &title, false).await {
+            Ok(id) => id,
+            Err(e) => {
+                log::warn!("todos: project due create_session failed: {e}");
+                return;
+            }
+        };
+        {
+            let mut stores = lock_ok(&self.stores);
+            let paths = stores.paths.clone();
+            if let Err(e) = stores.todos.settle(&paths, &r.id) {
+                log::warn!("todos: project due settle failed: {e}");
+            }
+        }
+        self.sink.notify("项目待办到期", &title);
+        self.sink.emit(
+            "todos://projectDue",
+            json!({ "row": r, "sessionId": session_id }),
+        );
     }
 
     pub async fn answer_permission(

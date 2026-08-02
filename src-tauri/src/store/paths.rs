@@ -116,6 +116,8 @@ impl Paths {
         self.root.join("todos.json")
     }
 
+    /// Legacy reminders file — only read by the todos.json migration
+    /// (reminders have merged into todos.json, store/todos.rs).
     pub fn reminders_path(&self) -> PathBuf {
         self.root.join("reminders.json")
     }

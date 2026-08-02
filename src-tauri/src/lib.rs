@@ -18,7 +18,7 @@
 //     chat://bubbleSet {sessionId, row}         (整段替换: 中断/错误/重试提示)
 //     chat://status    {sessionId, statusText, busy, queueLength, retry*, lastError, acpReady, imageSupported}
 //     chat://retry     {sessionId, active, countdown, attempt, maxAttempts}
-//     chat://reminders {sessionId, reminders[]}  (提醒列表变更: add/cancel/触发)
+//     chat://reminders {sessionId, reminders[]}  (push 待办列表变更: add/cancel/触发)
 //     chat://unread    {sessionId}
 //     store://sessions / store://prefs           (粗粒度变更通知，前端重拉)
 // Phase 3b additions (thin shells over existing store/probe helpers):
@@ -28,6 +28,7 @@
 pub mod acp;
 pub mod chat;
 pub mod cmd;
+pub mod codegraph;
 pub mod inspect;
 pub mod mcp_reminder;
 pub mod models;
@@ -100,6 +101,7 @@ struct AppState {
     probe: tokio::sync::Mutex<probe::CliProbe>,
     tester: probe::AgentTester,
     runs: cmd::CommandRunner,
+    codegraph: codegraph::CodegraphRunner,
 }
 
 struct TauriSink(tauri::AppHandle);
@@ -744,6 +746,83 @@ async fn search_code(
     Ok(serde_json::to_value(v).map_err(err)?)
 }
 
+// ---------------------------------------------------------------------------
+// Commands: codegraph (Ctrl+\ interface lookup, codegraph.rs)
+// ---------------------------------------------------------------------------
+
+/// Full Ctrl+\ overlay status: `installed` comes from the prefs-cached probe
+/// (probed once on first use; 重新检测 re-probes and updates the cache),
+/// plus the CLI path, per-project build state and index existence.
+#[tauri::command(async)]
+async fn codegraph_status(
+    state: State<'_, AppState>,
+    project_dir: String,
+) -> Result<Value, String> {
+    let prefs_installed = {
+        let stores = lock(&state.stores);
+        stores.prefs.codegraph_installed()
+    };
+    let installed = match prefs_installed {
+        Some(v) => v,
+        None => {
+            let found = state.codegraph.resolve().is_some();
+            {
+                let mut stores = lock(&state.stores);
+                let paths = stores.paths.clone();
+                let _ = stores.prefs.set_codegraph_installed(&paths, found);
+            }
+            found
+        }
+    };
+    let mut v = state.codegraph.status(&project_dir);
+    v["installed"] = json!(installed);
+    Ok(v)
+}
+
+/// Re-probe for the codegraph CLI and refresh the prefs cache (the install
+/// card's 重新检测 button — no app restart needed).
+#[tauri::command(async)]
+async fn codegraph_reprobe(state: State<'_, AppState>) -> Result<Value, String> {
+    state.codegraph.invalidate();
+    let found = state.codegraph.resolve().is_some();
+    {
+        let mut stores = lock(&state.stores);
+        let paths = stores.paths.clone();
+        let _ = stores.prefs.set_codegraph_installed(&paths, found);
+    }
+    Ok(json!({ "installed": found }))
+}
+
+/// Start `codegraph build <dir>` in the background; progress is read via
+/// codegraph_status polling (or the codegraph://build event).
+#[tauri::command(async)]
+async fn codegraph_build(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_dir: String,
+) -> Result<(), String> {
+    state.codegraph.start_build(app, project_dir);
+    Ok(())
+}
+
+/// Interface name search against the codegraph index (empty query = the CLI
+/// rejects it, so it maps to the "empty" error the overlay turns into a hint).
+#[tauri::command(async)]
+async fn codegraph_query_interfaces(
+    state: State<'_, AppState>,
+    project_dir: String,
+    query: String,
+) -> Result<Value, String> {
+    let hits = state.codegraph.query_interfaces(&project_dir, &query).await.map_err(err)?;
+    Ok(serde_json::to_value(hits).map_err(err)?)
+}
+
+/// Open the interactive dependency graph in the default browser.
+#[tauri::command(async)]
+async fn codegraph_plot(state: State<'_, AppState>, project_dir: String) -> Result<(), String> {
+    state.codegraph.plot(&project_dir)
+}
+
 /// Java `interface` declarations (Ctrl+\ overlay). Heuristic text scan,
 /// results {file, line, name, text}; empty query lists every declaration.
 #[tauri::command]
@@ -864,118 +943,123 @@ async fn save_clipboard_image(
 }
 
 // ---------------------------------------------------------------------------
-// Commands: todos / prompts / prefs
+// Commands: todos (unified todo/reminder model, store/todos.rs)
 // ---------------------------------------------------------------------------
 
+/// Grouped view: pending session rows for `session_id`, pending project rows
+/// for `project_dir`, pending global rows, and every done row.
 #[tauri::command]
-fn todos_list(state: State<'_, AppState>) -> Value {
-    let stores = lock(&state.stores);
-    serde_json::to_value(stores.todos.rows()).unwrap_or(Value::Null)
-}
-
-#[tauri::command]
-fn todo_add(state: State<'_, AppState>, title: String) -> Result<(), String> {
+fn todos_list(state: State<'_, AppState>, session_id: String, project_dir: String) -> Value {
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
-    stores.todos.add(&paths, &title).map_err(err)
+    stores.todos.reload(&paths);
+    let (session, project, global) = stores.todos.pending_grouped();
+    let done = stores.todos.done();
+    json!({
+        "session": session.iter().filter(|r| r.session_id == session_id).cloned().collect::<Vec<_>>(),
+        "project": project.iter().filter(|r| r.project_dir == project_dir).cloned().collect::<Vec<_>>(),
+        "global": global,
+        "done": done,
+    })
 }
 
 #[tauri::command]
-fn todo_toggle(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut stores = lock(&state.stores);
-    let paths = stores.paths.clone();
-    stores.todos.toggle(&paths, &id).map_err(err)
-}
-
-#[tauri::command]
-fn todo_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut stores = lock(&state.stores);
-    let paths = stores.paths.clone();
-    stores.todos.remove(&paths, &id).map_err(err)
-}
-
-#[tauri::command]
-fn todos_clear_done(state: State<'_, AppState>) -> Result<(), String> {
-    let mut stores = lock(&state.stores);
-    let paths = stores.paths.clone();
-    stores.todos.clear_done(&paths).map_err(err)
-}
-
-// ---------------------------------------------------------------------------
-// Commands: reminders (mcp_reminder.rs 与这里共用 reminders.json)
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-fn reminders_list(state: State<'_, AppState>, session_id: String) -> Value {
-    let mut stores = lock(&state.stores);
-    let paths = stores.paths.clone();
-    stores.reminders.reload(&paths);
-    serde_json::to_value(stores.reminders.list(&session_id)).unwrap_or(Value::Null)
-}
-
-#[tauri::command]
-async fn reminder_add(
+async fn todo_add(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    title: String,
+    scope: String,
     session_id: String,
-    content: String,
-    minutes: f64,
+    project_dir: String,
+    due_at_ms: i64,
+    notify_mode: String,
 ) -> Result<Value, String> {
-    let reminder = {
+    use crate::store::todos::NOTIFY_POPUP;
+    let mode = if notify_mode.is_empty() { NOTIFY_POPUP } else { &notify_mode };
+    let row = {
         let mut stores = lock(&state.stores);
         let paths = stores.paths.clone();
         stores
-            .reminders
-            .add(&paths, &session_id, &content, minutes, "user")
+            .todos
+            .add(&paths, &title, &scope, &session_id, &project_dir, due_at_ms, mode)
             .map_err(err)?
     };
-    let Some(reminder) = reminder else {
-        return Err("提醒内容不能为空且分钟数必须大于 0".to_string());
-    };
-    state.chat.reminders_reload(&session_id).await;
-    emit_reminders(&app, &state, &session_id);
-    serde_json::to_value(reminder).map_err(err)
-}
-
-#[tauri::command]
-async fn reminder_cancel(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    id: String,
-) -> Result<bool, String> {
-    let (cancelled, session_id) = {
-        let mut stores = lock(&state.stores);
-        let paths = stores.paths.clone();
-        stores.reminders.reload(&paths);
-        let session_id = stores
-            .reminders
-            .rows()
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| r.session_id.clone())
-            .unwrap_or_default();
-        let cancelled = stores.reminders.cancel(&paths, &id).map_err(err)?;
-        (cancelled, session_id)
+    let Some(row) = row else {
+        return Err("内容不能为空，且会话级需会话、项目级需项目".to_string());
     };
     if !session_id.is_empty() {
         state.chat.reminders_reload(&session_id).await;
-        emit_reminders(&app, &state, &session_id);
     }
-    Ok(cancelled)
+    app.emit("todos://changed", json!({})).ok();
+    serde_json::to_value(row).map_err(err)
 }
 
-fn emit_reminders(app: &tauri::AppHandle, state: &State<'_, AppState>, session_id: &str) {
-    let reminders = {
+#[tauri::command]
+async fn todo_toggle(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    {
         let mut stores = lock(&state.stores);
         let paths = stores.paths.clone();
-        stores.reminders.reload(&paths);
-        stores.reminders.list(session_id)
-    };
-    if let Err(e) = app.emit(
-        "chat://reminders",
-        json!({ "sessionId": session_id, "reminders": reminders }),
-    ) {
-        log::warn!("emit chat://reminders failed: {e}");
+        stores.todos.toggle(&paths, &id).map_err(err)?;
+    }
+    state.chat.reminders_reload_all().await;
+    app.emit("todos://changed", json!({})).ok();
+    Ok(())
+}
+
+#[tauri::command]
+async fn todo_remove(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    {
+        let mut stores = lock(&state.stores);
+        let paths = stores.paths.clone();
+        stores.todos.remove(&paths, &id).map_err(err)?;
+    }
+    state.chat.reminders_reload_all().await;
+    app.emit("todos://changed", json!({})).ok();
+    Ok(())
+}
+
+#[tauri::command]
+async fn todos_clear_done(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.todos.clear_done(&paths).map_err(err)?;
+    app.emit("todos://changed", json!({})).ok();
+    Ok(())
+}
+
+/// Send a reminder-styled prompt into a session (project-due 三选:
+/// 跳转并处理 / 后台处理). The session runtime marks it kind=="reminder".
+#[tauri::command]
+async fn send_reminder(
+    state: State<'_, AppState>,
+    session_id: String,
+    text: String,
+) -> Result<String, String> {
+    use crate::chat::runtime::SendOutcome;
+    match state
+        .chat
+        .send_prompt_kind(&session_id, &text, &[], "reminder")
+        .await
+    {
+        Ok(SendOutcome::Started) => Ok("sent".to_string()),
+        Ok(SendOutcome::Enqueued) => Ok("enqueued".to_string()),
+        Ok(SendOutcome::Rejected(reason)) => Err(if reason.is_empty() {
+            "发送被拒绝".to_string()
+        } else {
+            reason
+        }),
+        Err(e) => Err(err(e)),
     }
 }
 
@@ -1187,12 +1271,25 @@ pub fn run() {
             let t = std::time::Instant::now();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app.handle().clone()));
             let chat = Arc::new(ChatManager::new(stores.clone(), sink));
+            // App-level due tick for todos (popup rows → notification; project
+            // rows → auto new session). 30s cadence; push rows are the
+            // per-session runtimes' own timers.
+            {
+                let chat = chat.clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                        chat.tick_due_todos().await;
+                    }
+                });
+            }
             app.manage(AppState {
                 chat,
                 stores,
                 probe: tokio::sync::Mutex::new(probe::CliProbe::new()),
                 tester: probe::AgentTester::new(),
                 runs: cmd::CommandRunner::new(),
+                codegraph: codegraph::CodegraphRunner::new(),
             });
             log::info!(
                 "startup: chat manager + state ready ({:?}, total {:?})",
@@ -1263,6 +1360,12 @@ pub fn run() {
             workspace_files,
             search_code,
             search_java_interfaces,
+            // codegraph (Ctrl+\ interface lookup)
+            codegraph_status,
+            codegraph_reprobe,
+            codegraph_build,
+            codegraph_query_interfaces,
+            codegraph_plot,
             git_branch,
             git_log,
             git_status,
@@ -1276,10 +1379,8 @@ pub fn run() {
             todo_add,
             todo_toggle,
             todo_remove,
-            reminders_list,
-            reminder_add,
-            reminder_cancel,
             todos_clear_done,
+            send_reminder,
             prompts_list,
             prompt_add,
             prompt_remove,

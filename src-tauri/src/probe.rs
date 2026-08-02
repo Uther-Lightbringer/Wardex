@@ -297,6 +297,19 @@ pub(crate) fn which_on_path(dirs: &[String], name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Locate a CLI by name on the expanded search path (system PATH + HKCU user
+/// PATH), accepting bare / .exe / .cmd / .bat shims. Used by the codegraph
+/// integration — npm global bin dirs often sit in the user PATH only, which
+/// the GUI process lags. `provider_id` of "" keeps the kimi-specific extra.
+pub(crate) fn which_on_expanded_path(name: &str) -> Option<PathBuf> {
+    let system = std::env::var_os("PATH")
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let user = user_path_from_registry();
+    let dirs = expanded_search_path("", &system, user.as_deref(), None);
+    which_on_path(&dirs, name)
+}
+
 /// Order-preserving dedupe: cleanPath-normalized, case-insensitive
 /// (CliProbe.cpp:68-75).
 fn dedupe_keep_order(paths: Vec<PathBuf>) -> Vec<PathBuf> {

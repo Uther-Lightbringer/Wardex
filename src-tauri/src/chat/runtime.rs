@@ -1486,7 +1486,7 @@ impl Actor {
         self.emit_turn(status, stop, usage.as_ref());
         self.finish_reply();
         // 回合结束 reload 一次：AI 只可能在回合内调 set_reminder，这里能
-        // 捕获 MCP 子进程刚写入 reminders.json 的新提醒。
+        // 捕获 MCP 子进程刚写入 todos.json 的新 push 待办。
         self.reminders_reload();
     }
 
@@ -1767,16 +1767,16 @@ impl Actor {
         };
         // Built-in reminder MCP server (mcp_reminder.rs): one `--mcp-reminder`
         // subprocess per session, context passed via env; it reads/writes the
-        // shared reminders.json directly (no IPC).
+        // shared todos.json directly (no IPC).
         if let Ok(exe) = std::env::current_exe() {
-            let reminders_path = lock_ok(&self.stores).paths.reminders_path();
+            let todos_path = lock_ok(&self.stores).paths.todos_path();
             mcp_servers.push(json!({
                 "name": "wardex-reminder",
                 "command": exe.to_string_lossy(),
                 "args": ["--mcp-reminder"],
                 "env": [
                     { "name": "WARDEX_SESSION_ID", "value": self.session_id },
-                    { "name": "WARDEX_REMINDERS_PATH", "value": reminders_path.to_string_lossy() },
+                    { "name": "WARDEX_TODOS_PATH", "value": todos_path.to_string_lossy() },
                 ],
             }));
         }
@@ -2019,32 +2019,30 @@ impl Actor {
         self.emit_status(None);
     }
 
-    // ---- reminders (mcp_reminder.rs / reminder_* 命令共用存储) ----
+    // ---- reminders → todos push rows (mcp_reminder.rs / todo_* 命令共用存储) ----
+    // Only session-scoped notifyMode=="push" rows are the runtime's business
+    // (到期发回会话, MCP agent self-wakeup). popup rows (session/global) and
+    // project rows are handled by the manager-level due tick.
 
-    /// Re-read reminders.json and re-arm the next-fire timer. Called on actor
+    /// Re-read todos.json and re-arm the next-fire timer. Called on actor
     /// start, turn end, ReminderTick, and the manual add/cancel commands.
     fn reminders_reload(&mut self) {
         {
             let mut stores = lock_ok(&self.stores);
             let paths = stores.paths.clone();
-            stores.reminders.reload(&paths);
+            stores.todos.reload(&paths);
         }
         self.schedule_next_reminder();
     }
 
-    /// Arm a one-shot sleep for the earliest pending reminder; with none
-    /// pending only the gen bump invalidates any in-flight timer.
+    /// Arm a one-shot sleep for the earliest push-due row; with none pending
+    /// only the gen bump invalidates any in-flight timer.
     fn schedule_next_reminder(&mut self) {
         self.reminder_gen += 1;
         let gen = self.reminder_gen;
         let next_due = {
             let stores = lock_ok(&self.stores);
-            stores
-                .reminders
-                .list(&self.session_id)
-                .into_iter()
-                .map(|r| r.due_at_ms)
-                .min()
+            stores.todos.next_push_due(&self.session_id)
         };
         let Some(due) = next_due else { return };
         let wait_ms = due.saturating_sub(now_ms()).max(0) as u64;
@@ -2055,7 +2053,7 @@ impl Actor {
         });
     }
 
-    /// Timer fired: mark every due reminder done (persisted BEFORE the prompt
+    /// Timer fired: settle every due push row (persisted BEFORE the prompt
     /// goes out so a crash cannot double-fire), then post each as a normal
     /// SendPrompt — busy turns queue it like any user message.
     async fn reminder_tick(&mut self, gen: u64) {
@@ -2065,17 +2063,12 @@ impl Actor {
         let due = {
             let mut stores = lock_ok(&self.stores);
             let paths = stores.paths.clone();
-            stores.reminders.reload(&paths);
+            stores.todos.reload(&paths);
             let now = now_ms();
-            let due: Vec<_> = stores
-                .reminders
-                .list(&self.session_id)
-                .into_iter()
-                .filter(|r| r.due_at_ms <= now)
-                .collect();
+            let due = stores.todos.push_due_for(&self.session_id, now);
             for r in &due {
-                if let Err(e) = stores.reminders.mark_done(&paths, &r.id) {
-                    log::warn!("chat[{}] reminder mark_done failed: {e}", self.session_id);
+                if let Err(e) = stores.todos.settle(&paths, &r.id) {
+                    log::warn!("chat[{}] todo settle failed: {e}", self.session_id);
                 }
             }
             due
@@ -2086,7 +2079,7 @@ impl Actor {
             tokio::spawn(async move {
                 let _ = tx
                     .send(RuntimeCmd::SendPrompt {
-                        text: format!("⏰ 提醒时间到：{}", r.content),
+                        text: format!("⏰ 提醒时间到：{}", r.title),
                         images: Vec::new(),
                         display: Vec::new(),
                         kind: "reminder".to_string(),
@@ -2102,11 +2095,17 @@ impl Actor {
     }
 
     /// chat://reminders {sessionId, reminders[]} — after add/cancel/fire.
+    /// Kept for frontend compatibility: lists the session's pending push rows.
     fn emit_reminders(&self) {
-        let reminders = lock_ok(&self.stores).reminders.list(&self.session_id);
+        let rows = lock_ok(&self.stores)
+            .todos
+            .list_session(&self.session_id)
+            .into_iter()
+            .filter(|r| r.notify_mode == crate::store::todos::NOTIFY_PUSH)
+            .collect::<Vec<_>>();
         self.emit(
             "chat://reminders",
-            json!({ "sessionId": self.session_id, "reminders": reminders }),
+            json!({ "sessionId": self.session_id, "reminders": rows }),
         );
     }
 

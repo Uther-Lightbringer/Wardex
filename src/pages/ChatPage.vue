@@ -18,6 +18,7 @@ import QueuePanel from '../components/chat/QueuePanel.vue';
 import SubagentPanel from '../components/chat/SubagentPanel.vue';
 import PermissionDialog from '../components/chat/PermissionDialog.vue';
 import FilePreviewDialog from '../components/chat/FilePreviewDialog.vue';
+import DueTodoOverlay from '../components/chat/DueTodoOverlay.vue';
 import CodeSearchOverlay from '../components/chat/CodeSearchOverlay.vue';
 import { useNavStore } from '../stores/nav';
 import { usePrefsStore } from '../stores/prefs';
@@ -355,7 +356,7 @@ const sessionUsage = computed(() => {
     <!-- modals -->
     <PermissionDialog />
     <FilePreviewDialog />
-    <CodeSearchOverlay v-if="codeSearchKind" :kind="codeSearchKind" @close="codeSearchKind = null" />
+    <DueTodoOverlay />
   </PageShell>
 </template>
 

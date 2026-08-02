@@ -44,9 +44,9 @@ export const panelRegistry: PanelDef[] = [
     refreshOn: ['turnEnd', 'sessionSwitch'],
   },
   {
-    id: 'reminders',
-    title: '提醒',
-    component: () => import('./RemindersPanel.vue'),
+    id: 'todos',
+    title: '待办',
+    component: () => import('./TodosPanel.vue'),
     defaultOpen: false,
     defaultWidth: 220,
     order: 15,

@@ -2,15 +2,17 @@
 // set_reminder / cancel_reminder / list_reminders tool surface without any
 // external MCP dependency. Injected into every ACP session via build_launch
 // (chat/runtime.rs) as an mcpServers entry with WARDEX_SESSION_ID /
-// WARDEX_REMINDERS_PATH env, so one subprocess serves exactly one session.
+// WARDEX_TODOS_PATH env, so one subprocess serves exactly one session.
 //
 // Protocol: minimal hand-rolled MCP over NDJSON stdio (same line framing as
 // the ACP transport — one compact JSON-RPC object per line). Implements
 // initialize / notifications/initialized / tools/list / tools/call; every
 // other request gets -32601. No rmcp crate (plan: keep deps flat).
 //
-// Persistence: reads/writes the session's reminders.json directly through
-// store::reminders' pure load/save functions (tmp + rename atomic writes).
+// Persistence: reads/writes todos.json directly through store::todos' pure
+// load/save functions (tmp + rename atomic writes). Agent reminders are
+// session-scoped rows with notifyMode == "push": when due, the session
+// runtime sends the content back into the chat as a prompt (self-wakeup).
 // The main app re-reads the file on every scheduling point, so no IPC is
 // needed between this subprocess and the app.
 
@@ -19,7 +21,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use crate::store::reminders as store;
+use crate::store::todos::{self, NOTIFY_PUSH, SCOPE_SESSION};
 
 /// Session context, passed via env by build_launch.
 pub struct ReminderCtx {
@@ -31,10 +33,10 @@ impl ReminderCtx {
     pub fn from_env() -> Result<Self, String> {
         let session_id = std::env::var("WARDEX_SESSION_ID")
             .map_err(|_| "WARDEX_SESSION_ID not set".to_string())?;
-        let path = std::env::var("WARDEX_REMINDERS_PATH")
-            .map_err(|_| "WARDEX_REMINDERS_PATH not set".to_string())?;
+        let path = std::env::var("WARDEX_TODOS_PATH")
+            .map_err(|_| "WARDEX_TODOS_PATH not set".to_string())?;
         if session_id.trim().is_empty() || path.trim().is_empty() {
-            return Err("WARDEX_SESSION_ID / WARDEX_REMINDERS_PATH must be non-empty".to_string());
+            return Err("WARDEX_SESSION_ID / WARDEX_TODOS_PATH must be non-empty".to_string());
         }
         Ok(Self {
             session_id,
@@ -82,7 +84,7 @@ pub fn handle_line(ctx: &ReminderCtx, line: &str) -> Option<Value> {
         "initialize" => reply(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "wardex-reminder", "version": "0.1.0" }
+            "serverInfo": { "name": "wardex-reminder", "version": "0.2.0" }
         })),
         "notifications/initialized" => None,
         "tools/list" => reply(json!({ "tools": tool_defs() })),
@@ -114,7 +116,7 @@ fn tool_defs() -> Value {
     json!([
         {
             "name": "set_reminder",
-            "description": "Set a one-shot reminder for this chat session. When the time comes, Wardex posts the reminder content back into the chat as a new prompt so you can report to the user. Use this whenever the user asks to be reminded about something later.",
+            "description": "Set a one-shot reminder for this chat session. When the time comes, Wardex posts the reminder content back into this chat as a new prompt so you can report to the user. Use this whenever the user asks to be reminded about something later.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -148,29 +150,47 @@ fn call_tool(ctx: &ReminderCtx, name: &str, args: &Value) -> Result<String, Stri
         "set_reminder" => {
             let minutes = args.get("minutes").and_then(Value::as_f64).unwrap_or(0.0);
             let content = args.get("content").and_then(Value::as_str).unwrap_or_default();
-            let reminder = store::new_reminder(&ctx.session_id, content, minutes, "agent")
-                .ok_or_else(|| "invalid arguments: minutes must be > 0 and content non-empty".to_string())?;
-            let mut rows = store::load_file(&ctx.path);
-            rows.push(reminder.clone());
-            store::save_file(&ctx.path, &rows).map_err(|e| e.to_string())?;
-            serde_json::to_string(&reminder).map_err(|e| e.to_string())
+            if minutes <= 0.0 || content.trim().is_empty() {
+                return Err("invalid arguments: minutes must be > 0 and content non-empty".to_string());
+            }
+            let due_at = todos::now_ms() + (minutes * 60_000.0) as i64;
+            let row = todos::new_todo(
+                content,
+                SCOPE_SESSION,
+                &ctx.session_id,
+                "",
+                due_at,
+                NOTIFY_PUSH,
+            )
+            .ok_or_else(|| {
+                "invalid arguments: minutes must be > 0 and content non-empty".to_string()
+            })?;
+            let mut rows = todos::load_file(&ctx.path);
+            rows.push(row.clone());
+            todos::save_file(&ctx.path, &rows).map_err(|e| e.to_string())?;
+            serde_json::to_string(&row).map_err(|e| e.to_string())
         }
         "cancel_reminder" => {
             let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
-            let mut rows = store::load_file(&ctx.path);
+            let mut rows = todos::load_file(&ctx.path);
             let before = rows.len();
             rows.retain(|r| r.id != id);
             if rows.len() == before {
                 return Err(format!("reminder not found: {id}"));
             }
-            store::save_file(&ctx.path, &rows).map_err(|e| e.to_string())?;
+            todos::save_file(&ctx.path, &rows).map_err(|e| e.to_string())?;
             Ok(format!("cancelled {id}"))
         }
         "list_reminders" => {
-            let all = store::load_file(&ctx.path);
-            let rows: Vec<&store::Reminder> = all
+            let all = todos::load_file(&ctx.path);
+            let rows: Vec<&todos::TodoRow> = all
                 .iter()
-                .filter(|r| r.session_id == ctx.session_id && !r.done)
+                .filter(|r| {
+                    r.scope == SCOPE_SESSION
+                        && r.session_id == ctx.session_id
+                        && r.notify_mode == NOTIFY_PUSH
+                        && !r.done
+                })
                 .collect();
             serde_json::to_string(&rows).map_err(|e| e.to_string())
         }
@@ -181,11 +201,12 @@ fn call_tool(ctx: &ReminderCtx, name: &str, args: &Value) -> Result<String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::todos as store;
 
     fn ctx(tmp: &tempfile::TempDir) -> ReminderCtx {
         ReminderCtx {
             session_id: "sess-1".to_string(),
-            path: tmp.path().join("reminders.json"),
+            path: tmp.path().join("todos.json"),
         }
     }
 
@@ -230,16 +251,17 @@ mod tests {
         .expect("response");
         assert!(set.get("error").is_none(), "{set}");
         let text = set["result"]["content"][0]["text"].as_str().expect("text");
-        let reminder: store::Reminder = serde_json::from_str(text).expect("reminder json");
-        assert_eq!(reminder.session_id, "sess-1");
-        assert_eq!(reminder.source, "agent");
-        assert!(!reminder.done);
-        assert!(reminder.due_at_ms > reminder.created_at_ms);
+        let row: store::TodoRow = serde_json::from_str(text).expect("todo json");
+        assert_eq!(row.session_id, "sess-1");
+        assert_eq!(row.scope, SCOPE_SESSION);
+        assert_eq!(row.notify_mode, NOTIFY_PUSH);
+        assert!(!row.done);
+        assert!(row.due_at_ms > row.created_at);
 
         // Persisted to disk.
         let on_disk = store::load_file(&ctx.path);
         assert_eq!(on_disk.len(), 1);
-        assert_eq!(on_disk[0].content, "喝水");
+        assert_eq!(on_disk[0].title, "喝水");
 
         // list_reminders sees it.
         let list = handle_line(
@@ -255,7 +277,7 @@ mod tests {
         // cancel removes it; a second cancel is an error result.
         let cancel_line = format!(
             r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"cancel_reminder","arguments":{{"id":"{}"}}}}}}"#,
-            reminder.id
+            row.id
         );
         let cancel = handle_line(&ctx, &cancel_line).expect("response");
         assert!(cancel.get("error").is_none());

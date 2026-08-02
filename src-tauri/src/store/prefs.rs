@@ -50,6 +50,8 @@ pub struct PanelLayoutEntry {
 // sorted like QJsonObject wrote them (cosmetic diff-friendliness, §0).
 #[derive(Debug, Clone, Serialize)]
 pub struct UserPrefs {
+    #[serde(rename = "codegraphInstalled", skip_serializing_if = "Option::is_none")]
+    codegraph_installed: Option<bool>,
     #[serde(rename = "fontScale")]
     font_scale: f64,
     #[serde(rename = "panelLayout")]
@@ -69,6 +71,8 @@ pub struct UserPrefs {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct PrefsFile {
+    #[serde(rename = "codegraphInstalled")]
+    codegraph_installed: Option<bool>,
     #[serde(rename = "permissionMode", default = "default_permission_mode")]
     permission_mode: String,
     #[serde(rename = "userAvatarPath")]
@@ -88,6 +92,7 @@ struct PrefsFile {
 impl Default for PrefsFile {
     fn default() -> Self {
         Self {
+            codegraph_installed: None,
             permission_mode: default_permission_mode(),
             user_avatar_path: String::new(),
             user_name: String::new(),
@@ -110,6 +115,7 @@ fn default_font_scale() -> f64 {
 impl Default for UserPrefs {
     fn default() -> Self {
         Self {
+            codegraph_installed: None,
             permission_mode: default_permission_mode(),
             user_avatar_path: String::new(),
             user_name: String::new(),
@@ -147,6 +153,7 @@ impl UserPrefs {
         let mut prefs = Self {
             // NOTE: no whitelist here — the old load() took the raw string.
             permission_mode: file.permission_mode,
+            codegraph_installed: file.codegraph_installed,
             user_avatar_path: String::new(),
             user_name: file.user_name,
             preview_width: clamp_preview_size(file.preview_width),
@@ -185,6 +192,22 @@ impl UserPrefs {
             return Ok(());
         }
         self.permission_mode = m;
+        self.save(paths)
+    }
+
+    // ---- codegraphInstalled (external CLI probe cache) ----
+
+    /// None = never probed. The Ctrl+\ overlay probes ONCE on first use and
+    /// stores the result; 重新检测 clears it via codegraph_reprobe.
+    pub fn codegraph_installed(&self) -> Option<bool> {
+        self.codegraph_installed
+    }
+
+    pub fn set_codegraph_installed(&mut self, paths: &Paths, v: bool) -> Result<(), PrefsError> {
+        if self.codegraph_installed == Some(v) {
+            return Ok(());
+        }
+        self.codegraph_installed = Some(v);
         self.save(paths)
     }
 

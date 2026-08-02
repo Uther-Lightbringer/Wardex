@@ -155,8 +155,12 @@ export interface SessionMeta {
   provider: string;
   workDir: string;
   projectDir: string;
+  createdAt: number;
   updatedAt: number;
   messageCount: number;
+  model: string;
+  status: string;
+  pinned?: boolean;
   summary: string;
 }
 

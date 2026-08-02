@@ -25,7 +25,6 @@ pub mod paths;
 pub mod prefs;
 pub mod projects;
 pub mod prompts;
-pub mod reminders;
 pub mod sessions;
 pub mod todos;
 pub mod usage;
@@ -36,7 +35,6 @@ pub use paths::{canonical_dir, Paths};
 pub use prefs::{PanelLayoutEntry, PrefsError, UserPrefs};
 pub use projects::{ProjectStore, ProjectsError, RecentEntry};
 pub use prompts::{PromptRow, PromptStore, PromptsError};
-pub use reminders::{Reminder, ReminderStore, RemindersError};
 pub use sessions::{
     AgentSnapshot, MessageRow, SearchEngine, SearchHit, SearchOutcome, SearchTarget,
     SessionIndexRow, SessionMeta, SessionStore, SessionsError,
@@ -55,7 +53,6 @@ pub struct StoreRegistry {
     pub projects: ProjectStore,
     pub prefs: UserPrefs,
     pub todos: TodoStore,
-    pub reminders: ReminderStore,
     pub prompts: PromptStore,
     pub usage: UsageStore,
     pub search: SearchEngine,
@@ -71,7 +68,6 @@ impl StoreRegistry {
             projects: ProjectStore::load(&paths),
             prefs: UserPrefs::load(&paths),
             todos: TodoStore::load(&paths),
-            reminders: ReminderStore::load(&paths),
             prompts: PromptStore::load(&paths),
             usage: UsageStore::load(&paths),
             sessions,

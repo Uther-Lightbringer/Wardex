@@ -372,7 +372,7 @@ tool 段 / `toolCalls` 元素的键集（来自 ACP update + `toolFromUpdate` �
 
 ### 8.1 todos.json
 
-存储 `src/TodoStore.cpp:176-194`（save）/ `155-174`（load）。
+统一待办/提醒模型（旧版 `src/TodoStore.cpp` 的纯清单 + 旧 `reminders.json` 会话提醒合并于此）。存储为 Rust `store/todos.rs`。
 
 ```json
 {
@@ -381,16 +381,31 @@ tool 段 / `toolCalls` 元素的键集（来自 ACP update + `toolFromUpdate` �
             "createdAt": 1753600000000,
             "done": false,
             "doneAt": 0,
+            "dueAtMs": 0,
             "id": "c7d8e9f0-a1b2-4c3d-8e4f-5a6b7c8d9e0f",
+            "notifiedAtMs": 0,
+            "notifyMode": "popup",
+            "projectDir": "",
+            "scope": "global",
+            "sessionId": "",
             "title": "验证旧会话能打开"
         }
     ]
 }
 ```
 
-- 顶层仅 `todos` 数组。条目字段：`id`(string, UUID)、`title`(string)、`done`(bool)、`createdAt`(number ms)、`doneAt`(number ms，**未完成 = 0**；toggle 回未完成时归零，`src/TodoStore.cpp:107-108`)。
-- 加载校验：`id` 或 `title` 为空的条目丢弃（`src/TodoStore.cpp:171-172`）。
-- 排序不落盘：UI 的 pending/done 两个视图在内存中分别按 `createdAt` desc / `doneAt` desc 排（`src/TodoStore.cpp:135-148`）；磁盘顺序 = 插入顺序。
+- 顶层仅 `todos` 数组。条目字段：
+  - `id`(string, UUID)、`title`(string)、`done`(bool)、`createdAt`(number ms)、`doneAt`(number ms，**未完成 = 0**；toggle 回未完成时归零)
+  - `scope`: `"session"` | `"project"` | `"global"`（旧纯清单条目无此键 → 视为 `global`）
+  - `sessionId`: scope=session 的归属会话
+  - `projectDir`: scope=project 的归属项目（规范化目录）
+  - `dueAtMs`: **0 = 无到期**（纯清单）；>0 = 到期待办
+  - `notifiedAtMs`: 到期已弹通知的时间（**0 = 未通知**，全局 30s 到期扫描的防重复守卫）
+  - `notifyMode`: `"popup"`（到期弹窗，用户勾掉完成）| `"push"`（到期作为 chat prompt 发回所属会话，仅 MCP agent 自我唤醒行使用）
+- 加载校验：`id` 或 `title` 为空的条目丢弃。
+- 排序不落盘：UI 的 pending/done 视图在内存中按 `createdAt` desc / `doneAt` desc 排；磁盘顺序 = 插入顺序。
+- **到期行为**（按 scope）：`session` + `global` → popup 系统通知 + `todos://due` 前端弹窗（行保持 pending，勾掉才完成）；`project` → 后端在项目内自动新建会话（命名=待办标题，不抢占 active），发 `todos://projectDue` 三选弹窗（跳转并处理/后台处理/我知道了），行直接 settle 为 done。
+- **旧数据迁移**（`TodoStore::load` 内幂等执行）：旧 `reminders.json`（每行 `id/sessionId/content/dueAtMs/createdAtMs/source/done`）合并进 todos.json——id 复用（已存在的行跳过，保证幂等）；`source=="agent"` → `notifyMode="push"`（保留到期发回会话语义），`source=="user"` → `"popup"`。旧文件保留不再写入。
 
 ### 8.2 prompts.json
 
