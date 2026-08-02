@@ -29,6 +29,10 @@ WarDex 是一款 Windows 桌面端 AI 编程助手 GUI，采用魔兽争霸 III 
 
 ![加载会话](docs/screenshots/sessions.jpg)
 
+![Git 对比](docs/screenshots/git-diff.jpg)
+
+![代码阅读](docs/screenshots/code-read.jpg)
+
 ## 技术栈
 
 | 层 | 技术 |
