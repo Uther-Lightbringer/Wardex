@@ -178,10 +178,16 @@
 
 旧: `ui/ChatPage.qml:1644-1660`、`src/ChatController.cpp:125-136, 908-916`
 
-- 向上展开的下拉（`WarDropdown`），宽 140。模式 id 与中文文案映射：
+- 向上展开的下拉（`WarDropdown`），宽 140。
+- **动态优先（2026-08）**：若 agent 上报了 mode picker（`configOptions` 中 `id=="mode"`
+  且带 `options[]`），下拉改为显示 agent 自己的模式（opencode 是其 agent：build/plan/general…；
+  kimi 是其自身 id），当前选中取 `currentValue`；切换时**原样**发
+  `session/set_config_option(configId:"mode")`，不再走 provider 映射。这样 opencode 等
+  自报模式的 agent 不会出现 `mode not found: yolo` 一类的拒绝。
+- 未上报 mode picker 时才回退到全局列表，模式 id 与中文文案映射：
   - `default` → `需批准`；`plan` → `计划`；`auto` → `自动`；`yolo` → `YOLO`
-- 持久化到 user_prefs（全局，非按会话）。切换后立即对活动会话进程生效（`session/set_config_option`），后台会话下次 prompt 时生效。
-- 发给 agent 前经 ProviderRegistry 映射（kimi 系 id 原样；claude：`auto→acceptEdits`、`yolo→bypassPermissions`；映射表见 sessions-and-config.md 附录与 ../acp-protocol.md）。
+- 回退路径持久化到 user_prefs（全局，非按会话）。切换后立即对活动会话进程生效（`session/set_config_option`），后台会话下次 prompt 时生效。
+- 回退路径发给 agent 前经 ProviderRegistry 映射（kimi 系 id 原样；claude：`auto→acceptEdits`、`yolo→bypassPermissions`；映射表见 sessions-and-config.md 附录与 ../acp-protocol.md）。
 - 状态行后缀同步显示 `· 需批准` 等（见 6.1）。
 
 ### 3.8 `/` 斜杠命令补全（ACP available_commands_update）

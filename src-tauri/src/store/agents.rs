@@ -12,6 +12,7 @@
 //   - apiKey update guard: an empty string or one containing '*' keeps the
 //     old value (UI sends back the masked key).
 
+use std::collections::BTreeMap;
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,11 @@ pub struct Agent {
     /// JSON array TEXT (not a nested object) passed through to ACP session/new.
     #[serde(rename = "mcpServers")]
     pub mcp_servers: String,
+    /// Per-model ACP config override (currently drives opencode only). Key =
+    /// model id, value = variants + default. Rendered into a per-agent
+    /// opencode.json injected via OPENCODE_CONFIG at spawn (models.rs).
+    #[serde(rename = "modelConfigs")]
+    pub model_configs: BTreeMap<String, ModelConfig>,
     pub model: String,
     pub name: String,
     #[serde(default = "default_provider")]
@@ -76,6 +82,18 @@ pub struct Agent {
 
 fn default_provider() -> String {
     "kimi".to_string()
+}
+
+/// Per-model ACP config override. `variants` maps a variant name to opencode
+/// model options (e.g. `{reasoningEffort, thinking}`); `default_variant` names
+/// the one whose options also become the model's base `options` so "no variant
+/// picked" behaves exactly like the default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelConfig {
+    #[serde(rename = "defaultVariant")]
+    pub default_variant: String,
+    pub variants: Map<String, Value>,
 }
 
 fn default_cli_path() -> String {
@@ -101,6 +119,7 @@ impl Default for Agent {
             id: String::new(),
             is_default: false,
             mcp_servers: String::new(),
+            model_configs: BTreeMap::new(),
             model: String::new(),
             name: String::new(),
             provider: default_provider(),
@@ -134,6 +153,8 @@ pub struct AgentPatch {
     pub mcp_servers: Option<String>,
     #[serde(rename = "avatarPath")]
     pub avatar_path: Option<String>,
+    #[serde(rename = "modelConfigs")]
+    pub model_configs: Option<BTreeMap<String, ModelConfig>>,
     pub enabled: Option<bool>,
 }
 
@@ -326,6 +347,9 @@ impl AgentStore {
         if let Some(v) = &patch.mcp_servers {
             a.mcp_servers = v.clone();
         }
+        if let Some(v) = &patch.model_configs {
+            a.model_configs = v.clone();
+        }
         // Empty string clears back to the built-in default avatar.
         if let Some(v) = &patch.avatar_path {
             a.avatar_path = v.trim().to_string();
@@ -348,6 +372,7 @@ impl AgentStore {
         };
         self.agents.remove(pos);
         let _ = fs::remove_file(paths.agent_file_path(id));
+        let _ = fs::remove_file(paths.opencode_config_file_path(id));
 
         if self.default_agent_id == id {
             self.default_agent_id.clear();

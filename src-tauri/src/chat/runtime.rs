@@ -1720,6 +1720,20 @@ impl Actor {
                 env.push(("KIMI_MODEL_PROVIDER_TYPE".to_string(), Some("openai".to_string())));
             }
         }
+        // Per-agent model config (opencode): render the agent's modelConfigs
+        // into an isolated opencode.json and point THIS CLI at it via
+        // OPENCODE_CONFIG. Each agent gets its own file, so editing one
+        // agent's variants never leaks into any other agent or the user's
+        // global ~/.config/opencode/opencode.json.
+        if provider == "opencode" {
+            let paths = lock_ok(&self.stores).paths.clone();
+            if let Ok(Some(cfg_path)) = crate::models::write_opencode_config(&paths, &self.agent) {
+                env.push((
+                    "OPENCODE_CONFIG".to_string(),
+                    Some(cfg_path.to_string_lossy().into_owned()),
+                ));
+            }
+        }
         let cli = provider::resolve_command(spec, &self.agent.cli_path);
         let args = provider::resolve_args(spec, &self.agent.extra_args);
         // Per-agent MCP servers: the config page stores raw JSON-array text;

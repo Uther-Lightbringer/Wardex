@@ -20,6 +20,10 @@ export interface AgentRecord {
   defaultEffort: string;
   /** 刷新批量同步写入 config.toml 的 max_context_size，单位 K；0 = 256K 兜底。 */
   maxContextK: number;
+  /** 每模型 ACP 配置覆盖（目前驱动 opencode）：模型 id → variants + 默认档。
+   * 保存后由后端渲染成独立的 opencode.json 经 OPENCODE_CONFIG 注入，各
+   * agent 之间完全隔离。 */
+  modelConfigs: Record<string, ModelConfig>;
   cliPath: string;
   /** PLAINTEXT from the backend — display surfaces must maskKey() it. */
   apiKey: string;
@@ -33,6 +37,14 @@ export interface AgentRecord {
   updatedAt: number;
 }
 
+/** 每模型 ACP 配置：variants = 档位名 → opencode 模型 options
+ * （如 {reasoningEffort, thinking}）；defaultVariant 的 options 同时作为该
+ * 模型的基础 options，保证"不选档位 = 默认档"。 */
+export interface ModelConfig {
+  defaultVariant: string;
+  variants: Record<string, Record<string, unknown>>;
+}
+
 /** Save patch; absent key = field untouched (Rust Option semantics). */
 export type AgentPatch = Partial<
   Pick<
@@ -43,6 +55,7 @@ export type AgentPatch = Partial<
     | 'baseUrl'
     | 'defaultEffort'
     | 'maxContextK'
+    | 'modelConfigs'
     | 'cliPath'
     | 'apiKey'
     | 'extraArgs'

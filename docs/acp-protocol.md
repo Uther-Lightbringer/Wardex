@@ -295,6 +295,12 @@ agent 可能忽略它——chat 层有 2500ms 强杀兜底（第 9.6 节）。
   翻译发生在 chat 层（`ChatController.cpp:908-916`），协议层收到什么发什么。
 - 会话未建立时调用 setMode：只缓存为 `pendingMode`，等 sessionReady 后自动应用
   （`AcpClient.cpp:140-142`）。
+- **新版扩展（2026-08）——自报模式跳过**：sessionReady 应用 pendingMode 前，先检查
+  session/new|load 带回的 `configOptions[]`。若 agent 上报了 mode picker
+  （`id=="mode"` 且带 `options[]`），则只有在 pendingMode 出现在其 `options[].value`
+  里时才下发；否则跳过，让 agent 保持自己的模式，并发 `modeChanged(当前 currentValue)`
+  ——opencode 上报的是其 agent（build/plan/general…），WarDex 全局 id（如 `yolo`）
+  不在其中，强制下发会被它拒绝（`mode not found: yolo`）。
 - 响应忽略内容（result 里可能带 `configOptions`，不读），发 `modeChanged(pendingMode)`
   事件（`AcpClient.cpp:398-402`）。
 - **新版扩展（2026-08）**：mode 之外的 picker 走同一方法的不同 `configId`（kimi 上报

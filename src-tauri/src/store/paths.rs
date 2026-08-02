@@ -57,6 +57,17 @@ impl Paths {
         self.agents_dir().join(format!("{agent_id}.json"))
     }
 
+    /// Per-agent opencode.json overrides injected via OPENCODE_CONFIG at
+    /// spawn (models.rs render_opencode_config). One file per agent keeps
+    /// each ACP's model config fully isolated from every other agent.
+    pub fn opencode_config_dir(&self) -> PathBuf {
+        self.root.join("opencode")
+    }
+
+    pub fn opencode_config_file_path(&self, agent_id: &str) -> PathBuf {
+        self.opencode_config_dir().join(format!("{agent_id}.json"))
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.root.join("sessions")
     }
@@ -123,6 +134,7 @@ impl Paths {
     pub fn ensure_layout(&self) {
         for dir in [
             self.agents_dir(),
+            self.opencode_config_dir(),
             self.sessions_dir(),
             self.media_root(),
             self.logs_dir(),

@@ -842,12 +842,14 @@ impl<T: Transport> AcpClient<T> {
     /// Session established: apply the pending mode (non-default only), then
     /// Started (AcpClient.cpp:477-485).
     async fn session_ready(&mut self) -> Result<(), AcpError> {
-        if !self.pending_mode.is_empty() && self.pending_mode != "default" {
+        if self.pending_mode_applies() {
             let mode = self.pending_mode.clone();
             self.set_mode(&mode).await?;
         } else {
+            // Nothing to force onto the session: report the agent's current
+            // mode so the frontend picker/status stay in sync.
             self.emit(AcpEvent::ModeChanged {
-                mode: "default".to_string(),
+                mode: self.current_advertised_mode(),
             })
             .await;
         }
@@ -868,6 +870,43 @@ impl<T: Transport> AcpClient<T> {
             .await;
         }
         Ok(())
+    }
+
+    /// Whether the caller's pending (global WarDex) mode may be forced onto
+    /// the session. Agents that advertise their own mode picker (configOptions
+    /// `id=="mode"` with options) own the mode list — opencode exposes its
+    /// agents (build/plan/general…), so a WarDex-only id such as "yolo" is
+    /// rejected with `mode not found: <id>`. The pending mode only applies
+    /// when there is no advertised picker, or the id is one of the advertised
+    /// values.
+    fn pending_mode_applies(&self) -> bool {
+        if self.pending_mode.is_empty() || self.pending_mode == "default" {
+            return false;
+        }
+        let Some(mode_opt) = self
+            .config_options
+            .iter()
+            .find(|o| o.get("id").and_then(Value::as_str) == Some("mode"))
+        else {
+            // No advertised picker → old behavior applies.
+            return true;
+        };
+        let Some(opts) = mode_opt.get("options").and_then(Value::as_array) else {
+            return false;
+        };
+        opts.iter()
+            .any(|v| v.get("value").and_then(Value::as_str) == Some(self.pending_mode.as_str()))
+    }
+
+    /// currentValue of the advertised mode picker, if any ("default" when no
+    /// picker exists, keeping the pre-mode-advertisement event shape).
+    fn current_advertised_mode(&self) -> String {
+        self.config_options
+            .iter()
+            .find(|o| o.get("id").and_then(Value::as_str) == Some("mode"))
+            .and_then(|o| o.get("currentValue").and_then(Value::as_str))
+            .unwrap_or("default")
+            .to_string()
     }
 
     fn effective_cwd(&self) -> String {
@@ -1243,6 +1282,84 @@ async fn non_default_pending_mode_is_applied_on_session_ready() {
     assert_eq!(
         events(&mut h),
         vec![AcpEvent::ModeChanged { mode: "acceptEdits".into() }]
+    );
+}
+
+#[tokio::test]
+async fn pending_mode_skipped_when_not_in_advertised_modes() {
+    let mut h = harness();
+    // opencode advertises its agents as modes (build/plan/general…) — a
+    // WarDex global id like "yolo" must never be forced onto such a session
+    // (it would be rejected with "mode not found: yolo").
+    let options = json!([{
+        "id": "mode", "name": "Session Mode", "category": "mode",
+        "type": "select", "currentValue": "build",
+        "options": [
+            { "value": "build", "name": "Build" },
+            { "value": "plan", "name": "Plan" }
+        ]
+    }]);
+    let params = StartParams {
+        preferred_mode: "yolo".to_string(),
+        ..start_params()
+    };
+    h.client.start(params).await.expect("start");
+    h.transport.feed_json(init_result(false, false)).await;
+    h.client.recv_once().await.expect("init");
+    h.transport
+        .feed_json(
+            json!({ "jsonrpc": "2.0", "id": 2,
+                    "result": { "sessionId": "s-1", "configOptions": options } }),
+        )
+        .await;
+    h.client.recv_once().await.expect("new");
+
+    // No session/set_config_option went out — the agent keeps its mode.
+    let sent = sent_requests(&h);
+    assert_eq!(sent.len(), 2, "only initialize + session/new went out");
+    assert_eq!(
+        events(&mut h),
+        vec![
+            AcpEvent::ModeChanged { mode: "build".into() },
+            AcpEvent::Started { session_id: "s-1".into() },
+            AcpEvent::ConfigOptions {
+                options: options.as_array().cloned().unwrap(),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn pending_mode_applied_when_in_advertised_modes() {
+    let mut h = harness();
+    let options = json!([{
+        "id": "mode", "name": "Session Mode", "category": "mode",
+        "type": "select", "currentValue": "build",
+        "options": [
+            { "value": "build", "name": "Build" },
+            { "value": "plan", "name": "Plan" }
+        ]
+    }]);
+    let params = StartParams {
+        preferred_mode: "plan".to_string(), // also advertised → still applied
+        ..start_params()
+    };
+    h.client.start(params).await.expect("start");
+    h.transport.feed_json(init_result(false, false)).await;
+    h.client.recv_once().await.expect("init");
+    h.transport
+        .feed_json(
+            json!({ "jsonrpc": "2.0", "id": 2,
+                    "result": { "sessionId": "s-1", "configOptions": options } }),
+        )
+        .await;
+    h.client.recv_once().await.expect("new");
+
+    let sent = sent_requests(&h);
+    assert_eq!(
+        sent[2],
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "session/set_config_option",
+                "params": { "sessionId": "s-1", "configId": "mode", "value": "plan" } })
     );
 }
 

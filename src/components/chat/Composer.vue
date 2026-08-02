@@ -517,12 +517,38 @@ async function expandReferences(input: string): Promise<string> {
 }
 
 // ---- permission mode (§3.7) ----
-const MODE_IDS = ['default', 'plan', 'auto', 'yolo'];
-const MODE_LABELS = ['需批准', '计划', '自动', 'YOLO'];
-const modeIndex = computed(() => Math.max(0, MODE_IDS.indexOf(prefs.permissionMode)));
+// The dropdown prefers the agent's OWN mode picker (configOptions `id=="mode"`,
+// e.g. opencode exposes its agents build/plan/general…, kimi its own ids):
+// picking sends setConfigOption("mode", value) verbatim. Without an advertised
+// picker it falls back to the global default/plan/auto/yolo list, which the
+// backend maps per provider (provider.rs mapMode) before sending.
+const FALLBACK_MODE_IDS = ['default', 'plan', 'auto', 'yolo'];
+const FALLBACK_MODE_LABELS = ['需批准', '计划', '自动', 'YOLO'];
+
+const modeOpt = computed(() => chat.configOptions.find((o) => o.id === 'mode'));
+const modeChoices = computed(() =>
+  (modeOpt.value?.options ?? []).map((o) => ({ value: o.value, name: o.name })),
+);
+const modeIsDynamic = computed(() => modeChoices.value.length > 0);
+
+const modeLabels = computed(() =>
+  modeIsDynamic.value ? modeChoices.value.map((o) => o.name) : FALLBACK_MODE_LABELS,
+);
+const modeIndex = computed(() => {
+  if (modeIsDynamic.value) {
+    const cur = modeOpt.value?.currentValue ?? '';
+    return Math.max(0, modeChoices.value.findIndex((o) => o.value === cur));
+  }
+  return Math.max(0, FALLBACK_MODE_IDS.indexOf(prefs.permissionMode));
+});
 
 function onModeChange(i: number): void {
-  void prefs.setPermissionMode(MODE_IDS[i]);
+  if (modeIsDynamic.value) {
+    const o = modeChoices.value[i];
+    if (o && o.value !== modeOpt.value?.currentValue) void chat.setConfigOption('mode', o.value);
+  } else {
+    void prefs.setPermissionMode(FALLBACK_MODE_IDS[i]);
+  }
 }
 
 // ---- send (§3.2) ----
@@ -653,7 +679,7 @@ function onExpandConfirm(v: string): void {
       <div class="composer__tools">
         <WarDropdown
           class="composer__mode"
-          :options="MODE_LABELS"
+          :options="modeLabels"
           :model-value="modeIndex"
           drop-up
           :text-size="prefs.fs(12)"

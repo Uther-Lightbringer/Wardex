@@ -26,6 +26,7 @@ import {
   maskKey,
   useAgentsStore,
   type AgentRecord,
+  type ModelConfig,
 } from '../stores/agents';
 
 const nav = useNavStore();
@@ -184,6 +185,117 @@ onMounted(() => {
   });
 });
 
+// ---- per-model config editor (opencode only) ----
+// Editable drafts: array form so rows can be added/removed; converted to the
+// persisted Record<string, ModelConfig> on save (agents.ts). The backend
+// renders each agent's modelConfigs into an isolated opencode.json injected
+// via OPENCODE_CONFIG, so one agent's settings never leak into another.
+interface VariantDraft {
+  name: string;
+  thinking: boolean; // enabled / disabled
+  effort: string; // low/high/xhigh/max (empty when thinking off)
+}
+interface ModelConfigDraft {
+  modelId: string;
+  defaultVariant: string;
+  variants: VariantDraft[];
+}
+const modelConfigDrafts = ref<ModelConfigDraft[]>([]);
+const THINK_LABELS = ['开启', '关闭'];
+const effortOnlyLabels = computed(() => effortValues.value.map((v) => EFFORT_DISPLAY[v] ?? v));
+
+function thinkLabel(v: boolean): string {
+  return v ? '开启' : '关闭';
+}
+
+function effortIndexFor(effort: string): number {
+  return effortValues.value.indexOf(effort);
+}
+
+function loadModelConfigs(a: AgentRecord): void {
+  const drafts: ModelConfigDraft[] = [];
+  for (const [modelId, cfg] of Object.entries(a.modelConfigs ?? {})) {
+    const variants: VariantDraft[] = [];
+    for (const [name, opts] of Object.entries(cfg.variants ?? {})) {
+      const o = opts as { reasoningEffort?: string; thinking?: { type?: string } };
+      const thinking = o.thinking?.type !== 'disabled';
+      variants.push({ name, thinking, effort: o.reasoningEffort ?? '' });
+    }
+    drafts.push({ modelId, defaultVariant: cfg.defaultVariant ?? '', variants });
+  }
+  modelConfigDrafts.value = drafts;
+}
+
+function toModelConfigs(): Record<string, ModelConfig> {
+  const out: Record<string, ModelConfig> = {};
+  for (const d of modelConfigDrafts.value) {
+    const modelId = d.modelId.trim();
+    if (!modelId) continue;
+    const variants: Record<string, Record<string, unknown>> = {};
+    for (const v of d.variants) {
+      const name = v.name.trim();
+      if (!name) continue;
+      variants[name] = v.thinking
+        ? { reasoningEffort: v.effort || undefined, thinking: { type: 'enabled' } }
+        : { thinking: { type: 'disabled' } };
+    }
+    if (Object.keys(variants).length === 0) continue;
+    const defaultVariant =
+      d.defaultVariant && variants[d.defaultVariant] ? d.defaultVariant : Object.keys(variants)[0];
+    out[modelId] = { defaultVariant, variants };
+  }
+  return out;
+}
+
+function addModelConfig(): void {
+  modelConfigDrafts.value.push({ modelId: '', defaultVariant: '', variants: [] });
+  markDirty();
+}
+
+function removeModelConfig(i: number): void {
+  modelConfigDrafts.value.splice(i, 1);
+  markDirty();
+}
+
+function addVariant(mi: number): void {
+  modelConfigDrafts.value[mi].variants.push({ name: '', thinking: true, effort: 'high' });
+  markDirty();
+}
+
+function removeVariant(mi: number, vi: number): void {
+  modelConfigDrafts.value[mi].variants.splice(vi, 1);
+  markDirty();
+}
+
+/** DeepSeek 式标准档位：max/high/low/off（默认 max），空列表时一键填入。 */
+function fillStandardVariants(mi: number): void {
+  const d = modelConfigDrafts.value[mi];
+  if (!d || d.variants.length > 0) return;
+  d.variants = [
+    { name: 'max', thinking: true, effort: 'max' },
+    { name: 'high', thinking: true, effort: 'high' },
+    { name: 'low', thinking: true, effort: 'low' },
+    { name: 'off', thinking: false, effort: '' },
+  ];
+  d.defaultVariant = 'max';
+  markDirty();
+}
+
+function onThinkToggle(mi: number, vi: number, i: number): void {
+  const v = modelConfigDrafts.value[mi]?.variants[vi];
+  if (!v) return;
+  v.thinking = i === 0;
+  if (!v.thinking) v.effort = '';
+  markDirty();
+}
+
+function onEffortForVariant(mi: number, vi: number, i: number): void {
+  const v = modelConfigDrafts.value[mi]?.variants[vi];
+  if (!v) return;
+  v.effort = effortValues.value[i] ?? '';
+  markDirty();
+}
+
 const nameInput = ref<HTMLInputElement | null>(null);
 
 function markDirty(): void {
@@ -203,6 +315,7 @@ function loadAgent(a: AgentRecord): void {
   draft.extraArgs = a.extraArgs;
   draft.mcpServers = a.mcpServers;
   draft.avatarPath = a.avatarPath;
+  loadModelConfigs(a);
   dirty.value = false;
   // Bare CLI path → async auto-probe on load (§9.2 trigger #1).
   if (isBareCliPath(spec.value, draft.cliPath)) {
@@ -233,6 +346,7 @@ async function saveCurrent(): Promise<boolean> {
     extraArgs: draft.extraArgs,
     mcpServers: draft.mcpServers,
     avatarPath: draft.avatarPath,
+    modelConfigs: toModelConfigs(),
   });
   if (ok) {
     dirty.value = false;
@@ -724,6 +838,77 @@ const pageKeysOn = computed(() => nav.page === 'config');
               保存后会把该模型写入 ~/.kimi-code/config.toml（support_efforts）以启用强度档，apiKey 将明文同步
             </div>
 
+            <div v-if="draft.provider === 'opencode'" class="cfg__field cfg__field--stack">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">模型思考配置</span>
+              <div class="cfg__mc">
+                <div v-if="modelConfigDrafts.length === 0" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                  未配置。每个模型在此独立设置思考开关与强度档位，保存后生成独立的 opencode.json（OPENCODE_CONFIG 注入），与其他 Agent 完全隔离；留空则使用全局 opencode 配置。
+                </div>
+                <div v-for="(mc, mi) in modelConfigDrafts" :key="mi" class="cfg__mc-card">
+                  <div class="cfg__mc-head">
+                    <input
+                      v-model="mc.modelId"
+                      class="war-input cfg__mc-model"
+                      placeholder="模型 id（如 deepseek-v4-flash）"
+                      :style="{ fontSize: prefs.fs(12) + 'px' }"
+                      spellcheck="false"
+                      @input="markDirty"
+                    />
+                    <WarButton
+                      skin="dialog"
+                      :width="88"
+                      :art-aspect="5.34"
+                      text="标准档位"
+                      :enabled="mc.variants.length === 0"
+                      @activated="fillStandardVariants(mi)"
+                    />
+                    <WarButton skin="dialog" :width="64" :art-aspect="5.34" text="删除" @activated="removeModelConfig(mi)" />
+                  </div>
+                  <div v-for="(v, vi) in mc.variants" :key="vi" class="cfg__mc-row">
+                    <input
+                      v-model="v.name"
+                      class="war-input cfg__mc-name"
+                      placeholder="档位名"
+                      :style="{ fontSize: prefs.fs(12) + 'px' }"
+                      spellcheck="false"
+                      @input="markDirty"
+                    />
+                    <WarDropdown
+                      class="cfg__mc-think"
+                      :options="THINK_LABELS"
+                      :model-value="v.thinking ? 0 : 1"
+                      :display-text="thinkLabel(v.thinking)"
+                      :text-size="prefs.fs(11)"
+                      @activated="onThinkToggle(mi, vi, $event)"
+                    />
+                    <WarDropdown
+                      class="cfg__mc-effort"
+                      :options="effortOnlyLabels"
+                      :model-value="effortIndexFor(v.effort)"
+                      :display-text="v.effort ? (EFFORT_DISPLAY[v.effort] ?? v.effort) : '—'"
+                      :text-size="prefs.fs(11)"
+                      @activated="onEffortForVariant(mi, vi, $event)"
+                    />
+                    <label class="cfg__mc-default" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                      <input
+                        type="radio"
+                        :checked="mc.defaultVariant === v.name"
+                        @change="mc.defaultVariant = v.name; markDirty()"
+                      />
+                      默认
+                    </label>
+                    <WarButton skin="dialog" :width="40" :art-aspect="5.34" text="✕" @activated="removeVariant(mi, vi)" />
+                  </div>
+                  <div class="cfg__mc-add">
+                    <WarButton skin="dialog" :width="88" :art-aspect="5.34" text="添加档位" @activated="addVariant(mi)" />
+                  </div>
+                </div>
+                <div class="cfg__mc-add">
+                  <WarButton skin="dialog" :width="104" :art-aspect="5.34" text="添加模型" @activated="addModelConfig" />
+                </div>
+              </div>
+            </div>
+
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               {{ spec.baseUrlHint }}
             </div>
@@ -1141,6 +1326,77 @@ const pageKeysOn = computed(() => nav.page === 'config');
   padding: 6px 8px;
   line-height: 1.4;
 }
+
+/* ---- per-model config editor (opencode) ---- */
+.cfg__field--stack {
+  align-items: flex-start;
+}
+
+.cfg__mc {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cfg__mc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #2a3344;
+  background: #0a1020aa;
+}
+
+.cfg__mc-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cfg__mc-model {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+}
+
+.cfg__mc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cfg__mc-name {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+}
+
+.cfg__mc-think {
+  width: 92px;
+  height: 28px;
+}
+
+.cfg__mc-effort {
+  width: 96px;
+  height: 28px;
+}
+
+.cfg__mc-default {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  white-space: nowrap;
+}
+
+.cfg__mc-add {
+  display: flex;
+}
+
 
 .cfg__avatar-row {
   flex: none;

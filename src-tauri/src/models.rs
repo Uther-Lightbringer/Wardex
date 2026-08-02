@@ -8,6 +8,10 @@
 //!   `~/.kimi-code/config.toml` (kimi CLI's own configured models).
 
 use serde::Deserialize;
+use serde_json::{Map, Value};
+
+use crate::store::agents::Agent;
+use crate::store::paths::Paths;
 
 #[derive(Deserialize)]
 struct ModelsResponse {
@@ -401,6 +405,125 @@ pub fn sync_agent_models(
     Ok(model_ids.len())
 }
 
+// ---------------------------------------------------------------------------
+// Per-agent opencode.json overrides (models.rs effort sync, opencode flavor).
+// Each agent's modelConfigs render into ONE isolated file under
+// %AppData%/WarDex/opencode/<agentId>.json, injected via OPENCODE_CONFIG at
+// spawn — so editing one agent's model variants never touches any other agent
+// or the user's global ~/.config/opencode/opencode.json.
+// ---------------------------------------------------------------------------
+
+/// Render a per-agent opencode.json override from `agent.model_configs`.
+/// Returns "" when the agent declares nothing (no override; the global
+/// opencode config applies as-is).
+///
+/// - baseUrl on the built-in OpenCode Go endpoint → the `opencode-go`
+///   provider (apiKey rides the OPENCODE_API_KEY env Wardex already sets);
+/// - any other baseUrl → a `wardex-opencode-<host>` custom provider
+///   (`@ai-sdk/openai-compatible`) with baseURL + apiKey inline;
+/// - each model gets `variants` plus `options` copied from its
+///   defaultVariant, so "no variant picked" behaves exactly like the default
+///   and the ACP effort picker's fallback (first variant) matches it;
+/// - top-level `model` points at the first configured model so a fresh ACP
+///   session starts on it.
+pub fn render_opencode_config(agent: &Agent) -> String {
+    if agent.model_configs.is_empty() {
+        return String::new();
+    }
+    let base_url = agent.base_url.trim();
+    let builtin_go = base_url.is_empty() || base_url.contains("opencode.ai/zen/go");
+    let provider_key = if builtin_go {
+        "opencode-go".to_string()
+    } else {
+        let host = api_root(base_url)
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let slug: String = host
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let slug = slug.trim_matches('-');
+        format!(
+            "wardex-opencode-{}",
+            if slug.is_empty() { "local" } else { slug }
+        )
+    };
+
+    let mut models = Map::new();
+    let mut default_model = String::new();
+    for (model_id, cfg) in &agent.model_configs {
+        if cfg.variants.is_empty() {
+            continue;
+        }
+        let default_variant = if cfg.default_variant.is_empty() {
+            cfg.variants.keys().next().cloned().unwrap_or_default()
+        } else {
+            cfg.default_variant.clone()
+        };
+        let mut model_obj = Map::new();
+        if let Some(def) = cfg.variants.get(&default_variant) {
+            model_obj.insert("options".to_string(), def.clone());
+        }
+        model_obj.insert("variants".to_string(), Value::Object(cfg.variants.clone()));
+        models.insert(model_id.clone(), Value::Object(model_obj));
+        if default_model.is_empty() {
+            default_model = format!("{provider_key}/{model_id}");
+        }
+    }
+    if models.is_empty() {
+        return String::new();
+    }
+
+    let mut prov = Map::new();
+    if !builtin_go {
+        let mut opts = Map::new();
+        opts.insert("baseURL".to_string(), Value::String(api_root(base_url)));
+        if !agent.api_key.trim().is_empty() {
+            opts.insert("apiKey".to_string(), Value::String(agent.api_key.trim().to_string()));
+        }
+        prov.insert("npm".to_string(), Value::String("@ai-sdk/openai-compatible".to_string()));
+        prov.insert("options".to_string(), Value::Object(opts));
+    }
+    prov.insert("models".to_string(), Value::Object(models));
+
+    let mut provider = Map::new();
+    provider.insert(provider_key.clone(), Value::Object(prov));
+
+    let mut root = Map::new();
+    root.insert("provider".to_string(), Value::Object(provider));
+    if !default_model.is_empty() {
+        root.insert("model".to_string(), Value::String(default_model));
+    }
+    serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default()
+}
+
+/// Write the per-agent opencode.json override (rewrites only when the content
+/// changed). Returns the path to inject via `OPENCODE_CONFIG`, or `None` when
+/// the agent has no override — a stale file from an earlier edit is removed so
+/// the global opencode config applies cleanly.
+pub fn write_opencode_config(
+    paths: &Paths,
+    agent: &Agent,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let rendered = render_opencode_config(agent);
+    let path = paths.opencode_config_file_path(&agent.id);
+    if rendered.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(None);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if std::fs::read_to_string(&path).unwrap_or_default() != rendered {
+        std::fs::write(&path, &rendered).map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    }
+    Ok(Some(path))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,6 +594,137 @@ mod tests {
     /// Serializes the two tests that override the process-wide
     /// KIMI_CODE_HOME env var (they would race otherwise).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn agent_with_configs(
+        model_configs: std::collections::BTreeMap<String, crate::store::agents::ModelConfig>,
+    ) -> Agent {
+        Agent {
+            id: "agent-1".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            base_url: "https://opencode.ai/zen/go/v1".to_string(),
+            model_configs,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn render_opencode_empty_configs_yields_nothing() {
+        let agent = agent_with_configs(std::collections::BTreeMap::new());
+        assert_eq!(render_opencode_config(&agent), "");
+    }
+
+    #[test]
+    fn render_opencode_builtin_go_provider() {
+        // max/high/low/off in the intended picker order (default max first)
+        let mut ordered = Map::new();
+        ordered.insert("max".to_string(), Value::Object({
+            let mut v = Map::new();
+            v.insert("reasoningEffort".into(), Value::String("max".into()));
+            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])));
+            v
+        }));
+        ordered.insert("high".to_string(), Value::Object({
+            let mut v = Map::new();
+            v.insert("reasoningEffort".into(), Value::String("high".into()));
+            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])));
+            v
+        }));
+        ordered.insert("low".to_string(), Value::Object({
+            let mut v = Map::new();
+            v.insert("reasoningEffort".into(), Value::String("low".into()));
+            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])));
+            v
+        }));
+        ordered.insert("off".to_string(), Value::Object({
+            let mut v = Map::new();
+            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("disabled".into()))])));
+            v
+        }));
+        let cfg = crate::store::agents::ModelConfig {
+            default_variant: "max".to_string(),
+            variants: ordered,
+        };
+        let mut configs = std::collections::BTreeMap::new();
+        configs.insert("deepseek-v4-flash".to_string(), cfg);
+
+        let agent = agent_with_configs(configs);
+        let out = render_opencode_config(&agent);
+        let doc: Value = serde_json::from_str(&out).expect("valid json");
+        assert_eq!(doc["model"], "opencode-go/deepseek-v4-flash");
+        let model = &doc["provider"]["opencode-go"]["models"]["deepseek-v4-flash"];
+        assert!(model.get("options").is_some());
+        assert_eq!(model["options"]["reasoningEffort"], "max");
+        assert_eq!(model["variants"]["off"]["thinking"]["type"], "disabled");
+        assert_eq!(model["variants"]["max"]["reasoningEffort"], "max");
+        // max is the first key (picker default fallback)
+        let first = model["variants"].as_object().unwrap().keys().next().unwrap();
+        assert_eq!(first, "max");
+    }
+
+    #[test]
+    fn render_opencode_custom_provider_inlines_credentials() {
+        let mut configs = std::collections::BTreeMap::new();
+        let mut v = Map::new();
+        v.insert("reasoningEffort".into(), Value::String("high".into()));
+        v.insert(
+            "thinking".into(),
+            Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])),
+        );
+        configs.insert(
+            "glm-5".to_string(),
+            crate::store::agents::ModelConfig {
+                default_variant: "high".to_string(),
+                variants: Map::from_iter([("high".to_string(), Value::Object(v))]),
+            },
+        );
+        let agent = Agent {
+            id: "agent-2".to_string(),
+            model: "glm-5".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model_configs: configs,
+            ..Default::default()
+        };
+        let doc: Value = serde_json::from_str(&render_opencode_config(&agent)).expect("valid json");
+        let prov = &doc["provider"]["wardex-opencode-api-example-com"];
+        assert_eq!(prov["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(prov["options"]["baseURL"], "https://api.example.com/v1");
+        assert_eq!(prov["options"]["apiKey"], "sk-test");
+        assert_eq!(doc["model"], "wardex-opencode-api-example-com/glm-5");
+    }
+
+    #[test]
+    fn write_opencode_config_writes_and_prunes_stale_file() {
+        use crate::store::paths::Paths;
+        let dir = std::env::temp_dir().join(format!("wardex-opencode-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = Paths::new(dir.clone());
+        let agent = agent_with_configs(std::collections::BTreeMap::new());
+        // no configs -> no file, returns None
+        let r = write_opencode_config(&paths, &agent).unwrap();
+        assert!(r.is_none());
+        // with configs -> file written, path returned
+        let mut v = Map::new();
+        v.insert("reasoningEffort".into(), Value::String("max".into()));
+        let mut agent = agent;
+        agent.model_configs = std::collections::BTreeMap::from_iter([(
+            "deepseek-v4-flash".to_string(),
+            crate::store::agents::ModelConfig {
+                default_variant: "max".to_string(),
+                variants: Map::from_iter([("max".to_string(), Value::Object(v))]),
+            },
+        )]);
+        let r = write_opencode_config(&paths, &agent).unwrap().expect("path");
+        assert!(r.exists());
+        assert!(r.to_string_lossy().contains("agent-1.json"));
+        // clearing configs removes the stale file
+        agent.model_configs = std::collections::BTreeMap::new();
+        let r = write_opencode_config(&paths, &agent).unwrap();
+        assert!(r.is_none());
+        assert!(!paths.opencode_config_file_path("agent-1").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     #[test]
     fn sync_agent_models_full_cleans_other_wardex_namespaces() {
