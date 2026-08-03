@@ -610,8 +610,7 @@ defineExpose({ renaming: renamingId });
                 drag: dragging && dragState?.s.sessionId === item.s.sessionId,
               }"
               :style="{
-                paddingLeft: item.depth === 0 ? 6 + 'px' : 8 + 'px',
-                maxWidth: item.depth > 0 ? Math.pow(0.9, item.depth) * 100 + '%' : '',
+                paddingLeft: 6 + item.depth * 12 + 'px',
               }"
               @pointerdown="onRowDown($event, item.s)"
               @pointermove="onRowMove"
@@ -910,24 +909,10 @@ export default {
   gap: 2px;
 }
 
-/* 子会话块：内容宽度（上限随深度递减）、右端贴右缘，层级由块内 ↳ 表达 */
+/* 子会话行：通栏宽度 + 左缩进随深度递增（缩进在行内 paddingLeft，
+   同一深度的行左边缘严格对齐，与父行共用左边缘基线） */
 .rail__row.child {
-  position: relative;
-  align-self: flex-end;
-  width: fit-content;
-  max-width: 100%;
   border-color: #2a3344;
-  /* 右侧固定预留徽标位：徽标出现/消失都不改变 fit-content 宽度，
-     否则子块会随徽标增减而向左侧生长（右缘不动） */
-  padding-right: 20px;
-}
-
-/* 子会话计数徽标：绝对定位进预留区，不参与块宽计算 */
-.rail__row.child .rail__badge {
-  position: absolute;
-  right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
 }
 
 .rail__row.drag {
