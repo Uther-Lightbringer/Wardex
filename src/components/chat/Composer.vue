@@ -42,7 +42,10 @@ const composing = ref(false);
 // layer sits OVER the block rectangles so the mouse can never land inside
 // a block — clicking a block selects the WHOLE block, Backspace/Delete
 // removes it as one unit, and the caret/selection is clamped away from
-// block interiors.
+// block interiors. Each block carries ONE trailing space after its end
+// marker (a caret "parking slot"): the caret clamps to AFTER that space so
+// it always sits visually outside the gold capsule instead of hugging the
+// text; fromDisplay strips the space before send/save.
 const QS_MARK = '\u200b'; // zero-width space: quote block start
 const QE_MARK = '\u200c'; // zero-width non-joiner: quote block end
 
@@ -62,7 +65,7 @@ function elideQuote(s: string): string {
 }
 
 /** 带标签文本 → 显示文本（标签连同行首尾换行收进零宽标记，块内容截断，
- * 完整内容存入 quoteBodies）。 */
+ * 完整内容存入 quoteBodies；块后补一个普通空格作为光标停靠位）。 */
 function toDisplayFull(src: string): string {
   quoteBodies.length = 0;
   const re = /<selection>([\s\S]*?)<\/selection>/g;
@@ -75,24 +78,25 @@ function toDisplayFull(src: string): string {
     .replace(/<\/selection>/g, QE_MARK);
   return marked.replace(
     new RegExp(QS_MARK + '([\\s\\S]*?)' + QE_MARK, 'g'),
-    (_all, body: string) => QS_MARK + elideQuote(body) + QE_MARK,
+    (_all, body: string) => QS_MARK + elideQuote(body) + QE_MARK + ' ',
   );
 }
 
-/** 显示文本 → 带标签文本（发送 / 存草稿）：块内截断摘要换回完整内容。 */
+/** 显示文本 → 带标签文本（发送 / 存草稿）：块内截断摘要换回完整内容，
+ * 块后的停靠空格一并剥掉（避免进入用户内容）。 */
 function fromDisplay(src: string): string {
   let idx = 0;
-  return src.replace(new RegExp(QS_MARK + '[\\s\\S]*?' + QE_MARK, 'g'), () => {
+  return src.replace(new RegExp(QS_MARK + '[\\s\\S]*?' + QE_MARK + ' ?', 'g'), () => {
     const full = quoteBodies[idx] ?? '';
     idx += 1;
     return `<selection>\n${full}\n</selection>`;
   });
 }
 
-/** 显示文本中所有引用块的字符区间（含两端零宽标记）。 */
+/** 显示文本中所有引用块的字符区间（含两端零宽标记和块后停靠空格）。 */
 function findQuoteRanges(src: string): QuoteRange[] {
   const out: QuoteRange[] = [];
-  const re = new RegExp(QS_MARK + '([\\s\\S]*?)' + QE_MARK, 'g');
+  const re = new RegExp(QS_MARK + '([\\s\\S]*?)' + QE_MARK + ' ?', 'g');
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     out.push({ start: m.index, end: m.index + m[0].length });
@@ -1339,7 +1343,9 @@ function onExpandConfirm(v: string): void {
   background: #f2cf6b22;
   border: 1px solid #f2cf6b3d;
   border-radius: 999px;
-  padding: 1px 12px;
+  padding: 1px 4px; /* tight capsule: the caret parks on the trailing space
+                       AFTER the block, so the box must end near the text or
+                       the caret would sit inside the capsule padding */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
