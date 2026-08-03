@@ -6,6 +6,10 @@
 // attachment, project file → @reference), permission-mode dropdown,
 // send/enqueue button.
 //
+// <selection>…</selection> quote blocks live in the QuoteBar ABOVE the input
+// (chat.composerQuotes, full bodies) — the textarea here holds plain text
+// only; on send the quotes are re-wrapped into tags and prepended.
+//
 // Send path: the draft keeps short @tokens; only at send time each token is
 // expanded through read_file_range into a 【引用文件：…】 block (§3.3) and the
 // expanded text + attachment paths go to send_prompt. The draft and
@@ -31,282 +35,28 @@ const inputEl = ref<HTMLTextAreaElement | null>(null);
 const rootEl = ref<HTMLElement | null>(null);
 const composing = ref(false);
 
-// ---- <selection>…</selection> quote blocks (atomic, non-editable) ----
-// The textarea holds a DISPLAY text where the tags are replaced by two
-// zero-width markers (U+200B start / U+200C end): invisible, yet they keep
-// the exact character/line positions, so the caret never drifts from the
-// visible text. Send/save converts back to <selection>…</selection> tags.
-// The textarea text is transparent; a <pre> UNDER it (same font/padding,
-// scrolled in sync) paints every character. Quote blocks render as one
-// continuous gold highlight with no tag rows at all. A transparent cover
-// layer sits OVER the block rectangles so the mouse can never land inside
-// a block — clicking a block selects the WHOLE block, Backspace/Delete
-// removes it as one unit, and the caret/selection is clamped away from
-// block interiors. Each block carries ONE trailing space after its end
-// marker (a caret "parking slot"): the caret clamps to AFTER that space so
-// it always sits visually outside the gold capsule instead of hugging the
-// text; fromDisplay strips the space before send/save.
-const QS_MARK = '\u200b'; // zero-width space: quote block start
-const QE_MARK = '\u200c'; // zero-width non-joiner: quote block end
+// ---- <selection>…</selection> quote blocks (quote bar above the input) ----
+// Quote blocks are NOT embedded in the textarea anymore: the store keeps the
+// full bodies in chat.composerQuotes and QuoteBar renders one chip each above
+// the composer. The textarea holds plain text only. Send re-wraps the quotes
+// into <selection>…</selection> tags; prefills that arrive as tagged strings
+// (基于选中文本提问 / 分支会话预填) are split back into quotes + text here.
 
-/** 气泡/输入框共用的引用块显示截断长度（字符）。 */
-const QUOTE_ELIDE = 24;
-
-/** 完整引用内容映射（按块出现顺序）：输入框只显示截断摘要，发送/存
- * 草稿时用这份完整内容还原 <selection>…</selection>。块是原子单元
- * （只能整体删除/替换），所以数组与文本中的块严格同步。 */
-let quoteBodies: string[] = [];
-
-/** 显示文本截断：压缩空白后取前 QUOTE_ELIDE 字符。 */
-function elideQuote(s: string): string {
-  const t = s.replace(/\s+/g, ' ').trim();
-  const chars = [...t];
-  return chars.length <= QUOTE_ELIDE ? t : chars.slice(0, QUOTE_ELIDE).join('') + '…';
-}
-
-/** 带标签文本 → 显示文本（标签连同行首尾换行收进零宽标记，块内容截断，
- * 完整内容存入 quoteBodies；块后补一个普通空格作为光标停靠位）。 */
-function toDisplayFull(src: string): string {
-  quoteBodies.length = 0;
-  const re = /<selection>([\s\S]*?)<\/selection>/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) quoteBodies.push(m[1]);
-  const marked = src
-    .replace(/<selection>\r?\n/g, QS_MARK)
-    .replace(/\r?\n<\/selection>/g, QE_MARK)
-    .replace(/<selection>/g, QS_MARK)
-    .replace(/<\/selection>/g, QE_MARK);
-  return marked.replace(
-    new RegExp(QS_MARK + '([\\s\\S]*?)' + QE_MARK, 'g'),
-    (_all, body: string) => QS_MARK + elideQuote(body) + QE_MARK + ' ',
-  );
-}
-
-/** 显示文本 → 带标签文本（发送 / 存草稿）：块内截断摘要换回完整内容，
- * 块后的停靠空格一并剥掉（避免进入用户内容）。 */
-function fromDisplay(src: string): string {
-  let idx = 0;
-  return src.replace(new RegExp(QS_MARK + '[\\s\\S]*?' + QE_MARK + ' ?', 'g'), () => {
-    const full = quoteBodies[idx] ?? '';
-    idx += 1;
-    return `<selection>\n${full}\n</selection>`;
-  });
-}
-
-/** 显示文本中所有引用块的字符区间（含两端零宽标记和块后停靠空格）。 */
-function findQuoteRanges(src: string): QuoteRange[] {
-  const out: QuoteRange[] = [];
-  const re = new RegExp(QS_MARK + '([\\s\\S]*?)' + QE_MARK + ' ?', 'g');
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
-    out.push({ start: m.index, end: m.index + m[0].length });
-  }
-  return out;
-}
-
-const overlayEl = ref<HTMLElement | null>(null);
-const fieldWrapEl = ref<HTMLElement | null>(null);
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-const overlayHtml = computed(() => {
-  const parts = text.value.split(new RegExp(`(${QS_MARK}|${QE_MARK})`, 'g'));
-  let html = '';
-  let inBlock = false;
-  let blockIdx = 0;
-  for (const p of parts) {
-    if (p === QS_MARK) {
-      html += `<span class="seq-hl" id="seq-blk-${blockIdx}">`;
-      inBlock = true;
-    } else if (p === QE_MARK) {
-      html += '</span>';
-      inBlock = false;
-      blockIdx += 1;
-    } else if (inBlock) {
-      // 零宽标记在显示层本就不可见；内容原样（换行保留，行数与 textarea 一致）
-      html += escHtml(p);
-    } else {
-      html += escHtml(p);
-    }
-  }
-  if (inBlock) html += '</span>'; // 未闭合兜底
-  return html;
-});
-
-interface QuoteRange {
-  start: number;
-  end: number;
-}
-
-interface QuoteCover {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  blockIdx: number;
-}
-
-const quoteRanges = ref<QuoteRange[]>([]);
-const quoteCovers = ref<QuoteCover[]>([]);
-let quoteSyncRaf = 0;
-
-/** 块在视口中的逐行矩形 → 相对 field-wrap 的 cover 层。 */
-function syncQuoteRects(): void {
-  const pre = overlayEl.value;
-  const el = inputEl.value;
-  const wrap = fieldWrapEl.value;
-  if (!pre || !el || !wrap) {
-    quoteRanges.value = [];
-    quoteCovers.value = [];
-    return;
-  }
-  const ranges = findQuoteRanges(text.value);
-  quoteRanges.value = ranges;
-  const wrect = wrap.getBoundingClientRect();
-  const covers: QuoteCover[] = [];
-  ranges.forEach((r, i) => {
-    const node = pre.querySelector(`#seq-blk-${i}`);
-    if (!node) return;
-    for (const rc of node.getClientRects()) {
-      if (rc.width === 0 || rc.height === 0) continue;
-      covers.push({
-        left: rc.left - wrect.left,
-        top: rc.top - wrect.top,
-        width: rc.width,
-        height: rc.height,
-        blockIdx: i,
-      });
-    }
-  });
-  quoteCovers.value = covers;
-}
-
-function scheduleQuoteSync(): void {
-  if (quoteSyncRaf) return;
-  quoteSyncRaf = requestAnimationFrame(() => {
-    quoteSyncRaf = 0;
-    syncQuoteRects();
-  });
-}
-
-watch(
-  () => [text.value, prefs.fontScale] as const,
-  () => scheduleQuoteSync(),
-  { flush: 'post', immediate: true },
-);
-
-/** 点击引用块：整体选中（覆盖层挡住 textarea，光标进不了块内）。 */
-function selectQuoteBlock(blockIdx: number): void {
-  const el = inputEl.value;
-  const r = quoteRanges.value[blockIdx];
-  if (!el || !r) return;
-  el.focus();
-  el.setSelectionRange(r.start, r.end);
-}
-
-function onCoverWheel(e: WheelEvent): void {
-  if (inputEl.value) inputEl.value.scrollTop += e.deltaY;
-}
-
-/** 光标钳制：任何时刻光标不得落在块内部（块后沿对齐）。 */
-function clampQuoteCursor(): void {
-  const el = inputEl.value;
-  if (!el) return;
-  const pos = el.selectionStart;
-  const r = quoteRanges.value.find((q) => pos > q.start && pos < q.end);
-  if (r) el.setSelectionRange(r.end, r.end);
-}
-
-/** 选区钳制：真实选区（s<t）完全落在块内 → 原子选中整块；跨块边界的
- * 选区 → 截断到块外。**光标**（s===t）落块内时这里不干预——交给
- * clampQuoteCursor 弹到块后（否则光标会被误扩成"整块选中"且再也弹不走）。
- * Ctrl+A 全选除外——全选删除=清空。 */
-function clampQuoteSelection(): void {
-  const el = inputEl.value;
-  if (!el || document.activeElement !== el) return;
-  const ranges = quoteRanges.value;
-  if (ranges.length === 0) return;
-  const total = text.value.length;
-  let s = el.selectionStart;
-  let t = el.selectionEnd;
-  const hasSelection = s < t;
-  for (const r of ranges) {
-    if (s === 0 && t === total) continue; // 全选放行
-    if (hasSelection && s >= r.start && t <= r.end && !(s === r.start && t === r.end)) {
-      // 双击 / 拖选整段块内文字 → 选中整个引用块
-      s = r.start;
-      t = r.end;
-      break;
-    }
-    if (s < r.end && t > r.start && !(s === r.start && t === r.end)) {
-      if (s < r.start) t = r.start;
-      else s = r.end;
-    }
-  }
-  if (s !== el.selectionStart || t !== el.selectionEnd) el.setSelectionRange(s, t);
-}
-
-function onSelectionChange(): void {
-  clampQuoteSelection();
-  if (inputEl.value && document.activeElement === inputEl.value) clampQuoteCursor();
-}
-
-/** 键盘拦截：返回 true 表示已处理。块内不可编辑；整块删除。 */
-function quoteKeyGuard(e: KeyboardEvent): boolean {
-  if (termMode.value || e.isComposing) return false;
-  const el = inputEl.value;
-  const ranges = quoteRanges.value;
-  if (!el || ranges.length === 0) return false;
-  const s = el.selectionStart;
-  const t = el.selectionEnd;
-
-  if (e.key === 'Backspace' || e.key === 'Delete') {
-    const hitIdx = ranges.findIndex((r) => {
-      if (s === t) {
-        if (e.key === 'Backspace' && s === r.end) return true; // 光标紧跟块后
-        if (e.key === 'Delete' && s === r.start) return true; // 光标在块前
-        return false;
-      }
-      // 有选区：恰好等于整块，或完全落在块内 → 整块删除
-      return (s === r.start && t === r.end) || (s >= r.start && t <= r.end);
-    });
-    if (hitIdx >= 0) {
-      e.preventDefault();
-      const hit = ranges[hitIdx];
-      quoteBodies.splice(hitIdx, 1); // 完整内容映射同步删除
-      text.value = text.value.slice(0, hit.start) + text.value.slice(hit.end);
-      el.value = text.value;
-      el.setSelectionRange(hit.start, hit.start);
-      return true;
-    }
-    return false;
-  }
-
-  if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-    // 全选块后直接打字 → 删掉整块再插入该字符
-    const hitIdx = ranges.findIndex((r) => s === r.start && t === r.end);
-    if (hitIdx >= 0) {
-      e.preventDefault();
-      const hit = ranges[hitIdx];
-      quoteBodies.splice(hitIdx, 1); // 完整内容映射同步删除
-      text.value =
-        text.value.slice(0, hit.start) + e.key + text.value.slice(hit.end);
-      el.value = text.value;
-      el.setSelectionRange(hit.start + 1, hit.start + 1);
-      return true;
-    }
-    return false;
-  }
-  return false;
-}
-
-function onOverlayScroll(): void {
-  if (overlayEl.value && inputEl.value) {
-    overlayEl.value.style.transform = `translateY(-${inputEl.value.scrollTop}px)`;
-  }
-  scheduleQuoteSync();
+/** 带 <selection>…</selection> 标签的预填文本 → 引用块数组 + 纯正文。 */
+function parseQuoted(src: string): { quotes: string[]; text: string } {
+  const quotes: string[] = [];
+  const text = src
+    .split(/(<selection>[\s\S]*?<\/selection>)/g)
+    .map((p) => {
+      const m = p.match(/^<selection>([\s\S]*?)<\/selection>$/);
+      if (!m) return p;
+      const body = m[1].replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+      if (body) quotes.push(body);
+      return '';
+    })
+    .join('')
+    .replace(/^\r?\n+/, '');
+  return { quotes, text };
 }
 
 // ---- terminal command mode (`!` prefix, cmd.rs) ----
@@ -336,15 +86,18 @@ watch(termMode, (v, p) => {
   if (v && !p) maybeTermHint();
 });
 
-// ---- per-session draft (text + attachments), in-memory ----
+// ---- per-session draft (text + quotes + attachments), in-memory ----
 // Switching sessions saves the outgoing draft under the old sessionId and
 // restores the target's; deleted/cleared sessions simply have no entry.
 watch(
   () => chat.sessionId,
   (id, prev) => {
-    if (prev && prev !== id) chat.saveDraft(prev, fromDisplay(text.value), chat.attachments);
+    if (prev && prev !== id) {
+      chat.saveDraft(prev, text.value, chat.attachments, chat.composerQuotes);
+    }
     const d = id ? chat.drafts[id] : undefined;
-    text.value = d?.text ? toDisplayFull(d.text) : '';
+    text.value = d?.text ?? '';
+    chat.composerQuotes = [...(d?.quotes ?? [])];
     chat.attachments = [...(d?.attachments ?? [])];
     pickerOpen.value = false;
     slashOpen.value = false;
@@ -408,10 +161,6 @@ const showCounter = computed(() => text.value.length > MAX_LEN * 0.75);
 function truncateInput(): void {
   if (text.value.length > MAX_LEN) {
     text.value = text.value.slice(0, MAX_LEN);
-    // 截断若落在引用块内部 → 补一个闭合标记，避免发出不闭合的标签
-    const open = (text.value.match(new RegExp(QS_MARK, 'g')) ?? []).length;
-    const close = (text.value.match(new RegExp(QE_MARK, 'g')) ?? []).length;
-    if (open > close) text.value += QE_MARK;
     showNotice();
   }
 }
@@ -423,9 +172,6 @@ function onInput(): void {
 }
 
 function onKeydown(e: KeyboardEvent): void {
-  // Quote-block guard first: block interiors are non-editable, whole-block
-  // delete/backspace handled here.
-  if (quoteKeyGuard(e)) return;
   // Path ②: at the cap, reject printable keys without a selection (a
   // selection replaces, not grows — let those through).
   if (
@@ -532,7 +278,6 @@ function relUnderProject(p: string): string {
 
 /** Insert at the cursor (replacing any selection), keeping the caret after it. */
 function insertAtCursor(snippet: string): void {
-  clampQuoteCursor(); // 外部插入（@引用/图片）不允许落在引用块内
   const el = inputEl.value;
   const s = el ? el.selectionStart : text.value.length;
   const t = el ? el.selectionEnd : text.value.length;
@@ -612,12 +357,8 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
     }
   }
   // Plain text: measure first, insert only the head that fits.
-  const pasted = (e.clipboardData?.getData('text/plain') ?? '').replace(
-    new RegExp(`[${QS_MARK}${QE_MARK}]`, 'g'),
-    '',
-  );
+  const pasted = e.clipboardData?.getData('text/plain') ?? '';
   if (pasted === undefined || pasted === '') return;
-  clampQuoteSelection(); // 选区不得含引用块（否则替换会拆散标签）
   e.preventDefault();
   const el = inputEl.value;
   const s = el ? el.selectionStart : text.value.length;
@@ -678,9 +419,8 @@ function currentToken(): RefToken | null {
 }
 
 let pickerDebounce: ReturnType<typeof setTimeout> | null = null;
-/** keyup：方向键移动后把光标从引用块内钳出去，再刷新 @picker。 */
+/** keyup：刷新 @picker。 */
 function onKeyup(): void {
-  clampQuoteCursor();
   updatePicker();
 }
 function updatePicker(): void {  // Terminal mode: `@` references and `/` commands mean nothing to a local
@@ -911,7 +651,11 @@ const sendEnabled = computed(() => {
   if (!chat.sessionId) return false;
   if (termMode.value) return termCmd.value.length > 0;
   if (chat.status.busy && chat.status.queueLength >= 10) return false;
-  return text.value.trim().length > 0 || chat.attachments.length > 0;
+  return (
+    text.value.trim().length > 0 ||
+    chat.composerQuotes.length > 0 ||
+    chat.attachments.length > 0
+  );
 });
 
 /** Enter path: terminal mode runs locally (cmd.rs), otherwise the normal
@@ -934,7 +678,7 @@ async function runTermCommand(): Promise<void> {
     showNotice('请输入要执行的命令（! 后跟命令）');
     return;
   }
-  const ok = await chat.runCommand(fromDisplay(termCmd.value));
+  const ok = await chat.runCommand(termCmd.value);
   if (ok) {
     text.value = '';
     chat.saveDraft(chat.sessionId, '', []); // executed → drop any stored draft
@@ -943,14 +687,24 @@ async function runTermCommand(): Promise<void> {
   inputEl.value?.focus();
 }
 
+/** 引用块数组 → <selection>…</selection> 标签文本（发往会话）。 */
+function quotesToTags(quotes: string[]): string {
+  return quotes.map((q) => `<selection>\n${q}\n</selection>`).join('\n');
+}
+
 async function send(): Promise<void> {
-  const draft = fromDisplay(text.value).trim();
-  if (!draft && chat.attachments.length === 0) return;
   if (!chat.sessionId) return;
+  const quoted = quotesToTags(chat.composerQuotes);
+  const draft = text.value.trim();
+  if (!quoted && !draft && chat.attachments.length === 0) return;
+  // Only the typed text undergoes @reference expansion — quote bodies are
+  // user-selected content and must not be treated as tokens.
   const expanded = draft ? await expandReferences(draft) : draft;
-  const ok = await chat.send(expanded, [...chat.attachments]);
+  const full = [quoted, expanded].filter(Boolean).join('\n');
+  const ok = await chat.send(full, [...chat.attachments]);
   if (ok) {
     text.value = '';
+    chat.clearComposerQuotes();
     chat.clearAttachments();
     chat.saveDraft(chat.sessionId, '', []); // sent → drop any stored draft
     pickerOpen.value = false;
@@ -965,15 +719,15 @@ watch(
   () => sessionsStore.pendingComposerText,
   (v) => {
     if (!v) return;
-    text.value = toDisplayFull(v);
+    const { quotes, text: t } = parseQuoted(v);
+    chat.composerQuotes = quotes;
+    text.value = t;
     sessionsStore.pendingComposerText = '';
     void Promise.resolve().then(() => inputEl.value?.focus());
   },
 );
 
 onMounted(() => inputEl.value?.focus());
-onMounted(() => document.addEventListener('selectionchange', onSelectionChange));
-onBeforeUnmount(() => document.removeEventListener('selectionchange', onSelectionChange));
 
 // ---- expand-to-dialog (⛶): edit the draft in a roomy popup ----
 const expandOpen = ref(false);
@@ -1037,24 +791,7 @@ function onExpandConfirm(v: string): void {
       </div>
     </div>
 
-    <div ref="fieldWrapEl" class="composer__field-wrap">
-      <pre
-        ref="overlayEl"
-        class="composer__overlay"
-        :style="{ fontSize: prefs.fs(14) + 'px' }"
-        v-html="overlayHtml"
-        aria-hidden="true"
-      ></pre>
-      <!-- quote-block covers: transparent, sit ABOVE the textarea so the
-           mouse can only select a whole block (click = select-all-block) -->
-      <div
-        v-for="(c, i) in termMode ? [] : quoteCovers"
-        :key="i"
-        class="quote-cover"
-        :style="{ left: c.left + 'px', top: c.top + 'px', width: c.width + 'px', height: c.height + 'px' }"
-        @pointerdown="selectQuoteBlock(c.blockIdx)"
-        @wheel="onCoverWheel"
-      ></div>
+    <div class="composer__field-wrap">
       <textarea
         ref="inputEl"
         v-model="text"
@@ -1067,7 +804,6 @@ function onExpandConfirm(v: string): void {
         @input="onInput"
         @keydown="onKeydown"
         @paste="onPaste"
-        @scroll="onOverlayScroll"
         @compositionstart="composing = true"
         @compositionend="composing = false; onInput()"
         @click="updatePicker"
@@ -1204,46 +940,9 @@ function onExpandConfirm(v: string): void {
   min-width: 0;
   display: flex;
   gap: 4px;
-  overflow: hidden; /* clip the overlay <pre> at the wrap edge */
-  background: #10141f; /* panel background lives HERE: it always covers the
-                          whole field regardless of how much text there is
-                          (the overlay pre only spans its content height) */
-  border-radius: 2px;
-}
-
-/* Overlay layer: paints every character UNDER the transparent textarea.
-   Same box metrics (border/padding/line-height) so glyphs line up 1:1;
-   scrolled in sync via translateY on textarea scroll. */
-.composer__overlay {
-  position: absolute;
-  z-index: 0;
-  top: 0;
-  left: 0;
-  right: 22px; /* clear the WC3 scrollbar (17.6px) + gap */
-  margin: 0;
-  border: 1px solid transparent;
-  padding: 6px 8px;
-  box-sizing: border-box;
-  font-family: SimSun, serif;
-  line-height: 1.4;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-  word-break: break-word;
-  color: var(--war-text);
-  background: transparent;
-  pointer-events: none;
   overflow: hidden;
-}
-
-/* quote-block cover layer: swallows clicks/wheel over the block so the
-   caret can never enter it; the block is only ever selected as a whole */
-.quote-cover {
-  position: absolute;
-  z-index: 2;
-  cursor: default;
-  background: transparent;
-  user-select: none;
-  touch-action: none;
+  background: #10141f;
+  border-radius: 2px;
 }
 
 .composer__field {
@@ -1252,22 +951,16 @@ function onExpandConfirm(v: string): void {
   flex: 1;
   min-width: 0;
   resize: none;
-  background: transparent; /* the overlay <pre> draws the panel background */
+  background: transparent;
   border: 1px solid #2a3344;
   border-radius: 2px;
-  color: transparent; /* glyphs come from the overlay layer */
+  color: var(--war-text);
   caret-color: var(--war-text);
   font-family: SimSun, serif;
   line-height: 1.4;
   padding: 6px 8px;
   outline: none;
   scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
-}
-
-/* text is transparent — keep the selection visible as a wash that lets the
-   overlay glyphs underneath shine through */
-.composer__field::selection {
-  background: #32509666;
 }
 
 .composer__field:focus {
@@ -1329,26 +1022,5 @@ function onExpandConfirm(v: string): void {
 .composer__mode {
   width: 150px;
   height: 30px;
-}
-</style>
-
-<style>
-/* <selection>…</selection> quote overlay — v-html content can't carry the
-   scoped attribute, so seq-* MUST live in an unscoped block to match.
-   The display text already holds the elided body, so the capsule shows a
-   fixed-length summary; inline background paints per-line. */
-.seq-hl {
-  display: inline-block;
-  max-width: 100%;
-  background: #f2cf6b22;
-  border: 1px solid #f2cf6b3d;
-  border-radius: 999px;
-  padding: 1px 4px; /* tight capsule: the caret parks on the trailing space
-                       AFTER the block, so the box must end near the text or
-                       the caret would sit inside the capsule padding */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: baseline;
 }
 </style>

@@ -238,9 +238,13 @@ export const useChatStore = defineStore('chat', {
     workspaceRefreshSeq: 0,
     /** Pending attachment paths (attachment bar floats above the composer). */
     attachments: [] as string[],
-    /** Per-session composer drafts (text + attachments), in-memory only —
-     * switching sessions saves the old draft and restores the target's. */
-    drafts: {} as Record<string, { text: string; attachments: string[] }>,
+    /** Pending <selection>…</selection> quote bodies — the quote bar floats
+     * above the composer; on send they are wrapped back into tags. */
+    composerQuotes: [] as string[],
+    /** Per-session composer drafts (text + quotes + attachments), in-memory
+     * only — switching sessions saves the old draft and restores the
+     * target's. */
+    drafts: {} as Record<string, { text: string; quotes: string[]; attachments: string[] }>,
     /** Live DOM node of the streaming segment (R1 incremental append). */
     streamTarget: null as StreamTarget | null,
     /** Live DOM node of a streaming command row's output (term://output). */
@@ -805,8 +809,8 @@ export const useChatStore = defineStore('chat', {
       return chars.length <= 24 ? t : chars.slice(0, 24).join('') + '…';
     },
 
-    /** <selection>…</selection> 引用块，预填给子会话的输入框；输入框
-     * overlay 会把块高亮并把尖括号标签隐去。 */
+    /** <selection>…</selection> 引用块，预填给子会话的输入框；输入框会
+     * 解析成引用条（输入框上方）里的引用块 + 正文纯文本。 */
     quoteSelection(sel: string): string {
       const body =
         sel.length <= SELECTION_QUOTE_MAX
@@ -1032,13 +1036,31 @@ export const useChatStore = defineStore('chat', {
       this.attachments = [];
     },
 
+    addComposerQuote(q: string): void {
+      if (!q) return;
+      this.composerQuotes = [...this.composerQuotes, q];
+    },
+
+    removeComposerQuote(i: number): void {
+      this.composerQuotes = this.composerQuotes.filter((_, x) => x !== i);
+    },
+
+    clearComposerQuotes(): void {
+      this.composerQuotes = [];
+    },
+
     /** Save/restore hook for the composer (per-session draft, §3): empty
      * drafts are dropped so the map only holds real content. */
-    saveDraft(sessionId: string, text: string, attachments: string[]): void {
+    saveDraft(
+      sessionId: string,
+      text: string,
+      attachments: string[],
+      quotes: string[] = [],
+    ): void {
       if (!sessionId) return;
       const rest = { ...this.drafts };
-      if (!text && attachments.length === 0) delete rest[sessionId];
-      else rest[sessionId] = { text, attachments: [...attachments] };
+      if (!text && attachments.length === 0 && quotes.length === 0) delete rest[sessionId];
+      else rest[sessionId] = { text, quotes: [...quotes], attachments: [...attachments] };
       this.drafts = rest;
     },
   },

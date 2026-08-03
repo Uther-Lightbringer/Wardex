@@ -253,6 +253,17 @@ watch(
   { immediate: true },
 );
 
+/** Flavor line split on the first "：": the character name renders gold, the
+ * quote itself white (fallback lines without a colon render all-white). */
+const flavorName = computed(() => {
+  const i = flavor.value.indexOf('：');
+  return i > 0 ? flavor.value.slice(0, i + 1) : '';
+});
+const flavorText = computed(() => {
+  const i = flavor.value.indexOf('：');
+  return i > 0 ? flavor.value.slice(i + 1) : flavor.value;
+});
+
 /** Placeholder "…" during streaming; treated as empty once final. */
 const displayBody = computed(() => {
   const c = props.row.content ?? '';
@@ -456,7 +467,7 @@ const userMdHtml = computed(() =>
 );
 
 // <selection>…</selection> quote blocks (sent by the sub-session composer):
-// render as a gold highlight span, same look as the composer overlay.
+// render as a gold highlight span, same look as the composer's QuoteBar.
 const QUOTE_RE = /<selection>[\s\S]*?<\/selection>/;
 const userQuoteHtml = computed(() =>
   isUser.value && QUOTE_RE.test(displayBody.value) ? renderQuoteHighlight(displayBody.value) : '',
@@ -602,7 +613,10 @@ const visibleAtts = computed(() =>
               <span class="seg-proc__summary">{{ procSummary }}</span>
               <span v-if="streaming && activityHint" class="seg-proc__hint"> · {{ activityHint }}</span>
             </div>
-            <div v-if="streaming && flavor" class="seg-proc__flavor">{{ flavor }}</div>
+            <div v-if="streaming && flavor" class="seg-proc__flavor">
+              <span v-if="flavorName" class="seg-proc__flavor-name">{{ flavorName }}</span
+              ><span class="seg-proc__flavor-text">{{ flavorText }}</span>
+            </div>
           </div>
           <div v-for="{ s, i } in textSegs" :key="i" class="seg-text">
             <span
@@ -1104,6 +1118,14 @@ const visibleAtts = computed(() =>
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--war-text-muted);
+}
+
+.seg-proc__flavor-name {
+  color: var(--war-gold);
+}
+
+.seg-proc__flavor-text {
+  color: #ffffff;
 }
 
 /* ---- plan card (ACP plan updates) ---- */

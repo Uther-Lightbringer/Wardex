@@ -75,8 +75,8 @@ export function renderUserMarkdown(text: string): string {
 }
 
 /** User-message quote blocks: <selection>…</selection> → one elliptical
- * capsule with the body elided to a fixed length (matches the composer
- * overlay's gold wash; the capsule reads as a single atomic unit). */
+ * capsule with the body elided to a fixed length (same gold wash as the
+ * composer's QuoteBar chips; the capsule reads as a single atomic unit). */
 export function renderQuoteHighlight(text: string): string {
   const QUOTE_ELIDE = 24;
   const esc = (s: string): string =>

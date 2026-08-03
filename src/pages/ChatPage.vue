@@ -14,6 +14,7 @@ import SessionRail from '../components/chat/SessionRail.vue';
 import MessageList from '../components/chat/MessageList.vue';
 import Composer from '../components/chat/Composer.vue';
 import AttachmentBar from '../components/chat/AttachmentBar.vue';
+import QuoteBar from '../components/chat/QuoteBar.vue';
 import QueuePanel from '../components/chat/QueuePanel.vue';
 import SubagentPanel from '../components/chat/SubagentPanel.vue';
 import PermissionDialog from '../components/chat/PermissionDialog.vue';
@@ -326,6 +327,7 @@ const sessionUsage = computed(() => {
 
         <!-- floating stack above the composer (never squeezes its height) -->
         <div class="chat__float">
+          <QuoteBar />
           <AttachmentBar />
           <SubagentPanel />
           <QueuePanel />
