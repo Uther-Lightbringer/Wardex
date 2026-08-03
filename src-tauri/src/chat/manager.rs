@@ -629,17 +629,6 @@ impl ChatManager {
         Ok(())
     }
 
-    /// Chat-page model switch for a model the CLI picker does not advertise
-    /// (per-agent endpoint model): the runtime persists it onto the agent and
-    /// respawns the CLI so the KIMI_MODEL_* env injection applies.
-    pub async fn set_session_model(&self, session_id: &str, model: &str) -> Result<(), ChatError> {
-        let Some(tx) = self.entry_tx(session_id) else {
-            return Err(ChatError::NoSession);
-        };
-        let _ = tx.send(RuntimeCmd::SetModel(model.to_string())).await;
-        Ok(())
-    }
-
     /// Parallel-cap eviction hook, exposed for tests (actors call the free
     /// function directly before spawning).
     pub fn enforce_process_cap(&self, exempt: &str) {
@@ -652,10 +641,16 @@ impl ChatManager {
         if !stores.sessions.ensure_open(session_id) {
             return Vec::new();
         }
-        stores
+        let mut rows: Vec<crate::store::MessageRow> = stores
             .sessions
             .messages(session_id)
-            .map(|rows| rows.iter().map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).collect())
-            .unwrap_or_default()
+            .map(|rows| rows.to_vec())
+            .unwrap_or_default();
+        // 历史回合：把 usage.json 的回填记录挂到缺失 usage 的 assistant 行
+        // （非破坏性，重开即自愈），让旧会话的气泡也显示 ↑↓ 用量。
+        crate::store::usage::attach_usage_backfill(&mut rows, &stores.usage, session_id);
+        rows.iter()
+            .map(|r| serde_json::to_value(r).unwrap_or(Value::Null))
+            .collect()
     }
 }

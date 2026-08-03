@@ -26,7 +26,6 @@ import {
   maskKey,
   useAgentsStore,
   type AgentRecord,
-  type ModelConfig,
 } from '../stores/agents';
 
 const nav = useNavStore();
@@ -46,8 +45,9 @@ const draft = reactive({
   provider: 'kimi',
   model: '',
   baseUrl: '',
-  defaultEffort: '',
-  /** 上下文长度（K），批量同步写入 config.toml 的 max_context_size；0/空 = 256。 */
+  /** 允许的思考强度档位（low/high/…，空 = 全部；后端 models.rs effective_efforts）。 */
+  effortOptions: [] as string[],
+  /** 上下文长度（K），随思考强度声明写入 config.toml 的 max_context_size；0/空 = 256。 */
   maxContextK: 256,
   cliPath: '',
   apiKey: '',
@@ -108,28 +108,7 @@ async function refreshModels(): Promise<void> {
         });
         // OpenCode Go 端点（https://opencode.ai/zen/go/v1）：裸 id 自动补
         // `opencode-go/` 前缀，否则拿到的 deepseek-v4-flash 等无法被引用。
-        const modelIds = ids.map((id) => goModelId(draft.baseUrl, id));
-        modelIds.forEach((id) => out.add(id));
-        // Bulk-declare the endpoint's models in config.toml under this
-        // agent's own provider namespace: the CLI picker then lists them and
-        // chat-page switching hot-applies via set_config_option instead of
-        // respawning. The sync FULL-CLEANS every wardex-* namespace first —
-        // only this refresh's set survives; kimi's own config is untouched.
-        // kimi CLI only; unsaved new agents skip (no id to namespace under).
-        if (draft.provider === 'kimi' && selectedId.value && modelIds.length > 0) {
-          try {
-            await cmd('sync_agent_models', {
-              agentId: selectedId.value,
-              baseUrl: draft.baseUrl.trim(),
-              apiKey,
-              models: modelIds,
-              maxContextK: clampContextK(draft.maxContextK) || 256,
-            });
-            modelFetchMsg.value = `已同步 ${modelIds.length} 个模型到 config.toml`;
-          } catch (e) {
-            modelFetchMsg.value = String(e);
-          }
-        }
+        ids.map((id) => goModelId(draft.baseUrl, id)).forEach((id) => out.add(id));
       } catch (e) {
         modelFetchMsg.value = String(e);
       }
@@ -163,19 +142,22 @@ function onModelPick(i: number): void {
   markDirty();
 }
 
-// ---- default thinking effort (kimi only; backend declares the model with
-// support_efforts in ~/.kimi-code/config.toml so the picker shows levels) ----
+// ---- allowed thinking-effort levels (multi-select) ----
+// 候选来自后端 effort_options（red line C3: no hardcoded lists in the UI）。
+// 勾选的档位随保存写入 kimi config.toml 的 support_efforts / opencode.json
+// 的 model variants；对话页强度下拉只显示这些。
 const effortValues = ref<string[]>([]);
-const EFFORT_FOLLOW = '跟随 CLI';
 const EFFORT_DISPLAY: Record<string, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max' };
-const effortLabels = computed(() => [
-  EFFORT_FOLLOW,
-  ...effortValues.value.map((v) => EFFORT_DISPLAY[v] ?? v),
-]);
-const effortIndex = computed(() => Math.max(0, effortValues.value.indexOf(draft.defaultEffort) + 1));
+const effortLabels = computed(() => effortValues.value.map((v) => EFFORT_DISPLAY[v] ?? v));
 
-function onEffortPick(i: number): void {
-  draft.defaultEffort = i <= 0 ? '' : (effortValues.value[i - 1] ?? '');
+function effortChecked(v: string): boolean {
+  return draft.effortOptions.includes(v);
+}
+
+function toggleEffort(v: string): void {
+  const i = draft.effortOptions.indexOf(v);
+  if (i >= 0) draft.effortOptions.splice(i, 1);
+  else draft.effortOptions.push(v);
   markDirty();
 }
 
@@ -184,117 +166,6 @@ onMounted(() => {
     effortValues.value = v;
   });
 });
-
-// ---- per-model config editor (opencode only) ----
-// Editable drafts: array form so rows can be added/removed; converted to the
-// persisted Record<string, ModelConfig> on save (agents.ts). The backend
-// renders each agent's modelConfigs into an isolated opencode.json injected
-// via OPENCODE_CONFIG, so one agent's settings never leak into another.
-interface VariantDraft {
-  name: string;
-  thinking: boolean; // enabled / disabled
-  effort: string; // low/high/xhigh/max (empty when thinking off)
-}
-interface ModelConfigDraft {
-  modelId: string;
-  defaultVariant: string;
-  variants: VariantDraft[];
-}
-const modelConfigDrafts = ref<ModelConfigDraft[]>([]);
-const THINK_LABELS = ['开启', '关闭'];
-const effortOnlyLabels = computed(() => effortValues.value.map((v) => EFFORT_DISPLAY[v] ?? v));
-
-function thinkLabel(v: boolean): string {
-  return v ? '开启' : '关闭';
-}
-
-function effortIndexFor(effort: string): number {
-  return effortValues.value.indexOf(effort);
-}
-
-function loadModelConfigs(a: AgentRecord): void {
-  const drafts: ModelConfigDraft[] = [];
-  for (const [modelId, cfg] of Object.entries(a.modelConfigs ?? {})) {
-    const variants: VariantDraft[] = [];
-    for (const [name, opts] of Object.entries(cfg.variants ?? {})) {
-      const o = opts as { reasoningEffort?: string; thinking?: { type?: string } };
-      const thinking = o.thinking?.type !== 'disabled';
-      variants.push({ name, thinking, effort: o.reasoningEffort ?? '' });
-    }
-    drafts.push({ modelId, defaultVariant: cfg.defaultVariant ?? '', variants });
-  }
-  modelConfigDrafts.value = drafts;
-}
-
-function toModelConfigs(): Record<string, ModelConfig> {
-  const out: Record<string, ModelConfig> = {};
-  for (const d of modelConfigDrafts.value) {
-    const modelId = d.modelId.trim();
-    if (!modelId) continue;
-    const variants: Record<string, Record<string, unknown>> = {};
-    for (const v of d.variants) {
-      const name = v.name.trim();
-      if (!name) continue;
-      variants[name] = v.thinking
-        ? { reasoningEffort: v.effort || undefined, thinking: { type: 'enabled' } }
-        : { thinking: { type: 'disabled' } };
-    }
-    if (Object.keys(variants).length === 0) continue;
-    const defaultVariant =
-      d.defaultVariant && variants[d.defaultVariant] ? d.defaultVariant : Object.keys(variants)[0];
-    out[modelId] = { defaultVariant, variants };
-  }
-  return out;
-}
-
-function addModelConfig(): void {
-  modelConfigDrafts.value.push({ modelId: '', defaultVariant: '', variants: [] });
-  markDirty();
-}
-
-function removeModelConfig(i: number): void {
-  modelConfigDrafts.value.splice(i, 1);
-  markDirty();
-}
-
-function addVariant(mi: number): void {
-  modelConfigDrafts.value[mi].variants.push({ name: '', thinking: true, effort: 'high' });
-  markDirty();
-}
-
-function removeVariant(mi: number, vi: number): void {
-  modelConfigDrafts.value[mi].variants.splice(vi, 1);
-  markDirty();
-}
-
-/** DeepSeek 式标准档位：max/high/low/off（默认 max），空列表时一键填入。 */
-function fillStandardVariants(mi: number): void {
-  const d = modelConfigDrafts.value[mi];
-  if (!d || d.variants.length > 0) return;
-  d.variants = [
-    { name: 'max', thinking: true, effort: 'max' },
-    { name: 'high', thinking: true, effort: 'high' },
-    { name: 'low', thinking: true, effort: 'low' },
-    { name: 'off', thinking: false, effort: '' },
-  ];
-  d.defaultVariant = 'max';
-  markDirty();
-}
-
-function onThinkToggle(mi: number, vi: number, i: number): void {
-  const v = modelConfigDrafts.value[mi]?.variants[vi];
-  if (!v) return;
-  v.thinking = i === 0;
-  if (!v.thinking) v.effort = '';
-  markDirty();
-}
-
-function onEffortForVariant(mi: number, vi: number, i: number): void {
-  const v = modelConfigDrafts.value[mi]?.variants[vi];
-  if (!v) return;
-  v.effort = effortValues.value[i] ?? '';
-  markDirty();
-}
 
 const nameInput = ref<HTMLInputElement | null>(null);
 
@@ -308,14 +179,13 @@ function loadAgent(a: AgentRecord): void {
   draft.provider = a.provider;
   draft.model = a.model;
   draft.baseUrl = a.baseUrl;
-  draft.defaultEffort = a.defaultEffort ?? '';
+  draft.effortOptions = [...(a.effortOptions ?? [])];
   draft.maxContextK = a.maxContextK || 256;
   draft.cliPath = a.cliPath;
   draft.apiKey = maskKey(a.apiKey); // display surface: masked only (§9.5)
   draft.extraArgs = a.extraArgs;
   draft.mcpServers = a.mcpServers;
   draft.avatarPath = a.avatarPath;
-  loadModelConfigs(a);
   dirty.value = false;
   // Bare CLI path → async auto-probe on load (§9.2 trigger #1).
   if (isBareCliPath(spec.value, draft.cliPath)) {
@@ -339,14 +209,13 @@ async function saveCurrent(): Promise<boolean> {
     provider: draft.provider,
     model: draft.model,
     baseUrl: draft.baseUrl,
-    defaultEffort: draft.defaultEffort,
+    effortOptions: [...draft.effortOptions],
     maxContextK: clampContextK(draft.maxContextK),
     cliPath: draft.cliPath,
     apiKey: draft.apiKey,
     extraArgs: draft.extraArgs,
     mcpServers: draft.mcpServers,
     avatarPath: draft.avatarPath,
-    modelConfigs: toModelConfigs(),
   });
   if (ok) {
     dirty.value = false;
@@ -822,91 +691,25 @@ const pageKeysOn = computed(() => nav.page === 'config');
               />
             </div>
             <div v-if="draft.provider === 'kimi' && draft.baseUrl.trim()" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              点「刷新」会先清掉 config.toml 里所有 wardex-* 同步的 provider/模型（含其他 Agent 的残留），再按本 Agent 命名空间写入本次拉到的列表（apiKey 明文）；kimi 官方配置不动。上下文长度统一为该值 ×1024，0 = 256K
+               保存时把该模型写入 config.toml（apiKey 明文），上下文长度统一为该值 ×1024，0 = 256K
             </div>
 
-            <div v-if="draft.provider === 'kimi'" class="cfg__field">
-              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">默认思考强度</span>
-              <WarDropdown
-                class="cfg__dropdown"
-                :options="effortLabels"
-                :model-value="effortIndex"
-                @activated="onEffortPick"
-              />
-            </div>
-            <div v-if="draft.provider === 'kimi' && draft.defaultEffort" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              保存后会把该模型写入 ~/.kimi-code/config.toml（support_efforts）以启用强度档，apiKey 将明文同步
-            </div>
-
-            <div v-if="draft.provider === 'opencode'" class="cfg__field cfg__field--stack">
-              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">模型思考配置</span>
-              <div class="cfg__mc">
-                <div v-if="modelConfigDrafts.length === 0" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                  未配置。每个模型在此独立设置思考开关与强度档位，保存后生成独立的 opencode.json（OPENCODE_CONFIG 注入），与其他 Agent 完全隔离；留空则使用全局 opencode 配置。
-                </div>
-                <div v-for="(mc, mi) in modelConfigDrafts" :key="mi" class="cfg__mc-card">
-                  <div class="cfg__mc-head">
-                    <input
-                      v-model="mc.modelId"
-                      class="war-input cfg__mc-model"
-                      placeholder="模型 id（如 deepseek-v4-flash）"
-                      :style="{ fontSize: prefs.fs(12) + 'px' }"
-                      spellcheck="false"
-                      @input="markDirty"
-                    />
-                    <WarButton
-                      skin="dialog"
-                      :width="88"
-                      :art-aspect="5.34"
-                      text="标准档位"
-                      :enabled="mc.variants.length === 0"
-                      @activated="fillStandardVariants(mi)"
-                    />
-                    <WarButton skin="dialog" :width="64" :art-aspect="5.34" text="删除" @activated="removeModelConfig(mi)" />
-                  </div>
-                  <div v-for="(v, vi) in mc.variants" :key="vi" class="cfg__mc-row">
-                    <input
-                      v-model="v.name"
-                      class="war-input cfg__mc-name"
-                      placeholder="档位名"
-                      :style="{ fontSize: prefs.fs(12) + 'px' }"
-                      spellcheck="false"
-                      @input="markDirty"
-                    />
-                    <WarDropdown
-                      class="cfg__mc-think"
-                      :options="THINK_LABELS"
-                      :model-value="v.thinking ? 0 : 1"
-                      :display-text="thinkLabel(v.thinking)"
-                      :text-size="prefs.fs(11)"
-                      @activated="onThinkToggle(mi, vi, $event)"
-                    />
-                    <WarDropdown
-                      class="cfg__mc-effort"
-                      :options="effortOnlyLabels"
-                      :model-value="effortIndexFor(v.effort)"
-                      :display-text="v.effort ? (EFFORT_DISPLAY[v.effort] ?? v.effort) : '—'"
-                      :text-size="prefs.fs(11)"
-                      @activated="onEffortForVariant(mi, vi, $event)"
-                    />
-                    <label class="cfg__mc-default" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                      <input
-                        type="radio"
-                        :checked="mc.defaultVariant === v.name"
-                        @change="mc.defaultVariant = v.name; markDirty()"
-                      />
-                      默认
-                    </label>
-                    <WarButton skin="dialog" :width="40" :art-aspect="5.34" text="✕" @activated="removeVariant(mi, vi)" />
-                  </div>
-                  <div class="cfg__mc-add">
-                    <WarButton skin="dialog" :width="88" :art-aspect="5.34" text="添加档位" @activated="addVariant(mi)" />
-                  </div>
-                </div>
-                <div class="cfg__mc-add">
-                  <WarButton skin="dialog" :width="104" :art-aspect="5.34" text="添加模型" @activated="addModelConfig" />
-                </div>
+            <div class="cfg__field">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">思考强度（多选）</span>
+              <div class="cfg__effort-list">
+                <label
+                  v-for="(v, i) in effortValues"
+                  :key="v"
+                  class="cfg__effort-item"
+                  :style="{ fontSize: prefs.fs(12) + 'px' }"
+                >
+                  <input type="checkbox" :checked="effortChecked(v)" @change="toggleEffort(v)" />
+                  {{ effortLabels[i] }}
+                </label>
               </div>
+            </div>
+            <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              勾选该 Agent 可用的思考强度档位；对话页强度下拉只显示这些（思考恒开启）。全不勾 = 全部档位可用；kimi 保存时写入 config.toml 的 support_efforts，opencode 生成模型 variants
             </div>
 
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
@@ -1327,76 +1130,28 @@ const pageKeysOn = computed(() => nav.page === 'config');
   line-height: 1.4;
 }
 
-/* ---- per-model config editor (opencode) ---- */
-.cfg__field--stack {
-  align-items: flex-start;
-}
-
-.cfg__mc {
+/* ---- allowed thinking-effort multi-select ---- */
+.cfg__effort-list {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 14px;
 }
 
-.cfg__mc-card {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid #2a3344;
-  background: #0a1020aa;
-}
-
-.cfg__mc-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cfg__mc-model {
-  flex: 1;
-  min-width: 0;
-  height: 28px;
-}
-
-.cfg__mc-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.cfg__mc-name {
-  flex: 1;
-  min-width: 0;
-  height: 28px;
-}
-
-.cfg__mc-think {
-  width: 92px;
-  height: 28px;
-}
-
-.cfg__mc-effort {
-  width: 96px;
-  height: 28px;
-}
-
-.cfg__mc-default {
-  flex: none;
+.cfg__effort-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  color: var(--war-text-muted);
+  gap: 5px;
+  color: var(--war-text-dim);
   font-family: SimSun, serif;
-  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
 }
 
-.cfg__mc-add {
-  display: flex;
+.cfg__effort-item input[type='checkbox'] {
+  accent-color: var(--war-gold);
 }
-
 
 .cfg__avatar-row {
   flex: none;

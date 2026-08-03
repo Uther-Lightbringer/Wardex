@@ -16,14 +16,14 @@ export interface AgentRecord {
   provider: string;
   model: string;
   baseUrl: string;
-  /** "" = 跟随 CLI；否则为 thinking effort 档位（low/high/…，见 models.rs）。 */
+  /** "" = CLI 默认；否则为 thinking effort 档位（low/high/…，见 models.rs）。 */
   defaultEffort: string;
-  /** 刷新批量同步写入 config.toml 的 max_context_size，单位 K；0 = 256K 兜底。 */
+  /** 允许的思考强度档位列表（空 = 全部）。保存后写入 kimi config.toml 的
+   * support_efforts / opencode.json 的 model variants，对话页强度选择
+   * 只显示这里勾选的档位。 */
+  effortOptions: string[];
+  /** 保存时写入 config.toml 模型声明的 max_context_size，单位 K；0 = 256K 兜底。 */
   maxContextK: number;
-  /** 每模型 ACP 配置覆盖（目前驱动 opencode）：模型 id → variants + 默认档。
-   * 保存后由后端渲染成独立的 opencode.json 经 OPENCODE_CONFIG 注入，各
-   * agent 之间完全隔离。 */
-  modelConfigs: Record<string, ModelConfig>;
   cliPath: string;
   /** PLAINTEXT from the backend — display surfaces must maskKey() it. */
   apiKey: string;
@@ -37,14 +37,6 @@ export interface AgentRecord {
   updatedAt: number;
 }
 
-/** 每模型 ACP 配置：variants = 档位名 → opencode 模型 options
- * （如 {reasoningEffort, thinking}）；defaultVariant 的 options 同时作为该
- * 模型的基础 options，保证"不选档位 = 默认档"。 */
-export interface ModelConfig {
-  defaultVariant: string;
-  variants: Record<string, Record<string, unknown>>;
-}
-
 /** Save patch; absent key = field untouched (Rust Option semantics). */
 export type AgentPatch = Partial<
   Pick<
@@ -54,8 +46,8 @@ export type AgentPatch = Partial<
     | 'model'
     | 'baseUrl'
     | 'defaultEffort'
+    | 'effortOptions'
     | 'maxContextK'
-    | 'modelConfigs'
     | 'cliPath'
     | 'apiKey'
     | 'extraArgs'
@@ -131,12 +123,6 @@ export const useAgentsStore = defineStore('agents', {
      * the cached line instantly (spec §9.2). */
     probeCache: {} as Record<string, ProbeResult>,
     probing: {} as Record<string, boolean>,
-    /** Endpoint /models cache by agent id (stale-while-revalidate): the chat
-     * page renders the cached list instantly on session open and refreshes
-     * in the background. In-memory only — one cold fetch per agent after
-     * an app restart. Invalidated when baseUrl/apiKey changes. */
-    modelsByAgent: {} as Record<string, string[]>,
-    modelsFetching: {} as Record<string, boolean>,
     lastError: '',
     /** Non-fatal save warning (e.g. kimi config.toml effort sync failed). */
     lastWarning: '',
@@ -193,46 +179,11 @@ export const useAgentsStore = defineStore('agents', {
       try {
         this.lastError = '';
         this.lastWarning = (await cmd<string | null>('save_agent', { agentId: id, patch }, null)) ?? '';
-        // Endpoint identity changed → the cached /models list no longer
-        // belongs to this agent.
-        if ('baseUrl' in patch || 'apiKey' in patch) {
-          const rest = { ...this.modelsByAgent };
-          delete rest[id];
-          this.modelsByAgent = rest;
-        }
         await this.refresh();
         return true;
       } catch (e) {
         this.lastError = String(e);
         return false;
-      }
-    },
-
-    /** Endpoint /models with stale-while-revalidate: single-flight per
-     * agent; the UI reads modelsByAgent synchronously and re-renders when
-     * the fresh list lands. Failures keep the previous cache. */
-    async ensureEndpointModels(agentId: string): Promise<void> {
-      if (!isTauri || !agentId || this.modelsFetching[agentId]) return;
-      const a = this.byId(agentId);
-      const baseUrl = a?.baseUrl.trim() ?? '';
-      if (!baseUrl) return; // CLI-managed agents have no endpoint list
-      this.modelsFetching = { ...this.modelsFetching, [agentId]: true };
-      try {
-        const ids = await cmd<string[]>('fetch_models', {
-          baseUrl,
-          apiKey: a?.apiKey ?? '',
-        });
-        // OpenCode Go 端点：裸 id 补 `opencode-go/` 前缀，与配置页刷新一致。
-        const prefixed = ids.map((id) => goModelId(baseUrl, id));
-        // The agent may have been edited mid-flight; only adopt the result
-        // when the endpoint identity is unchanged.
-        if (this.byId(agentId)?.baseUrl.trim() === baseUrl) {
-          this.modelsByAgent = { ...this.modelsByAgent, [agentId]: prefixed };
-        }
-      } catch (e) {
-        console.warn(`[agents] fetch_models(${agentId}) failed, keeping cache`, e);
-      } finally {
-        this.modelsFetching = { ...this.modelsFetching, [agentId]: false };
       }
     },
 

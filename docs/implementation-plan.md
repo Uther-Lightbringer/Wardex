@@ -44,7 +44,7 @@
 
 1. **war 控件库**（`src/components/war/`）：WarFrame（border-image 九宫格 + hole/inset 开孔）、WarButton（三态+音效+uiGate）、WarDialog（标题板/按钮区贴图分数定位）、WarDropdown、WarMenu、WarScrollBar（九宫格 thumb，不可滚时隐藏轨道）、吊链平铺、蓝色高亮 mix-blend。每个控件的 border 值严格从 ui-design.md 抄。
 2. **面板坞框架**（`WarDock`/`WarPanel` + `src/panels/registry.ts`）：手风琴堆叠、拖拽调高（min 80px/max 60%）、`panelLayout` 布局记忆、懒挂载——规范见 [panels.md](./panels.md)。
-3. **全局**：自定义光标、三事件音效（200ms 节流+音画时序）、image 背景 + background.json 外部配置、铁轨边框布局、750ms 三段下落切页动画、fontScale。
+3. **全局**：自定义光标、三事件音效（200ms 节流+音画时序）、image 背景 + background.json 外部配置、铁轨边框布局、450ms 三段下落切页动画（已提速，原 750ms）、fontScale。
 4. **五页骨架 + 导航**：main（钢板+最近项目）、config、sessionSelect、chat、todo 的占位→静态版；uiGate 切页禁输入；打开项目对话框。
 
 完成判据：五页可导航、视觉与旧版并排对比一致（同屏截图对比）、音效/光标/动画时序正确。

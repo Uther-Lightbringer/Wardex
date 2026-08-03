@@ -480,23 +480,23 @@ SubagentPanel：26px 折叠头（`#f2cf6b` 12px）+ 列表；状态点 8px 圆�
 
 ### 5.6 页面切换三段式动画（核心体验，务必复刻）
 
-所有导航都是同一套「上拉 → 等音效 → 下拉」：
+所有导航都是同一套「上拉 → 等音效 → 下拉」。**已提速**（比原版 WC3 时序 770/510/770 更快）：
 
-1. **上拉（770ms）**：当前页 `y: 0 → −2400`，`ease-in-quad`，同时播 `popUp` 音效。
-2. **等音效余量（510ms）**：`popUpSoundMs(1280) − popUpDur(770) = 510ms`——上拉动画结束后等 popUp 音效放完（文件 1866ms，尾部 ~590ms 低于 2% 峰值不可闻，可闻长度按 1280ms 计）。
-3. **下拉（770ms）**：新页面从 `y = −height`（停靠在视口上方）落到 `y = 0`，`ease-out-quad`，动画开始同时播 `popDown` 音效。
+1. **上拉（450ms）**：当前页 `y: 0 → −2400`，`ease-in-quad`，同时播 `popUp` 音效。
+2. **等音效闸门（500ms）**：`dropGateMs(950) − popUpDur(450) = 500ms`——上拉动画结束后等下落到 950ms 闸门（popUp 原可闻长度 1280ms，950ms 已覆盖主体，剩余尾部由 popDown 单声道截断；改慢可恢复 `DROP_GATE_MS = 1280`）。
+3. **下拉（450ms）**：新页面从 `y = −height`（停靠在视口上方）落到 `y = 0`，`ease-out-quad`，动画开始同时播 `popDown` 音效。
 
 补充规则：
 - 全程 `uiBusy = true`：所有 WarButton 变灰禁用、快捷键失效，直到下落结束。
 - 新页面在变得可见**之前**必须先停靠到视口上方（prepareEnter），防止闪一帧最终位置。
 - 永久铁轨不动；主菜单 ↔ 覆盖页是「菜单上拉/大框下拉」，覆盖页 ↔ 覆盖页是「当前上拉/换下拉」。
-- 恢复路径（菜单已在屏外）无上拉动画：从点击起等满 1280ms 再下拉。
+- 恢复路径（菜单已在屏外）无上拉动画：从点击起等满 950ms 再下拉。
 - 页面实例首次访问后常驻（缓存），只有可见性切换。
 
 ```ts
 // transition 时序骨架
-const POP_UP_DUR = 770, POP_DOWN_DUR = 770, POP_UP_SOUND_MS = 1280
-const POP_UP_GAP = POP_UP_SOUND_MS - POP_UP_DUR  // 510
+const POP_UP_DUR = 450, POP_DOWN_DUR = 450, DROP_GATE_MS = 950
+const POP_UP_GAP = DROP_GATE_MS - POP_UP_DUR  // 500
 async function goOverlay(next: string) {
   uiBusy.value = true
   sfx.play('popUp')
@@ -511,7 +511,7 @@ async function goOverlay(next: string) {
 // easeInQuad: t => t*t   easeOutQuad: t => 1-(1-t)*(1-t)
 ```
 
-ShellFrame 单独下落（页面内铁框从上方落入）用 **750ms ease-out-quad**（`dropDuration`）。
+ShellFrame 单独下落（页面内铁框从上方落入）用 **450ms ease-out-quad**（`dropDuration`）。
 
 ---
 

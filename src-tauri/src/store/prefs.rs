@@ -14,6 +14,9 @@
 //                      per-panel dock layout memory, see panels.md §1.2
 //   - panelWidth     → shared drawer width for ALL dock panels (dragged
 //                      once, applies to every tab), 200..276
+//   - composerHeight → 输入框高度 100..360; 0 (未拖) 用前端响应式 clamp
+//   - actionBayWidth → 右下操作台宽度 180..480; 0 (未拖) 用默认 354
+//   - actionBayHeight→ 右下操作台高度 100..360; 0 (未拖) 用响应式公式
 
 use std::fs;
 
@@ -52,8 +55,14 @@ pub struct PanelLayoutEntry {
 // sorted like QJsonObject wrote them (cosmetic diff-friendliness, §0).
 #[derive(Debug, Clone, Serialize)]
 pub struct UserPrefs {
+    #[serde(rename = "actionBayHeight", skip_serializing_if = "Option::is_none")]
+    action_bay_height: Option<i64>,
+    #[serde(rename = "actionBayWidth", skip_serializing_if = "Option::is_none")]
+    action_bay_width: Option<i64>,
     #[serde(rename = "codegraphInstalled", skip_serializing_if = "Option::is_none")]
     codegraph_installed: Option<bool>,
+    #[serde(rename = "composerHeight", skip_serializing_if = "Option::is_none")]
+    composer_height: Option<i64>,
     #[serde(rename = "fontScale")]
     font_scale: f64,
     #[serde(rename = "panelLayout")]
@@ -77,8 +86,14 @@ pub struct UserPrefs {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct PrefsFile {
+    #[serde(rename = "actionBayHeight")]
+    action_bay_height: Option<i64>,
+    #[serde(rename = "actionBayWidth")]
+    action_bay_width: Option<i64>,
     #[serde(rename = "codegraphInstalled")]
     codegraph_installed: Option<bool>,
+    #[serde(rename = "composerHeight")]
+    composer_height: Option<i64>,
     #[serde(rename = "permissionMode", default = "default_permission_mode")]
     permission_mode: String,
     #[serde(rename = "userAvatarPath")]
@@ -102,7 +117,10 @@ struct PrefsFile {
 impl Default for PrefsFile {
     fn default() -> Self {
         Self {
+            action_bay_height: None,
+            action_bay_width: None,
             codegraph_installed: None,
+            composer_height: None,
             permission_mode: default_permission_mode(),
             user_avatar_path: String::new(),
             user_name: String::new(),
@@ -127,7 +145,10 @@ fn default_font_scale() -> f64 {
 impl Default for UserPrefs {
     fn default() -> Self {
         Self {
+            action_bay_height: None,
+            action_bay_width: None,
             codegraph_installed: None,
+            composer_height: None,
             permission_mode: default_permission_mode(),
             user_avatar_path: String::new(),
             user_name: String::new(),
@@ -178,6 +199,27 @@ fn clamp_panel_width(v: i64) -> i64 {
     }
 }
 
+/// 输入框高度 / 操作台高度：太小不可用，太大挤没主面板。前端拖拽手柄同样
+/// 用这两组边界（ChatPage.vue），0 → 响应式默认。
+const COMPOSER_HEIGHT_MIN: i64 = 100;
+const COMPOSER_HEIGHT_MAX: i64 = 360;
+const ACTION_BAY_WIDTH_MIN: i64 = 180;
+const ACTION_BAY_WIDTH_MAX: i64 = 480;
+const ACTION_BAY_HEIGHT_MIN: i64 = 100;
+const ACTION_BAY_HEIGHT_MAX: i64 = 360;
+
+fn clamp_composer_height(v: i64) -> i64 {
+    v.clamp(COMPOSER_HEIGHT_MIN, COMPOSER_HEIGHT_MAX)
+}
+
+fn clamp_action_bay_width(v: i64) -> i64 {
+    v.clamp(ACTION_BAY_WIDTH_MIN, ACTION_BAY_WIDTH_MAX)
+}
+
+fn clamp_action_bay_height(v: i64) -> i64 {
+    v.clamp(ACTION_BAY_HEIGHT_MIN, ACTION_BAY_HEIGHT_MAX)
+}
+
 /// Clamp to the advertised picker range (85% / 100% / 115% / 130%).
 fn clamp_font_scale(v: f64) -> f64 {
     if !v.is_finite() {
@@ -198,7 +240,10 @@ impl UserPrefs {
         let mut prefs = Self {
             // NOTE: no whitelist here — the old load() took the raw string.
             permission_mode: file.permission_mode,
+            action_bay_height: file.action_bay_height.map(clamp_action_bay_height),
+            action_bay_width: file.action_bay_width.map(clamp_action_bay_width),
             codegraph_installed: file.codegraph_installed,
+            composer_height: file.composer_height.map(clamp_composer_height),
             user_avatar_path: String::new(),
             user_name: file.user_name,
             preview_width: clamp_preview_size(file.preview_width),
@@ -333,6 +378,51 @@ impl UserPrefs {
             return Ok(());
         }
         self.panel_width = Some(w);
+        self.save(paths)
+    }
+
+    // ---- chat-page panel sizes (dragged; 0 = not set → responsive default) ----
+
+    /// 输入框高度 (px)。0 = 未拖过，前端用响应式 clamp。
+    pub fn composer_height(&self) -> i64 {
+        self.composer_height.unwrap_or(0)
+    }
+
+    pub fn set_composer_height(&mut self, paths: &Paths, h: i64) -> Result<(), PrefsError> {
+        let h = (h > 0).then_some(clamp_composer_height(h));
+        if self.composer_height == h {
+            return Ok(());
+        }
+        self.composer_height = h;
+        self.save(paths)
+    }
+
+    /// 右下操作台宽度 (px)。0 = 未拖过，前端用默认 354。
+    pub fn action_bay_width(&self) -> i64 {
+        self.action_bay_width.unwrap_or(0)
+    }
+
+    pub fn set_action_bay_width(&mut self, paths: &Paths, w: i64) -> Result<(), PrefsError> {
+        let w = (w > 0).then_some(clamp_action_bay_width(w));
+        if self.action_bay_width == w {
+            return Ok(());
+        }
+        self.action_bay_width = w;
+        self.save(paths)
+    }
+
+    /// 右下操作台高度 (px)。0 = 未拖过，前端用响应式公式。
+    pub fn action_bay_height(&self) -> i64 {
+        self.action_bay_height.unwrap_or(0)
+    }
+
+    pub fn set_action_bay_height(&mut self, paths: &Paths, h: i64) -> Result<(), PrefsError> {
+        // 0 → 清除回响应式默认；负值 → clamp 到最小高度（与测试一致）。
+        let h = (h != 0).then_some(clamp_action_bay_height(h));
+        if self.action_bay_height == h {
+            return Ok(());
+        }
+        self.action_bay_height = h;
         self.save(paths)
     }
 
@@ -505,6 +595,43 @@ mod tests {
         drop(prefs);
         let reloaded = UserPrefs::load(&paths);
         assert_eq!(reloaded.panel_width(), 260);
+    }
+
+    #[test]
+    fn chat_panel_sizes_persist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+
+        let mut prefs = UserPrefs::load(&paths);
+        assert_eq!(prefs.composer_height(), 0);
+        assert_eq!(prefs.action_bay_width(), 0);
+        assert_eq!(prefs.action_bay_height(), 0);
+
+        prefs.set_composer_height(&paths, 300).unwrap();
+        prefs.set_action_bay_width(&paths, 420).unwrap();
+        prefs.set_action_bay_height(&paths, 260).unwrap();
+        assert_eq!(prefs.composer_height(), 300);
+        assert_eq!(prefs.action_bay_width(), 420);
+        assert_eq!(prefs.action_bay_height(), 260);
+
+        // Clamped into the sane ranges.
+        prefs.set_composer_height(&paths, 5000).unwrap();
+        assert_eq!(prefs.composer_height(), 360);
+        prefs.set_action_bay_width(&paths, 20).unwrap();
+        assert_eq!(prefs.action_bay_width(), 180);
+        prefs.set_action_bay_height(&paths, -30).unwrap();
+        assert_eq!(prefs.action_bay_height(), 100);
+
+        // 0 / negative → cleared back to the responsive default.
+        prefs.set_composer_height(&paths, 0).unwrap();
+        assert_eq!(prefs.composer_height(), 0);
+
+        // Round-trip through disk.
+        drop(prefs);
+        let reloaded = UserPrefs::load(&paths);
+        assert_eq!(reloaded.composer_height(), 0);
+        assert_eq!(reloaded.action_bay_width(), 180);
+        assert_eq!(reloaded.action_bay_height(), 100);
     }
 
     #[test]

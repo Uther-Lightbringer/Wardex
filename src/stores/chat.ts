@@ -414,6 +414,11 @@ export const useChatStore = defineStore('chat', {
         await listen('store://prefs', () => {
           void prefs.reload();
         }),
+        // 用量回填完成（usage://backfilled）：当前会话的历史气泡可能刚被
+        // 挂上回填用量，重新拉取一次消息模型即可显示 ↑↓ 统计。
+        await listen('usage://backfilled', () => {
+          if (this.sessionId) void this.loadMessages();
+        }),
       );
     },
 
@@ -923,17 +928,6 @@ export const useChatStore = defineStore('chat', {
         await cmd('set_config_option', { sessionId: this.sessionId, configId, value });
       } catch (e) {
         console.warn('[chat] set_config_option failed', e);
-      }
-    },
-
-    /** Endpoint (non-picker) model switch: backend persists it onto the
-     * agent and respawns the CLI with the KIMI_MODEL_* env injection. */
-    async setSessionModel(model: string): Promise<void> {
-      if (!this.sessionId) return;
-      try {
-        await cmd('set_session_model', { sessionId: this.sessionId, model });
-      } catch (e) {
-        this.status = { ...this.status, lastError: String(e) };
       }
     },
 

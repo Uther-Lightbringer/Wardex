@@ -89,6 +89,27 @@ pub fn kimi_model_aliases() -> Vec<String> {
 /// (red line C3: no hardcoded lists in the UI).
 pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
+/// Effective effort list: the agent's selected levels, or every known level
+/// when the selection is empty (empty = unrestricted).
+pub fn effective_efforts(effort_options: &[String]) -> Vec<&str> {
+    if effort_options.is_empty() {
+        EFFORT_LEVELS.to_vec()
+    } else {
+        effort_options.iter().map(String::as_str).collect()
+    }
+}
+
+/// Default level for a declared model: the agent's default when it is among
+/// the allowed levels, else the first allowed one.
+fn pick_default_effort<'a>(efforts: &'a [&'a str], default: &'a str) -> &'a str {
+    let d = default.trim();
+    if !d.is_empty() && efforts.contains(&d) {
+        d
+    } else {
+        efforts[0]
+    }
+}
+
 fn kimi_config_path() -> Option<std::path::PathBuf> {
     if let Ok(home) = std::env::var("KIMI_CODE_HOME") {
         let home = home.trim();
@@ -160,30 +181,6 @@ fn upsert_section(text: &str, header: &str, block: &str) -> String {
     result
 }
 
-/// Remove the section with the exact `header` line (no-op when absent).
-fn remove_section(text: &str, header: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    let mut skipping = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t == header {
-            skipping = true;
-            continue;
-        }
-        if skipping && t.starts_with('[') {
-            skipping = false;
-        }
-        if !skipping {
-            out.push(line);
-        }
-    }
-    let mut result = out.join("\n");
-    if !result.is_empty() {
-        result.push('\n');
-    }
-    result
-}
-
 fn provider_block(key: &str, base_url: &str, api_key: &str) -> String {
     let mut lines = vec![format!("[providers.{key}]")];
     if base_url.trim().is_empty() {
@@ -198,29 +195,40 @@ fn provider_block(key: &str, base_url: &str, api_key: &str) -> String {
     lines.join("\n")
 }
 
-fn model_block(alias: &str, provider_key: &str, model_id: &str, default_effort: &str) -> String {
-    let efforts = EFFORT_LEVELS
+fn model_block(
+    alias: &str,
+    provider_key: &str,
+    model_id: &str,
+    efforts: &[&str],
+    default_effort: &str,
+    max_context: u32,
+) -> String {
+    let efforts = efforts
         .iter()
         .map(|e| format!("\"{e}\""))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "[models.\"{}\"]\nprovider = \"{}\"\nmodel = \"{}\"\nmax_context_size = 262144\ncapabilities = [ \"thinking\", \"tool_use\" ]\nsupport_efforts = [ {} ]\ndefault_effort = \"{}\"",
+        "[models.\"{}\"]\nprovider = \"{}\"\nmodel = \"{}\"\nmax_context_size = {max_context}\ncapabilities = [ \"thinking\", \"tool_use\" ]\nsupport_efforts = [ {efforts} ]\ndefault_effort = \"{}\"",
         toml_escape(alias),
         toml_escape(provider_key),
         toml_escape(model_id),
-        efforts,
         toml_escape(default_effort),
     )
 }
 
-/// Declare `model_id` in the kimi CLI config with full effort levels.
-/// Creates the config file when missing. Idempotent.
+/// Declare `model_id` in the kimi CLI config with the agent's allowed effort
+/// levels as `support_efforts` (empty selection = every level), so the ACP
+/// thinking picker offers exactly those. `default_effort` picks the initial
+/// level (empty or not allowed → the first allowed one). Creates the config
+/// file when missing. Idempotent.
 pub fn sync_kimi_effort_model(
     model_id: &str,
     base_url: &str,
     api_key: &str,
+    effort_options: &[String],
     default_effort: &str,
+    max_context_k: u32,
 ) -> Result<(), String> {
     let path = kimi_config_path().ok_or("无法定位 kimi config.toml")?;
     let text = std::fs::read_to_string(&path).unwrap_or_default();
@@ -228,10 +236,13 @@ pub fn sync_kimi_effort_model(
     let pheader = format!("[providers.{pkey}]");
     let mheader = format!("[models.\"{}\"]", model_id);
     let text = upsert_section(&text, &pheader, &provider_block(&pkey, base_url, api_key));
+    let efforts = effective_efforts(effort_options);
+    let default = pick_default_effort(&efforts, default_effort);
+    let max_context = if max_context_k == 0 { 256 * 1024 } else { max_context_k * 1024 };
     let text = upsert_section(
         &text,
         &mheader,
-        &model_block(model_id, &pkey, model_id, default_effort),
+        &model_block(model_id, &pkey, model_id, &efforts, default, max_context),
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -239,195 +250,31 @@ pub fn sync_kimi_effort_model(
     std::fs::write(&path, text).map_err(|e| format!("写入 {} 失败: {e}", path.display()))
 }
 
-/// Remove the model section sync_kimi_effort_model wrote (no-op when
-/// absent). The shared wardex-<host> provider section is left in place: it is
-/// harmless alone and other agents' models may still reference it.
-pub fn remove_kimi_effort_model(model_id: &str) -> Result<(), String> {
-    let Some(path) = kimi_config_path() else { return Ok(()) };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Ok(());
-    };
-    let mheader = format!("[models.\"{}\"]", model_id);
-    let text = remove_section(&text, &mheader);
-    std::fs::write(&path, text).map_err(|e| format!("写入 {} 失败: {e}", path.display()))
-}
-
-// ---------------------------------------------------------------------------
-// Bulk sync (配置页「刷新」): declare EVERY model of an agent's endpoint in
-// config.toml, scoped to that agent. The provider section is per-agent
-// ([providers.wardex-agent-<id>]) so apiKey/baseUrl of different agents never
-// mix. The sync FULL-CLEANS every wardex-* namespace first — all
-// [providers.wardex-*] sections and every model that referenced one are
-// removed, so the file ends up holding only this refresh's set (kimi's own
-// sections, managed:kimi-code / kimi-code/* models, stay untouched). Effort
-// lines (support_efforts / default_effort, written via the 默认思考强度
-// path) are captured before the clean and survive the rewrite.
-// ---------------------------------------------------------------------------
-
-/// Per-agent provider key (TOML bare-key safe: agent ids are alphanumeric).
-fn wardex_agent_provider_key(agent_id: &str) -> String {
-    format!("wardex-agent-{}", agent_id.trim())
-}
-
-/// Collect the `support_efforts` / `default_effort` lines of an existing
-/// model section ("" when absent).
-fn extract_effort_lines(text: &str, header: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    let mut in_sec = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            in_sec = t == header;
-            continue;
-        }
-        if in_sec && (t.starts_with("support_efforts") || t.starts_with("default_effort")) {
-            out.push(t.to_string());
-        }
-    }
-    out.join("\n")
-}
-
-fn agent_model_block(alias: &str, provider_key: &str, model_id: &str, max_context: u32, effort_lines: &str) -> String {
-    let mut lines = vec![
-        format!("[models.\"{}\"]", toml_escape(alias)),
-        format!("provider = \"{}\"", toml_escape(provider_key)),
-        format!("model = \"{}\"", toml_escape(model_id)),
-        format!("max_context_size = {max_context}"),
-        "capabilities = [ \"thinking\", \"tool_use\" ]".to_string(),
-    ];
-    if !effort_lines.is_empty() {
-        lines.push(effort_lines.to_string());
-    }
-    lines.join("\n")
-}
-
-/// Headers of model sections whose provider is `provider_key`, plus the
-/// alias of each, parsed at text level.
-fn model_sections_for_provider<'a>(text: &'a str, provider_key: &str) -> Vec<(String, String)> {
-    let provider_line = format!("provider = \"{provider_key}\"");
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut cur_header = String::new();
-    let mut cur_has_provider = false;
-    let flush = |header: &str, has: bool, out: &mut Vec<(String, String)>| {
-        if has {
-            if let Some(alias) = header
-                .strip_prefix("[models.\"")
-                .and_then(|h| h.strip_suffix("\"]"))
-            {
-                out.push((header.to_string(), alias.to_string()));
-            }
-        }
-    };
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            flush(&cur_header, cur_has_provider, &mut out);
-            cur_header = t.to_string();
-            cur_has_provider = false;
-            continue;
-        }
-        if t == provider_line {
-            cur_has_provider = true;
-        }
-    }
-    flush(&cur_header, cur_has_provider, &mut out);
-    out
-}
-
-/// Keys of every `[providers.wardex-*]` section in the file — all WarDex
-/// managed namespaces (per-agent `wardex-agent-<id>` and host-slug
-/// `wardex-<host>`). kimi's own providers never carry the prefix.
-fn wardex_provider_keys(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if let Some(rest) = t.strip_prefix("[providers.wardex-") {
-            if let Some(key) = rest.strip_suffix(']') {
-                out.push(format!("wardex-{key}"));
-            }
-        }
-    }
-    out
-}
-
-/// Rewrite config.toml from a fresh /models list: full-clean every wardex-*
-/// namespace, then declare this agent's provider and models.
-/// `max_context_k` is in K (1024 tokens); 0 falls back to 256K.
-/// Returns the number of model aliases written.
-pub fn sync_agent_models(
-    agent_id: &str,
-    base_url: &str,
-    api_key: &str,
-    model_ids: &[String],
-    max_context_k: u32,
-) -> Result<usize, String> {
-    if agent_id.trim().is_empty() {
-        return Err("Agent 尚未保存，无法同步".to_string());
-    }
-    let path = kimi_config_path().ok_or("无法定位 kimi config.toml")?;
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let pkey = wardex_agent_provider_key(agent_id);
-    let max_context = if max_context_k == 0 { 256 * 1024 } else { max_context_k * 1024 };
-
-    // Capture effort lines BEFORE the clean — they live in the sections that
-    // are about to be removed.
-    let efforts: Vec<String> = model_ids
-        .iter()
-        .map(|id| extract_effort_lines(&text, &format!("[models.\"{}\"]", id)))
-        .collect();
-
-    // Full clean: drop every wardex-* provider and every model section that
-    // referenced one; only this refresh's set is written back below.
-    let mut text = text;
-    for key in wardex_provider_keys(&text) {
-        for (header, _alias) in model_sections_for_provider(&text, &key) {
-            text = remove_section(&text, &header);
-        }
-        text = remove_section(&text, &format!("[providers.{key}]"));
-    }
-
-    let pheader = format!("[providers.{pkey}]");
-    text = upsert_section(&text, &pheader, &provider_block(&pkey, base_url, api_key));
-
-    for (id, effort_lines) in model_ids.iter().zip(efforts.iter()) {
-        let mheader = format!("[models.\"{}\"]", id);
-        text = upsert_section(
-            &text,
-            &mheader,
-            &agent_model_block(id, &pkey, id, max_context, effort_lines),
-        );
-    }
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&path, text).map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
-    Ok(model_ids.len())
-}
-
 // ---------------------------------------------------------------------------
 // Per-agent opencode.json overrides (models.rs effort sync, opencode flavor).
-// Each agent's modelConfigs render into ONE isolated file under
+// Each agent's model + effort selection render into ONE isolated file under
 // %AppData%/WarDex/opencode/<agentId>.json, injected via OPENCODE_CONFIG at
-// spawn — so editing one agent's model variants never touches any other agent
+// spawn — so editing one agent's model/efforts never touches any other agent
 // or the user's global ~/.config/opencode/opencode.json.
 // ---------------------------------------------------------------------------
 
-/// Render a per-agent opencode.json override from `agent.model_configs`.
-/// Returns "" when the agent declares nothing (no override; the global
-/// opencode config applies as-is).
+/// Render a per-agent opencode.json override from `agent.model` + its
+/// `effort_options`. Returns "" when the agent declares no model (no
+/// override; the global opencode config applies as-is).
 ///
 /// - baseUrl on the built-in OpenCode Go endpoint → the `opencode-go`
 ///   provider (apiKey rides the OPENCODE_API_KEY env Wardex already sets);
 /// - any other baseUrl → a `wardex-opencode-<host>` custom provider
 ///   (`@ai-sdk/openai-compatible`) with baseURL + apiKey inline;
-/// - each model gets `variants` plus `options` copied from its
-///   defaultVariant, so "no variant picked" behaves exactly like the default
-///   and the ACP effort picker's fallback (first variant) matches it;
-/// - top-level `model` points at the first configured model so a fresh ACP
-///   session starts on it.
+/// - each allowed effort level becomes one variant
+///   `{reasoningEffort, thinking: enabled}`; the default effort's options are
+///   copied into the model's base `options`, so "no variant picked" behaves
+///   exactly like the default and the ACP effort picker's fallback matches;
+/// - top-level `model` points at the agent's model so a fresh ACP session
+///   starts on it.
 pub fn render_opencode_config(agent: &Agent) -> String {
-    if agent.model_configs.is_empty() {
+    let model_id = agent.model.trim();
+    if model_id.is_empty() {
         return String::new();
     }
     let base_url = agent.base_url.trim();
@@ -453,30 +300,29 @@ pub fn render_opencode_config(agent: &Agent) -> String {
         )
     };
 
+    let efforts = effective_efforts(&agent.effort_options);
+    let default_effort = pick_default_effort(&efforts, &agent.default_effort);
+    let mut variants = Map::new();
+    for level in &efforts {
+        variants.insert(
+            (*level).to_string(),
+            Value::Object(Map::from_iter([
+                ("reasoningEffort".into(), Value::String((*level).into())),
+                (
+                    "thinking".into(),
+                    Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])),
+                ),
+            ])),
+        );
+    }
+    let mut model_obj = Map::new();
+    if let Some(def) = variants.get(default_effort) {
+        model_obj.insert("options".to_string(), def.clone());
+    }
+    model_obj.insert("variants".to_string(), Value::Object(variants));
+
     let mut models = Map::new();
-    let mut default_model = String::new();
-    for (model_id, cfg) in &agent.model_configs {
-        if cfg.variants.is_empty() {
-            continue;
-        }
-        let default_variant = if cfg.default_variant.is_empty() {
-            cfg.variants.keys().next().cloned().unwrap_or_default()
-        } else {
-            cfg.default_variant.clone()
-        };
-        let mut model_obj = Map::new();
-        if let Some(def) = cfg.variants.get(&default_variant) {
-            model_obj.insert("options".to_string(), def.clone());
-        }
-        model_obj.insert("variants".to_string(), Value::Object(cfg.variants.clone()));
-        models.insert(model_id.clone(), Value::Object(model_obj));
-        if default_model.is_empty() {
-            default_model = format!("{provider_key}/{model_id}");
-        }
-    }
-    if models.is_empty() {
-        return String::new();
-    }
+    models.insert(model_id.to_string(), Value::Object(model_obj));
 
     let mut prov = Map::new();
     if !builtin_go {
@@ -495,9 +341,7 @@ pub fn render_opencode_config(agent: &Agent) -> String {
 
     let mut root = Map::new();
     root.insert("provider".to_string(), Value::Object(provider));
-    if !default_model.is_empty() {
-        root.insert("model".to_string(), Value::String(default_model));
-    }
+    root.insert("model".to_string(), Value::String(format!("{provider_key}/{model_id}")));
     serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default()
 }
 
@@ -558,17 +402,6 @@ mod tests {
     }
 
     #[test]
-    fn remove_section_deletes_only_target() {
-        let text = "[a]\nx = 1\n\n[models.\"deepseek-v4-flash\"]\nmodel = \"deepseek-v4-flash\"\n\n[b]\ny = 2\n";
-        let out = remove_section(text, "[models.\"deepseek-v4-flash\"]");
-        assert!(!out.contains("deepseek"));
-        assert!(out.contains("[a]\nx = 1"));
-        assert!(out.contains("[b]\ny = 2"));
-        // absent header is a no-op
-        assert_eq!(remove_section(text, "[nope]"), text);
-    }
-
-    #[test]
     fn provider_key_slugs_host() {
         assert_eq!(
             wardex_provider_key("https://opencode.ai/zen/go/v1/chat/completions"),
@@ -578,111 +411,92 @@ mod tests {
     }
 
     #[test]
-    fn sections_for_provider_and_effort_extraction() {
-        let text = "[models.\"glm-5\"]\nprovider = \"wardex-agent-a1\"\nmodel = \"glm-5\"\nsupport_efforts = [ \"low\", \"high\" ]\ndefault_effort = \"high\"\n\n[models.\"qwen3.5-plus\"]\nprovider = \"wardex-agent-b2\"\nmodel = \"qwen3.5-plus\"\n\n[models.\"deepseek-v4-flash\"]\nprovider = \"wardex-agent-a1\"\nmodel = \"deepseek-v4-flash\"\n";
-        let secs = model_sections_for_provider(text, "wardex-agent-a1");
+    fn effective_efforts_fallback_to_all_levels() {
         assert_eq!(
-            secs.iter().map(|(_, a)| a.as_str()).collect::<Vec<_>>(),
-            vec!["glm-5", "deepseek-v4-flash"]
+            effective_efforts(&[]),
+            vec!["low", "medium", "high", "xhigh", "max"]
         );
-        let efforts = extract_effort_lines(text, "[models.\"glm-5\"]");
-        assert!(efforts.contains("support_efforts"));
-        assert!(efforts.contains("default_effort = \"high\""));
-        assert_eq!(extract_effort_lines(text, "[models.\"qwen3.5-plus\"]"), "");
+        assert_eq!(effective_efforts(&["high".to_string(), "low".to_string()]), vec!["high", "low"]);
     }
 
-    /// Serializes the two tests that override the process-wide
-    /// KIMI_CODE_HOME env var (they would race otherwise).
+    #[test]
+    fn pick_default_effort_prefers_allowed() {
+        let all = ["low", "medium", "high"];
+        assert_eq!(pick_default_effort(&all, "medium"), "medium");
+        assert_eq!(pick_default_effort(&all, ""), "low");
+        // a default outside the allowed set falls back to the first
+        assert_eq!(pick_default_effort(&["low".to_string()].iter().map(|s| s.as_str()).collect::<Vec<_>>(), "max"), "low");
+    }
+
+    /// Serializes the tests that override the process-wide KIMI_CODE_HOME env
+    /// var (they would race otherwise).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn agent_with_configs(
-        model_configs: std::collections::BTreeMap<String, crate::store::agents::ModelConfig>,
-    ) -> Agent {
+    fn agent_with_efforts(effort_options: Vec<String>) -> Agent {
         Agent {
             id: "agent-1".to_string(),
             model: "deepseek-v4-flash".to_string(),
             base_url: "https://opencode.ai/zen/go/v1".to_string(),
-            model_configs,
+            effort_options,
             ..Default::default()
         }
     }
 
     #[test]
-    fn render_opencode_empty_configs_yields_nothing() {
-        let agent = agent_with_configs(std::collections::BTreeMap::new());
+    fn render_opencode_no_model_yields_nothing() {
+        let agent = Agent {
+            id: "agent-1".to_string(),
+            model: "".to_string(),
+            ..Default::default()
+        };
         assert_eq!(render_opencode_config(&agent), "");
     }
 
     #[test]
     fn render_opencode_builtin_go_provider() {
-        // max/high/low/off in the intended picker order (default max first)
-        let mut ordered = Map::new();
-        ordered.insert("max".to_string(), Value::Object({
-            let mut v = Map::new();
-            v.insert("reasoningEffort".into(), Value::String("max".into()));
-            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])));
-            v
-        }));
-        ordered.insert("high".to_string(), Value::Object({
-            let mut v = Map::new();
-            v.insert("reasoningEffort".into(), Value::String("high".into()));
-            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])));
-            v
-        }));
-        ordered.insert("low".to_string(), Value::Object({
-            let mut v = Map::new();
-            v.insert("reasoningEffort".into(), Value::String("low".into()));
-            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])));
-            v
-        }));
-        ordered.insert("off".to_string(), Value::Object({
-            let mut v = Map::new();
-            v.insert("thinking".into(), Value::Object(Map::from_iter([("type".into(), Value::String("disabled".into()))])));
-            v
-        }));
-        let cfg = crate::store::agents::ModelConfig {
-            default_variant: "max".to_string(),
-            variants: ordered,
-        };
-        let mut configs = std::collections::BTreeMap::new();
-        configs.insert("deepseek-v4-flash".to_string(), cfg);
-
-        let agent = agent_with_configs(configs);
+        // Selected levels drive the variants (default = max, the first)
+        let agent = agent_with_efforts(vec![
+            "max".to_string(),
+            "high".to_string(),
+            "low".to_string(),
+        ]);
         let out = render_opencode_config(&agent);
         let doc: Value = serde_json::from_str(&out).expect("valid json");
         assert_eq!(doc["model"], "opencode-go/deepseek-v4-flash");
         let model = &doc["provider"]["opencode-go"]["models"]["deepseek-v4-flash"];
         assert!(model.get("options").is_some());
         assert_eq!(model["options"]["reasoningEffort"], "max");
-        assert_eq!(model["variants"]["off"]["thinking"]["type"], "disabled");
-        assert_eq!(model["variants"]["max"]["reasoningEffort"], "max");
-        // max is the first key (picker default fallback)
-        let first = model["variants"].as_object().unwrap().keys().next().unwrap();
+        assert_eq!(model["options"]["thinking"]["type"], "enabled");
+        assert_eq!(model["variants"]["high"]["reasoningEffort"], "high");
+        // only the selected levels exist — no off variant, no xhigh
+        let variants = model["variants"].as_object().unwrap();
+        assert_eq!(variants.len(), 3);
+        assert!(variants.get("off").is_none());
+        assert!(variants.get("xhigh").is_none());
+        // max is the default (agent.default_effort is empty -> first level)
+        let first = variants.keys().next().unwrap();
         assert_eq!(first, "max");
     }
 
     #[test]
+    fn render_opencode_empty_efforts_falls_back_to_all() {
+        let agent = agent_with_efforts(vec![]);
+        let doc: Value = serde_json::from_str(&render_opencode_config(&agent)).expect("valid json");
+        let variants = doc["provider"]["opencode-go"]["models"]["deepseek-v4-flash"]["variants"]
+            .as_object()
+            .unwrap();
+        assert_eq!(variants.len(), EFFORT_LEVELS.len());
+        assert!(variants.contains_key("xhigh"));
+    }
+
+    #[test]
     fn render_opencode_custom_provider_inlines_credentials() {
-        let mut configs = std::collections::BTreeMap::new();
-        let mut v = Map::new();
-        v.insert("reasoningEffort".into(), Value::String("high".into()));
-        v.insert(
-            "thinking".into(),
-            Value::Object(Map::from_iter([("type".into(), Value::String("enabled".into()))])),
-        );
-        configs.insert(
-            "glm-5".to_string(),
-            crate::store::agents::ModelConfig {
-                default_variant: "high".to_string(),
-                variants: Map::from_iter([("high".to_string(), Value::Object(v))]),
-            },
-        );
         let agent = Agent {
             id: "agent-2".to_string(),
             model: "glm-5".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: "sk-test".to_string(),
-            model_configs: configs,
+            effort_options: vec!["high".to_string()],
             ..Default::default()
         };
         let doc: Value = serde_json::from_str(&render_opencode_config(&agent)).expect("valid json");
@@ -691,6 +505,12 @@ mod tests {
         assert_eq!(prov["options"]["baseURL"], "https://api.example.com/v1");
         assert_eq!(prov["options"]["apiKey"], "sk-test");
         assert_eq!(doc["model"], "wardex-opencode-api-example-com/glm-5");
+        // default_effort empty -> the single selected level is the default
+        assert_eq!(
+            doc["provider"]["wardex-opencode-api-example-com"]["models"]["glm-5"]["options"]
+                ["reasoningEffort"],
+            "high"
+        );
     }
 
     #[test]
@@ -699,80 +519,82 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wardex-opencode-cfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let paths = Paths::new(dir.clone());
-        let agent = agent_with_configs(std::collections::BTreeMap::new());
-        // no configs -> no file, returns None
+        let agent = Agent {
+            id: "agent-1".to_string(),
+            model: "".to_string(),
+            ..Default::default()
+        };
+        // no model -> no file, returns None
         let r = write_opencode_config(&paths, &agent).unwrap();
         assert!(r.is_none());
-        // with configs -> file written, path returned
-        let mut v = Map::new();
-        v.insert("reasoningEffort".into(), Value::String("max".into()));
+        // with a model -> file written, path returned
         let mut agent = agent;
-        agent.model_configs = std::collections::BTreeMap::from_iter([(
-            "deepseek-v4-flash".to_string(),
-            crate::store::agents::ModelConfig {
-                default_variant: "max".to_string(),
-                variants: Map::from_iter([("max".to_string(), Value::Object(v))]),
-            },
-        )]);
+        agent.model = "deepseek-v4-flash".to_string();
         let r = write_opencode_config(&paths, &agent).unwrap().expect("path");
         assert!(r.exists());
         assert!(r.to_string_lossy().contains("agent-1.json"));
-        // clearing configs removes the stale file
-        agent.model_configs = std::collections::BTreeMap::new();
+        // clearing the model removes the stale file
+        agent.model = "".to_string();
         let r = write_opencode_config(&paths, &agent).unwrap();
         assert!(r.is_none());
         assert!(!paths.opencode_config_file_path("agent-1").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
     #[test]
-    fn sync_agent_models_full_cleans_other_wardex_namespaces() {
+    fn sync_kimi_effort_model_writes_selected_efforts() {
         let _guard = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("wardex-sync-clean-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("wardex-effort-sync-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Safety: test-local override of the config path root.
         unsafe { std::env::set_var("KIMI_CODE_HOME", &dir) };
-        let seed = "default_model = \"kimi-code/k3\"\n\n[providers.\"managed:kimi-code\"]\ntype = \"kimi\"\n\n[models.\"kimi-code/k3\"]\nprovider = \"managed:kimi-code\"\nmodel = \"k3\"\n\n[providers.wardex-opencode-ai]\ntype = \"openai\"\n\n[models.\"old-model\"]\nprovider = \"wardex-opencode-ai\"\nmodel = \"old-model\"\n\n[models.\"glm-5\"]\nprovider = \"wardex-agent-b2\"\nmodel = \"glm-5\"\ndefault_effort = \"max\"\n";
-        std::fs::write(dir.join("config.toml"), seed).unwrap();
-        let ids = vec!["glm-5".to_string()];
-        sync_agent_models("a1", "https://x.test/v1", "sk-k", &ids, 256).unwrap();
+        sync_kimi_effort_model(
+            "deepseek-v4-flash",
+            "https://x.test/v1",
+            "sk-k",
+            &["high".to_string(), "low".to_string()],
+            "",
+            256,
+        )
+        .unwrap();
         let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        // kimi's own sections survive; every wardex-* namespace is gone
-        assert!(text.contains("[providers.\"managed:kimi-code\"]"));
-        assert!(text.contains("[models.\"kimi-code/k3\"]"));
-        assert!(!text.contains("wardex-opencode-ai"));
-        assert!(!text.contains("old-model"));
-        assert!(!text.contains("wardex-agent-b2"));
-        // only this refresh's set is written back…
-        assert!(text.contains("[providers.wardex-agent-a1]"));
-        assert!(text.contains("[models.\"glm-5\"]"));
-        // …with effort lines captured before the clean preserved
-        assert!(text.contains("default_effort = \"max\""));
-        unsafe { std::env::remove_var("KIMI_CODE_HOME") };
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn sync_agent_models_writes_namespace_and_prunes() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("wardex-sync-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Safety: test-local override of the config path root.
-        unsafe { std::env::set_var("KIMI_CODE_HOME", &dir) };
-        let ids = vec!["glm-5".to_string(), "deepseek-v4-flash".to_string()];
-        let n = sync_agent_models("a1", "https://x.test/v1", "sk-k", &ids, 256).unwrap();
-        assert_eq!(n, 2);
-        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        assert!(text.contains("[providers.wardex-agent-a1]"));
-        assert!(text.contains("max_context_size = 262144"));
-        assert!(text.contains("[models.\"glm-5\"]"));
-        // second sync with a shorter list prunes glm-5
-        let n = sync_agent_models("a1", "https://x.test/v1", "sk-k", &ids[1..], 256).unwrap();
-        assert_eq!(n, 1);
-        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
-        assert!(!text.contains("[models.\"glm-5\"]"));
+        assert!(text.contains("[providers.wardex-x-test]"));
         assert!(text.contains("[models.\"deepseek-v4-flash\"]"));
+        assert!(text.contains("support_efforts = [ \"high\", \"low\" ]"));
+        assert!(text.contains("default_effort = \"high\""));
+        assert!(text.contains("max_context_size = 262144"));
+        // empty selection = every level, default falls back to the first
+        sync_kimi_effort_model(
+            "deepseek-v4-flash",
+            "https://x.test/v1",
+            "sk-k",
+            &[],
+            "",
+            256,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(text.contains(&format!(
+            "support_efforts = [ {} ]",
+            EFFORT_LEVELS
+                .iter()
+                .map(|e| format!("\"{e}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+        // a default not among the selected levels falls back to the first
+        sync_kimi_effort_model(
+            "deepseek-v4-flash",
+            "https://x.test/v1",
+            "sk-k",
+            &["low".to_string()],
+            "max",
+            256,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(text.contains("support_efforts = [ \"low\" ]"));
+        assert!(text.contains("default_effort = \"low\""));
         unsafe { std::env::remove_var("KIMI_CODE_HOME") };
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -784,7 +606,9 @@ mod tests {
             "deepseek-v4-flash",
             "wardex-opencode-ai",
             "deepseek-v4-flash",
+            &["high", "low"],
             "high",
+            262144,
         );
         let doc = format!("{p}\n\n{m}\n").parse::<toml::Value>().expect("valid toml");
         let models = doc.get("models").and_then(|m| m.as_table()).unwrap();
@@ -798,7 +622,7 @@ mod tests {
                 .get("support_efforts")
                 .and_then(|v| v.as_array())
                 .map(|a| a.len()),
-            Some(EFFORT_LEVELS.len())
+            Some(2)
         );
         let providers = doc.get("providers").and_then(|p| p.as_table()).unwrap();
         let prov = providers.get("wardex-opencode-ai").unwrap();

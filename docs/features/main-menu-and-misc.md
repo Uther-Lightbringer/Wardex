@@ -10,8 +10,8 @@
 
 - 五个页面状态：`main | config | sessionSelect | chat | todo`，同一时间只显示一页。
 - 窗口固定有左右两条"铁轨"边框（`frame_edge_left/right.png`），页面内容区嵌入铁轨之间（见 [../ui-design.md](../ui-design.md)）。
-- 页面切换动画：内容壳三段式下落入场（`ShellFrame.qml`，总时长 **750ms**：prepareEnter → playEnterDrop → snapContentIn）。
-- 音画时序：切页播放 `popUp`/`popDown` 音效；**`popUp`（可闻 1280ms）未放完时不允许开始下拉动画**，队列等待（Main.qml 的 popUpGapMs 逻辑，必须保留）。
+- 页面切换动画：内容壳三段式下落入场（`ShellFrame.qml`，总时长 **450ms**：prepareEnter → playEnterDrop → snapContentIn；已比原版 750ms 提速）。
+- 音画时序：切页播放 `popUp`/`popDown` 音效；**`popUp` 未放到 950ms 闸门（`DROP_GATE_MS`，原可闻 1280ms）时不允许开始下拉动画**，队列等待（Main.qml 的 popUpGapMs 逻辑，必须保留；闸门已随动画提速调短）。
 - 页面用缓存 Loader 预热（新版：Vue 组件 `<keep-alive>` 等价）。
 - 切页期间 `uiGate.busy = true`，禁用所有按钮输入（全局输入闸门，见 §6）。
 

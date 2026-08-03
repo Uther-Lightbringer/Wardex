@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::acp::events::TurnUsage;
 use crate::store::json::{de_ms_i64, now_ms, write_value_atomic, JsonError};
 use crate::store::paths::Paths;
+use crate::store::sessions::MessageRow;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UsageError {
@@ -58,6 +59,18 @@ impl UsageRecord {
             cached_read_tokens: usage.cached_read_tokens,
             cached_write_tokens: usage.cached_write_tokens,
             thought_tokens: usage.thought_tokens,
+        }
+    }
+
+    /// 记录 → 回合用量（回填挂到消息行的字段形状与实时 usage 一致）。
+    pub fn to_turn_usage(&self) -> TurnUsage {
+        TurnUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            total_tokens: self.total_tokens,
+            cached_read_tokens: self.cached_read_tokens,
+            cached_write_tokens: self.cached_write_tokens,
+            thought_tokens: self.thought_tokens,
         }
     }
 }
@@ -282,6 +295,85 @@ impl UsageStore {
     }
 }
 
+/// 把 usage.json 里该会话的回填记录按时间归组挂到 messages.jsonl 中缺失
+/// usage 的 assistant 行上。
+///
+/// 背景：usage_backfill 只把上线前的历史回合写进 usage.json（用量页/会话
+/// 信息面板聚合用），messages.jsonl 里旧回合的行没有 usage 字段，气泡头部
+/// 的 ↑↓ 用量因此不显示。这里在读取（session_messages）时做一次非破坏性
+/// 合并，规则：
+/// - 行 created_at = 回合开始、记录 ts = 回合结束，故一回合的记录 ts 恒在
+///   [本行 created_at, 下一行 created_at) 内 —— 记录归到「created_at ≤ ts」
+///   的最后一个 assistant 行就是它所在回合的行，无需时间窗口。
+/// - 同一回合的多条记录（工具循环里多次 LLM 调用，claude/opencode 档案
+///   逐次记录）叠加成该回合的总用量，避免只采到一次调用。
+/// - 已有 usage 的行（新回合实时记录）不覆盖，其记录因归到它名下而被
+///   跳过，不重复计入。
+/// 不做任何磁盘回写，重开会话即自愈；user/command 等行不挂。
+pub fn attach_usage_backfill(rows: &mut [MessageRow], usage: &UsageStore, session_id: &str) {
+    let mut recs: Vec<&UsageRecord> = usage
+        .records()
+        .iter()
+        .filter(|r| r.session_id == session_id)
+        .collect();
+    if recs.is_empty() {
+        return;
+    }
+    recs.sort_by_key(|r| r.ts);
+    // assistant 行下标（created_at 递增）；has_usage 的行只用于定位回合，
+    // 不接收回填记录。
+    let assistants: Vec<(usize, i64, bool)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.role == "assistant")
+        .map(|(i, r)| (i, r.created_at, r.usage.is_some()))
+        .collect();
+    if assistants.is_empty() {
+        return;
+    }
+    let mut sums: Vec<(usize, TurnUsage)> = Vec::new();
+    for rec in &recs {
+        let Some(&(idx, _, has_usage)) = assistants
+            .iter()
+            .rev()
+            .find(|&&(_, created, _)| created <= rec.ts)
+        else {
+            continue; // 早于第一个 assistant 行：无主记录，忽略
+        };
+        if has_usage {
+            continue; // 实时回合已计入，回填记录不重复
+        }
+        match sums.iter_mut().find(|(i, _)| *i == idx) {
+            Some((_, u)) => u.add_from(rec),
+            None => sums.push((idx, rec.to_turn_usage())),
+        }
+    }
+    for (idx, u) in sums {
+        rows[idx].usage = Some(u);
+    }
+}
+
+impl TurnUsage {
+    /// 把一条回填记录累加进回合总用量（同一回合多次 LLM 调用求和）。
+    fn add_from(&mut self, rec: &UsageRecord) {
+        self.input_tokens += rec.input_tokens;
+        self.output_tokens += rec.output_tokens;
+        self.total_tokens += rec.total_tokens;
+        self.cached_read_tokens = opt_add(self.cached_read_tokens, rec.cached_read_tokens);
+        self.cached_write_tokens = opt_add(self.cached_write_tokens, rec.cached_write_tokens);
+        self.thought_tokens = opt_add(self.thought_tokens, rec.thought_tokens);
+    }
+}
+
+fn opt_add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +441,135 @@ mod tests {
         assert_eq!(v.context_tokens, 150);
 
         assert!(store.for_session("nope").is_none());
+    }
+
+    #[test]
+    fn attach_usage_backfill_matches_chronological_rows() {
+        let mut store = UsageStore::default();
+        let mut r1 = rec("s1", "a1", "Kimi", "k2", 100);
+        r1.ts = 10_000;
+        let mut r2 = rec("s1", "a1", "Kimi", "k2", 300);
+        r2.ts = 20_000;
+        store.records.extend([r1, r2]);
+
+        let row = |role: &str, created: i64, usage: bool| MessageRow {
+            id: format!("{role}-{created}"),
+            role: role.into(),
+            created_at: created,
+            usage: usage.then_some(TurnUsage::default()),
+            ..Default::default()
+        };
+        // 回合1（无 usage 行）→ 回合2（无 usage 行）→ 已有 usage 的行。
+        let mut rows = vec![
+            row("user", 9_000, false),
+            row("assistant", 9_100, false),
+            row("user", 19_000, false),
+            row("assistant", 19_100, false),
+            row("assistant", 25_000, true),
+        ];
+        attach_usage_backfill(&mut rows, &store, "s1");
+        assert_eq!(rows[1].usage.as_ref().map(|u| u.total_tokens), Some(100));
+        assert_eq!(rows[3].usage.as_ref().map(|u| u.total_tokens), Some(300));
+        assert_eq!(
+            rows[4].usage.as_ref().map(|u| u.total_tokens),
+            Some(0),
+            "已有 usage 的行不覆盖"
+        );
+        // 别的会话的记录不串。
+        attach_usage_backfill(&mut rows, &store, "other");
+        assert_eq!(rows[1].usage.as_ref().map(|u| u.total_tokens), Some(100));
+        assert_eq!(rows[3].usage.as_ref().map(|u| u.total_tokens), Some(300));
+    }
+
+    #[test]
+    fn attach_usage_backfill_sums_tool_loop_records_into_one_turn() {
+        // 一个回合内多次 LLM 调用（claude/opencode 档案逐次记录）：
+        // 挂同一行时叠加，而不是只采最近一条。
+        let mut store = UsageStore::default();
+        for (ts, total) in [(10_000u64, 100u64), (10_200, 200), (10_400, 50)] {
+            let mut r = rec("s1", "a1", "Kimi", "k2", total);
+            r.ts = ts as i64;
+            store.records.push(r);
+        }
+        let mut rows = vec![MessageRow {
+            id: "a1".into(),
+            role: "assistant".into(),
+            created_at: 9_900,
+            ..Default::default()
+        }];
+        attach_usage_backfill(&mut rows, &store, "s1");
+        let u = rows[0].usage.as_ref().expect("usage attached");
+        assert_eq!(u.total_tokens, 100 + 200 + 50, "同回合记录求和");
+        assert_eq!(u.input_tokens, 50 + 100 + 25);
+        assert_eq!(u.output_tokens, 50 + 100 + 25);
+    }
+
+    #[test]
+    fn attach_usage_backfill_partial_session_skips_live_rows() {
+        // 功能上线中点：前两回合是历史（无 usage，回填记录），后两回合是
+        // 实时（已有 usage）。实时行的记录必须跳过，不能串到前面的历史行。
+        let mut store = UsageStore::default();
+        let mut r1 = rec("s1", "a1", "Kimi", "k2", 100);
+        r1.ts = 10_000;
+        let mut r2 = rec("s1", "a1", "Kimi", "k2", 200);
+        r2.ts = 30_000;
+        let mut r3 = rec("s1", "a1", "Kimi", "k2", 999);
+        r3.ts = 40_000; // 实时回合 1 的记录
+        let mut r4 = rec("s1", "a1", "Kimi", "k2", 888);
+        r4.ts = 60_000; // 实时回合 2 的记录
+        store.records.extend([r1, r2, r3, r4]);
+
+        let row = |role: &str, created: i64, usage: bool| MessageRow {
+            id: format!("{role}-{created}"),
+            role: role.into(),
+            created_at: created,
+            usage: usage.then_some(TurnUsage {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_tokens: 3,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut rows = vec![
+            row("user", 9_000, false),
+            row("assistant", 9_100, false),
+            row("user", 29_000, false),
+            row("assistant", 29_100, false),
+            row("user", 39_000, false),
+            row("assistant", 39_100, true),
+            row("user", 59_000, false),
+            row("assistant", 59_100, true),
+        ];
+        attach_usage_backfill(&mut rows, &store, "s1");
+        assert_eq!(rows[1].usage.as_ref().map(|u| u.total_tokens), Some(100));
+        assert_eq!(rows[3].usage.as_ref().map(|u| u.total_tokens), Some(200));
+        assert_eq!(rows[5].usage.as_ref().map(|u| u.total_tokens), Some(3), "实时行保留原值");
+        assert_eq!(rows[7].usage.as_ref().map(|u| u.total_tokens), Some(3), "实时行保留原值");
+    }
+
+    #[test]
+    fn attach_usage_backfill_skips_user_rows_and_other_sessions() {
+        let mut store = UsageStore::default();
+        let mut r = rec("s1", "a1", "Kimi", "k2", 7);
+        r.ts = 50_000;
+        store.records.push(r);
+        let mut rows = vec![
+            MessageRow {
+                id: "u1".into(),
+                role: "user".into(),
+                created_at: 49_000,
+                ..Default::default()
+            },
+            MessageRow {
+                id: "a1".into(),
+                role: "assistant".into(),
+                created_at: 49_100,
+                ..Default::default()
+            },
+        ];
+        attach_usage_backfill(&mut rows, &store, "s1");
+        assert!(rows[0].usage.is_none(), "user 行不挂");
+        assert_eq!(rows[1].usage.as_ref().map(|u| u.total_tokens), Some(7));
     }
 }

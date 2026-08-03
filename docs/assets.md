@@ -88,7 +88,7 @@
 | 文件 | 事件 | 说明 |
 |---|---|---|
 | `Sound/BigButtonClick.wav` | `click` | WarButton 点击 |
-| `Sound/RightGlueScreenPopUp.wav` | `popUp` | 面板拉起，可闻长度 **1280ms**，音画时序以其为准 |
+| `Sound/RightGlueScreenPopUp.wav` | `popUp` | 面板拉起，可闻长度 **1280ms**（切页闸门按提速后的 `DROP_GATE_MS = 950ms` 计，见 ui-design.md §5.6） |
 | `Sound/RightGlueScreenPopDown.wav` | `popDown` | 面板降下 |
 
 播放规则：同名 200ms 节流、播新停旧、启动预载（详见 ui-design.md §音效 与 features/main-menu-and-misc.md）。

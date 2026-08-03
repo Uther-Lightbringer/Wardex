@@ -124,18 +124,29 @@ function onAgentPick(i: number): void {
 }
 
 // ---- title row: thinking-effort dropdown (ACP configOptions) ----
-// Shown only when the CLI advertised a thinking picker for this session.
-// kimi reports `id:"thinking"` (support_efforts decide the choices — e.g.
-// deepseek-reasoner exposes on/off style levels); opencode reports
-// `id:"effort"` (its model variants). Other ACP CLIs that advertise
-// neither simply never see the dropdown.
+// 强度候选 = 该 Agent 配置页勾选的 effortOptions（空 = 全部档位），再与
+// CLI 实际声明的 picker 选项取交集：只显示配置的档位，且选择一定生效。
+// kimi 报告 `id:"thinking"`（support_efforts 决定选项）；opencode 报告
+// `id:"effort"`（其 model variants）。其他 ACP CLI 既不声明也不显示。
 const thinkingOpt = computed(() =>
   chat.configOptions.find((o) => o.id === 'thinking' || o.id === 'effort'),
 );
-const thinkingOptions = computed(() => (thinkingOpt.value?.options ?? []).map((o) => o.name));
-const thinkingIndex = computed(() =>
-  (thinkingOpt.value?.options ?? []).findIndex((o) => o.value === thinkingOpt.value?.currentValue),
+const curAgentId = computed(
+  () => chat.meta?.agentId ?? sessions.runtimeStates[chat.sessionId]?.agentId ?? '',
 );
+const curAgent = computed(() => agentsStore.byId(curAgentId.value));
+const thinkingOptions = computed(() => {
+  const opts = thinkingOpt.value?.options ?? [];
+  const effs = curAgent.value?.effortOptions ?? [];
+  if (effs.length === 0) return opts.map((o) => o.name);
+  const allow = new Set(effs);
+  return opts.filter((o) => allow.has(o.value)).map((o) => o.name);
+});
+const thinkingIndex = computed(() => {
+  const opts = thinkingOpt.value?.options ?? [];
+  const cur = thinkingOpt.value?.currentValue ?? '';
+  return opts.findIndex((o) => o.value === cur);
+});
 const thinkingDisplay = computed(() => {
   const cur = thinkingOpt.value?.options.find((o) => o.value === thinkingOpt.value?.currentValue);
   return `思考 ${cur?.name ?? thinkingOpt.value?.currentValue ?? ''}`;
@@ -145,64 +156,6 @@ function onThinkingPick(i: number): void {
   const o = thinkingOpt.value?.options[i];
   if (!o || o.value === thinkingOpt.value?.currentValue) return;
   void chat.setConfigOption(thinkingOpt.value?.id ?? 'thinking', o.value);
-}
-
-// ---- title row: model dropdown (ACP configOptions "model" picker +
-// per-agent endpoint models) ----
-// The CLI-advertised picker only lists config.toml aliases; when the agent
-// has its own baseUrl we merge in the endpoint's /models list so every model
-// the endpoint supports is selectable. Picker values switch live via
-// setConfigOption; endpoint-only values go through set_session_model, which
-// persists the choice onto the agent and respawns the CLI with KIMI_MODEL_*.
-const modelOpt = computed(() => chat.configOptions.find((o) => o.id === 'model'));
-
-const curAgentId = computed(
-  () => chat.meta?.agentId ?? sessions.runtimeStates[chat.sessionId]?.agentId ?? '',
-);
-const curAgent = computed(() => agentsStore.byId(curAgentId.value));
-
-const endpointModels = computed(() => agentsStore.modelsByAgent[curAgentId.value] ?? []);
-// Cache-first: the dropdown renders the cached list instantly; the store
-// revalidates in the background (single-flight, failure keeps the cache).
-watch(
-  () => [curAgentId.value, curAgent.value?.baseUrl ?? ''] as const,
-  ([id]) => {
-    if (id) void agentsStore.ensureEndpointModels(id);
-  },
-  { immediate: true },
-);
-
-/** Unified entries: ACP picker options first, then endpoint-only ids. */
-const modelEntries = computed(() => {
-  const out = (modelOpt.value?.options ?? []).map((o) => ({ name: o.name, value: o.value }));
-  for (const id of endpointModels.value) {
-    if (!out.some((e) => e.value === id)) out.push({ name: id, value: id });
-  }
-  // Keep the agent's configured model visible even if both sources miss it
-  // (e.g. the endpoint /models fetch failed).
-  const cur = curAgent.value?.model.trim() ?? '';
-  if (cur && !out.some((e) => e.value === cur)) out.push({ name: cur, value: cur });
-  return out;
-});
-const modelOptions = computed(() => modelEntries.value.map((e) => e.name));
-const modelIndex = computed(() => {
-  const cur = modelOpt.value?.currentValue || curAgent.value?.model.trim() || '';
-  return modelEntries.value.findIndex((e) => e.value === cur);
-});
-const modelDisplay = computed(() => {
-  const cur = modelEntries.value[modelIndex.value];
-  return `模型 ${cur?.name ?? modelOpt.value?.currentValue ?? curAgent.value?.model ?? ''}`;
-});
-
-function onModelPick(i: number): void {
-  const e = modelEntries.value[i];
-  if (!e || i === modelIndex.value) return;
-  const inPicker = (modelOpt.value?.options ?? []).some((o) => o.value === e.value);
-  if (inPicker) {
-    void chat.setConfigOption('model', e.value);
-  } else {
-    void chat.setSessionModel(e.value).then(() => agentsStore.refresh());
-  }
 }
 
 // ---- action bay: 刷新工作区 / 停止生成 dual state (§6.4, §8) ----
@@ -226,11 +179,140 @@ const sessionUsage = computed(() => {
   if (input === 0 && output === 0) return '';
   return `本会话 ↑${formatTokens(input)} ↓${formatTokens(output)}`;
 });
+
+// ---- 铁框尺寸：输入框高度 / 操作台宽高，鼠标拖拽改 (0 = 响应式默认) ----
+// 三个维度各自独立拖拽，主面板 flex:1 自动吸收剩余空间；拖拽中只改本地
+// prefs（不落盘），松手持久化一次，双击恢复默认。与铁轨宽度同一套路。
+// 边界与后端 prefs.rs 的 clamp 保持一致：太小不可用，太大挤没主面板。
+const COMPOSER_H_MIN = 100;
+const COMPOSER_H_MAX = 360;
+const BAY_W_MIN = 180;
+const BAY_W_MAX = 480;
+const BAY_H_MIN = 100;
+const BAY_H_MAX = 360;
+
+const composerHeight = computed(() =>
+  prefs.composerHeight > 0 ? prefs.composerHeight + 'px' : 'clamp(124px, 19%, 240px)',
+);
+const gridRows = computed(() =>
+  prefs.actionBayHeight > 0
+    ? `1fr ${prefs.actionBayHeight}px`
+    : '1fr max(124px, min(max(190px, 18.5%), calc(100% - 248px)))',
+);
+const actionBayWidth = computed(() => (prefs.actionBayWidth > 0 ? prefs.actionBayWidth : 354));
+
+const composerWrap = ref<HTMLElement | null>(null);
+const bayWrap = ref<HTMLElement | null>(null);
+
+// 输入框高度（上缘手柄，row-resize）：向上拖变高。
+const composerDrag = ref(false);
+let composerStartY = 0;
+let composerStartH = 0;
+
+function onComposerResizeDown(e: PointerEvent): void {
+  composerDrag.value = true;
+  composerStartY = e.clientY;
+  composerStartH =
+    prefs.composerHeight > 0
+      ? prefs.composerHeight
+      : (composerWrap.value?.getBoundingClientRect().height ?? 124);
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+}
+
+function onComposerResizeMove(e: PointerEvent): void {
+  if (!composerDrag.value) return;
+  const h = Math.min(
+    COMPOSER_H_MAX,
+    Math.max(COMPOSER_H_MIN, Math.round(composerStartH - (e.clientY - composerStartY))),
+  );
+  if (h !== prefs.composerHeight) prefs.setComposerHeightLocal(h);
+}
+
+function onComposerResizeUp(): void {
+  if (!composerDrag.value) return;
+  composerDrag.value = false;
+  void prefs.setComposerHeight(prefs.composerHeight);
+}
+
+function onComposerResizeReset(): void {
+  prefs.setComposerHeightLocal(0);
+  void prefs.setComposerHeight(0);
+}
+
+// 操作台宽度（左缘手柄，col-resize）：向左拖变宽。
+const bayDragW = ref(false);
+let bayStartX = 0;
+let bayStartW = 0;
+
+function onBayResizeDownX(e: PointerEvent): void {
+  bayDragW.value = true;
+  bayStartX = e.clientX;
+  bayStartW = actionBayWidth.value;
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+}
+
+function onBayResizeMoveX(e: PointerEvent): void {
+  if (!bayDragW.value) return;
+  const w = Math.min(
+    BAY_W_MAX,
+    Math.max(BAY_W_MIN, Math.round(bayStartW - (e.clientX - bayStartX))),
+  );
+  if (w !== prefs.actionBayWidth) prefs.setActionBayWidthLocal(w);
+}
+
+function onBayResizeUpX(): void {
+  if (!bayDragW.value) return;
+  bayDragW.value = false;
+  void prefs.setActionBayWidth(prefs.actionBayWidth);
+}
+
+function onBayResizeResetX(): void {
+  prefs.setActionBayWidthLocal(0);
+  void prefs.setActionBayWidth(0);
+}
+
+// 操作台高度（上缘手柄，row-resize）：向上拖变高。
+const bayDragH = ref(false);
+let bayStartY = 0;
+let bayStartH = 0;
+
+function onBayResizeDownY(e: PointerEvent): void {
+  bayDragH.value = true;
+  bayStartY = e.clientY;
+  bayStartH =
+    prefs.actionBayHeight > 0
+      ? prefs.actionBayHeight
+      : (bayWrap.value?.getBoundingClientRect().height ?? 190);
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+}
+
+function onBayResizeMoveY(e: PointerEvent): void {
+  if (!bayDragH.value) return;
+  const h = Math.min(
+    BAY_H_MAX,
+    Math.max(BAY_H_MIN, Math.round(bayStartH - (e.clientY - bayStartY))),
+  );
+  if (h !== prefs.actionBayHeight) prefs.setActionBayHeightLocal(h);
+}
+
+function onBayResizeUpY(): void {
+  if (!bayDragH.value) return;
+  bayDragH.value = false;
+  void prefs.setActionBayHeight(prefs.actionBayHeight);
+}
+
+function onBayResizeResetY(): void {
+  prefs.setActionBayHeightLocal(0);
+  void prefs.setActionBayHeight(0);
+}
 </script>
 
 <template>
   <PageShell :embed="34">
-    <div class="chat" :style="{ gridTemplateColumns: prefs.railWidth + 'px 1fr auto' }">
+    <div
+      class="chat"
+      :style="{ gridTemplateColumns: prefs.railWidth + 'px 1fr auto', gridTemplateRows: gridRows }"
+    >
       <!-- far left: sessions of this project -->
       <WarFrame
         class="chat__rail"
@@ -280,7 +362,7 @@ const sessionUsage = computed(() => {
           </div>
         </WarFrame>
 
-        <!-- dropdown row above the composer: Agent → 模型 → 思考 -->
+        <!-- dropdown row above the composer: Agent → 思考（模型只读展示在右侧会话信息面板） -->
         <div v-if="chat.sessionId" class="chat__dd-row">
           <WarDropdown
             class="chat__agent-dd"
@@ -292,18 +374,7 @@ const sessionUsage = computed(() => {
             @update:model-value="onAgentPick"
           />
           <WarDropdown
-            v-if="modelEntries.length > 0"
-            class="chat__model-dd"
-            :options="modelOptions"
-            :model-value="modelIndex"
-            :display-text="modelDisplay"
-            :text-size="prefs.fs(12)"
-            filterable
-            drop-up
-            @update:model-value="onModelPick"
-          />
-          <WarDropdown
-            v-if="thinkingOpt"
+            v-if="thinkingOpt && thinkingOptions.length > 0"
             class="chat__thinking-dd"
             :options="thinkingOptions"
             :model-value="thinkingIndex"
@@ -314,20 +385,36 @@ const sessionUsage = computed(() => {
           />
         </div>
 
-        <WarFrame
-          class="chat__input"
-          src="/assets/ui/frames/frame_iron_bar.png"
-          :slice="[62, 110, 70, 108]"
-          :hole="[22, 24, 21, 24]"
-          :content-left-extra="4"
-          :content-right-extra="4"
-        >
-          <Composer />
-        </WarFrame>
+        <div ref="composerWrap" class="chat__composer-wrap" :style="{ height: composerHeight }">
+          <div
+            class="chat__composer-grip"
+            :class="{ active: composerDrag }"
+            title="拖动调整输入框高度（100~360px，双击恢复默认）"
+            @pointerdown="onComposerResizeDown"
+            @pointermove="onComposerResizeMove"
+            @pointerup="onComposerResizeUp"
+            @pointercancel="onComposerResizeUp"
+            @dblclick="onComposerResizeReset"
+          >
+            <span></span><span></span><span></span>
+          </div>
+          <WarFrame
+            class="chat__input"
+            src="/assets/ui/frames/frame_iron_bar.png"
+            :slice="[62, 110, 70, 108]"
+            :hole="[22, 24, 21, 24]"
+            :content-left-extra="4"
+            :content-right-extra="4"
+          >
+            <Composer />
+          </WarFrame>
+        </div>
 
-        <!-- floating stack above the composer (never squeezes its height) -->
-        <div class="chat__float">
-          <QuoteBar />
+        <!-- floating stack above the composer (never squeezes its height).
+             QuoteBar hugs the LEFT edge so the dropdown popups in the dd-row
+             above stay clear -->
+        <div class="chat__float" :style="{ bottom: 'calc(' + composerHeight + ' + 6px)' }">
+          <QuoteBar class="chat__quote" />
           <AttachmentBar />
           <SubagentPanel />
           <QueuePanel />
@@ -346,29 +433,55 @@ const sessionUsage = computed(() => {
       </div>
 
       <!-- bottom right: action bay -->
-      <WarFrame
-        class="chat__actions"
-        src="/assets/ui/frames/frame_iron_bar.png"
-        :slice="[62, 110, 70, 108]"
-        :hole="[22, 24, 21, 24]"
-      >
-        <div ref="actionBay" class="chat__actions-col">
-          <WarButton
-            :width="actionBtnW"
-            :text="chat.status.busy ? '停止生成' : '刷新工作区(R)'"
-            shortcut-key="R"
-            :shortcut-active="nav.page === 'chat'"
-            @activated="onRefreshOrStop"
-          />
-          <WarButton
-            :width="actionBtnW"
-            text="返回(B)"
-            shortcut-key="B"
-            :shortcut-active="nav.page === 'chat'"
-            @activated="nav.goMain()"
-          />
+      <div ref="bayWrap" class="chat__actions-wrap" :style="{ width: actionBayWidth + 'px' }">
+        <WarFrame
+          class="chat__actions"
+          src="/assets/ui/frames/frame_iron_bar.png"
+          :slice="[62, 110, 70, 108]"
+          :hole="[22, 24, 21, 24]"
+        >
+          <div ref="actionBay" class="chat__actions-col">
+            <WarButton
+              :width="actionBtnW"
+              :text="chat.status.busy ? '停止生成' : '刷新工作区(R)'"
+              shortcut-key="R"
+              :shortcut-active="nav.page === 'chat'"
+              @activated="onRefreshOrStop"
+            />
+            <WarButton
+              :width="actionBtnW"
+              text="返回(B)"
+              shortcut-key="B"
+              :shortcut-active="nav.page === 'chat'"
+              @activated="nav.goMain()"
+            />
+          </div>
+        </WarFrame>
+        <div
+          class="chat__actions-grip-v"
+          :class="{ active: bayDragW }"
+          title="拖动调整操作台宽度（180~480px，双击恢复默认）"
+          @pointerdown="onBayResizeDownX"
+          @pointermove="onBayResizeMoveX"
+          @pointerup="onBayResizeUpX"
+          @pointercancel="onBayResizeUpX"
+          @dblclick="onBayResizeResetX"
+        >
+          <span></span><span></span><span></span>
         </div>
-      </WarFrame>
+        <div
+          class="chat__actions-grip-h"
+          :class="{ active: bayDragH }"
+          title="拖动调整操作台高度（100~360px，双击恢复默认）"
+          @pointerdown="onBayResizeDownY"
+          @pointermove="onBayResizeMoveY"
+          @pointerup="onBayResizeUpY"
+          @pointercancel="onBayResizeUpY"
+          @dblclick="onBayResizeResetY"
+        >
+          <span></span><span></span><span></span>
+        </div>
+      </div>
     </div>
 
     <!-- modals -->
@@ -384,8 +497,8 @@ const sessionUsage = computed(() => {
   display: grid;
   /* right column is content-sized so the dock's width animation (44px rail
      ↔ 44px+drawer) pushes the chat area narrower instead of overlaying it */
-  /* grid-template-columns comes inline from prefs.railWidth (draggable). */
-  grid-template-rows: 1fr max(124px, min(max(190px, 18.5%), calc(100% - 248px)));
+  /* grid-template-columns / grid-template-rows come inline from prefs
+     (railWidth / actionBayHeight, both draggable). */
   gap: 8px;
   height: 100%;
   padding: 2px 0 8px 8px; /* rail x=8 clears the permanent window rail */
@@ -413,9 +526,54 @@ const sessionUsage = computed(() => {
   min-height: 0;
 }
 
-.chat__input {
+/* composer: wrapped in chat__composer-wrap (the flex child that owns the
+   height; the resize grip straddles its top edge) */
+.chat__composer-wrap {
+  position: relative;
   flex: none;
-  height: clamp(124px, 19%, 240px);
+  min-height: 0;
+}
+
+.chat__input {
+  width: 100%;
+  height: 100%;
+}
+
+.chat__composer-grip {
+  position: absolute;
+  top: -3px;
+  left: 8px;
+  right: 8px;
+  height: 6px;
+  z-index: 5;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  cursor: row-resize;
+  border-radius: 3px;
+  touch-action: none;
+  user-select: none;
+}
+
+.chat__composer-grip span {
+  width: 36px;
+  height: 1px;
+  background: #5cb380;
+  opacity: 0.3;
+  transition: opacity 120ms;
+}
+
+.chat__composer-grip:hover,
+.chat__composer-grip.active {
+  background: #5cb380;
+  box-shadow: 0 0 4px #5cb38088;
+}
+
+.chat__composer-grip:hover span,
+.chat__composer-grip.active span {
+  opacity: 1;
 }
 
 .chat__dock {
@@ -430,16 +588,81 @@ const sessionUsage = computed(() => {
   margin-right: 34px;
 }
 
-.chat__actions {
+.chat__actions-wrap {
   grid-row: 2;
   grid-column: 3;
-  /* fixed width: WarFrame content is absolutely positioned (no intrinsic
-     size), so in the `auto` column it would collapse to the dock's 44px
-     rail width when the drawer is closed. Wide enough that the two menu
-     buttons reach the canonical MENU_BTN_W=276 (frame 354 − insets 26/26
-     − content padding 10/10 ≈ 282 usable, 98% → 276). */
-  width: 354px;
+  position: relative;
+  /* width comes inline from prefs.actionBayWidth (draggable); fixed default
+     354px so the two menu buttons reach the canonical MENU_BTN_W=276
+     (frame 354 − insets 26/26 − content padding 10/10 ≈ 282 usable) */
   justify-self: end;
+}
+
+.chat__actions {
+  width: 100%;
+  height: 100%;
+}
+
+.chat__actions-grip-v,
+.chat__actions-grip-h {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  border-radius: 3px;
+  touch-action: none;
+  user-select: none;
+}
+
+.chat__actions-grip-v {
+  left: -3px; /* hot zone straddles the content frame's left edge */
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+}
+
+.chat__actions-grip-h {
+  top: -3px; /* hot zone straddles the content frame's top edge */
+  left: 0;
+  right: 0;
+  height: 6px;
+  cursor: row-resize;
+}
+
+.chat__actions-grip-v span {
+  width: 1px;
+  height: 36px;
+}
+
+.chat__actions-grip-h span {
+  width: 36px;
+  height: 1px;
+}
+
+.chat__actions-grip-v span,
+.chat__actions-grip-h span {
+  background: #5cb380;
+  opacity: 0.3;
+  transition: opacity 120ms;
+}
+
+.chat__actions-grip-v:hover,
+.chat__actions-grip-v.active,
+.chat__actions-grip-h:hover,
+.chat__actions-grip-h.active {
+  background: #5cb380;
+  box-shadow: 0 0 4px #5cb38088;
+}
+
+.chat__actions-grip-v:hover span,
+.chat__actions-grip-v.active span,
+.chat__actions-grip-h:hover span,
+.chat__actions-grip-h.active span {
+  opacity: 1;
 }
 
 .chat__main-col {
@@ -522,12 +745,6 @@ const sessionUsage = computed(() => {
   height: 30px;
 }
 
-.chat__model-dd {
-  flex: none;
-  width: 260px; /* model ids run long (opencode-go/deepseek-v4-flash); hover shows full via title */
-  height: 30px;
-}
-
 .chat__list {
   flex: 1;
   min-height: 0;
@@ -546,7 +763,7 @@ const sessionUsage = computed(() => {
   position: absolute;
   left: 26px;
   right: 26px;
-  bottom: calc(clamp(124px, 19%, 240px) + 6px);
+  /* bottom comes inline (composer height, draggable) */
   z-index: 30;
   display: flex;
   flex-direction: column;
@@ -558,6 +775,13 @@ const sessionUsage = computed(() => {
 .chat__float > * {
   pointer-events: auto;
   width: min(480px, 100%);
+}
+
+/* quote bar: fit its content and pin to the LEFT — out of the dropdown
+   popup's zone (the popup anchors to the composer's right side) */
+.chat__float > .chat__quote {
+  align-self: flex-start;
+  width: auto;
 }
 
 .chat__retry {

@@ -1,8 +1,10 @@
 <script setup lang="ts">
-// Quote bar (引用块条): floats above the composer like the attachment bar.
-// <selection>…</selection> quotes are NOT embedded in the input text anymore —
-// each quote is one chip with an elided summary and an ✕ to remove. The full
-// body is the chip title; on send the composer re-wraps them into tags.
+// Quote bar (引用块条): floats above the composer like the attachment bar,
+// but LEFT-aligned so it never covers the mode-dropdown popup (which opens
+// upward from the composer's right side). <selection>…</selection> quotes
+// are NOT embedded in the input text: each quote is one chip with an elided
+// summary and an ✕ to remove; the full body is the chip title. On send the
+// composer re-wraps them into tags and prepends them to the message.
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
 
@@ -20,8 +22,8 @@ function elideQuote(s: string): string {
 
 <template>
   <div v-if="chat.composerQuotes.length > 0" class="qbar">
+    <span class="qbar__label" :style="{ fontSize: prefs.fs(10) + 'px' }">引用</span>
     <div v-for="(q, i) in chat.composerQuotes" :key="i" class="qbar__chip" :title="q">
-      <span class="qbar__mark" :style="{ fontSize: prefs.fs(11) + 'px' }">❝</span>
       <span class="qbar__text" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ elideQuote(q) }}</span>
       <span class="qbar__x" :style="{ fontSize: prefs.fs(10) + 'px' }" @click="chat.removeComposerQuote(i)">✕</span>
     </div>
@@ -31,6 +33,7 @@ function elideQuote(s: string): string {
 <style scoped>
 .qbar {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 6px;
   padding: 6px 8px;
@@ -41,20 +44,21 @@ function elideQuote(s: string): string {
   max-width: 100%;
 }
 
+.qbar__label {
+  color: var(--war-text-faint);
+  font-family: SimSun, serif;
+  user-select: none;
+}
+
 .qbar__chip {
   display: flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
+  max-width: min(420px, 60vw);
   background: #f2cf6b22;
   border: 1px solid #f2cf6b3d;
   border-radius: 999px;
   padding: 2px 8px;
-}
-
-.qbar__mark {
-  color: var(--war-gold);
-  user-select: none;
 }
 
 .qbar__text {
@@ -62,7 +66,6 @@ function elideQuote(s: string): string {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 340px;
   user-select: none;
 }
 

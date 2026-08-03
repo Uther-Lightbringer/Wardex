@@ -561,10 +561,6 @@ pub enum RuntimeCmd {
     /// on every session switch, so a re-activated live runtime must send it
     /// again or the model/thinking pickers vanish.
     ResendConfigOptions,
-    /// Chat-page pick of a model the CLI picker does not advertise (per-agent
-    /// endpoint model): persist to the agent record and respawn so
-    /// build_launch injects it via KIMI_MODEL_* env.
-    SetModel(String),
     /// New agent snapshot; the actor persists meta and handles the
     /// same/cross-provider acpSessionId rule itself (it owns the old agent).
     SwitchAgent(Box<Agent>),
@@ -855,7 +851,6 @@ impl Actor {
             }
             RuntimeCmd::ResendConfigOptions => self.resend_config_options(),
             RuntimeCmd::SwitchAgent(agent) => self.on_switch_agent(*agent).await,
-            RuntimeCmd::SetModel(model) => self.on_set_model(model).await,
             RuntimeCmd::EnsureAcp => self.ensure_acp().await,
             RuntimeCmd::StopProcess => {
                 self.client = None;
@@ -1094,66 +1089,6 @@ impl Actor {
         // Warm the new connection in the background (session/load when kept).
         self.ensure_acp().await;
         self.emit_status(Some(format!("已切换 Agent · {agent_name}")));
-        self.emit("store://sessions", json!({}));
-    }
-
-    /// Chat-page model pick for a model the CLI's own picker does not
-    /// advertise (endpoint model from the agent's baseUrl /models list):
-    /// persist it onto the agent record and restart the CLI process so
-    /// build_launch injects it via the KIMI_MODEL_* env family. Picker
-    /// (alias) models go through SetConfigOption instead — no respawn.
-    /// Teardown mirrors on_switch_agent; the stored ACP session id is dropped
-    /// because a resumed session would keep the CLI-remembered model and the
-    /// env injection only applies on session/new.
-    async fn on_set_model(&mut self, model: String) {
-        let model = model.trim().to_string();
-        if model.is_empty() || model == self.agent.model.trim() {
-            return;
-        }
-        self.agent.model = model.clone();
-        self.current_model = model.clone();
-
-        if self.busy {
-            self.cancel_retry(false);
-            self.user_stop = true;
-            // A prompt waiting for the handshake must not fire into the NEW
-            // model's process when it comes up.
-            self.pending_prompt = None;
-            self.client = None;
-            self.acp_ready = false;
-            self.snap().acp_running = false;
-            self.mark_interrupted();
-            self.emit_turn("interrupted", "cancelled", None);
-            self.finish_reply();
-            self.user_stop = false;
-        } else if self.client.is_some() {
-            self.client = None;
-            self.acp_ready = false;
-            self.snap().acp_running = false;
-        }
-        // A pending permission request belongs to the dead process.
-        self.clear_permission();
-
-        {
-            let mut stores = lock_ok(&self.stores);
-            let paths = stores.paths.clone();
-            // update_agent (not save_agent) so the in-memory record other
-            // sessions spawn from picks up the new model too.
-            let patch = crate::store::agents::AgentPatch {
-                model: Some(model.clone()),
-                ..Default::default()
-            };
-            if let Err(e) = stores.agents.update_agent(&paths, &self.agent.id, &patch) {
-                log::warn!("chat[{}] update_agent (model) failed: {e}", self.session_id);
-            }
-            if let Err(e) = stores.sessions.set_acp_session_id(&self.session_id, "") {
-                log::warn!("chat[{}] set_acp_session_id failed: {e}", self.session_id);
-            }
-        }
-        self.sync_snap();
-        // Warm the new connection (session/new with the env-injected model).
-        self.ensure_acp().await;
-        self.emit_status(Some(format!("已切换模型 · {model}")));
         self.emit("store://sessions", json!({}));
     }
 
@@ -1766,11 +1701,11 @@ impl Actor {
                 env.push(("KIMI_MODEL_PROVIDER_TYPE".to_string(), Some("openai".to_string())));
             }
         }
-        // Per-agent model config (opencode): render the agent's modelConfigs
-        // into an isolated opencode.json and point THIS CLI at it via
-        // OPENCODE_CONFIG. Each agent gets its own file, so editing one
-        // agent's variants never leaks into any other agent or the user's
-        // global ~/.config/opencode/opencode.json.
+        // Per-agent model config (opencode): render the agent's model +
+        // effort selection into an isolated opencode.json and point THIS CLI
+        // at it via OPENCODE_CONFIG. Each agent gets its own file, so editing
+        // one agent's model/efforts never leaks into any other agent or the
+        // user's global ~/.config/opencode/opencode.json.
         if provider == "opencode" {
             let paths = lock_ok(&self.stores).paths.clone();
             if let Ok(Some(cfg_path)) = crate::models::write_opencode_config(&paths, &self.agent) {

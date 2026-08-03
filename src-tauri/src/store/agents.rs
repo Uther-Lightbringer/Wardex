@@ -12,7 +12,6 @@
 //   - apiKey update guard: an empty string or one containing '*' keeps the
 //     old value (UI sends back the masked key).
 
-use std::collections::BTreeMap;
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -44,14 +43,18 @@ pub struct Agent {
     pub cli_path: String,
     #[serde(rename = "createdAt", deserialize_with = "de_ms_i64")]
     pub created_at: i64,
-    /// Per-agent default thinking effort ("" = follow CLI). Non-empty values
-    /// make WarDex declare the model in ~/.kimi-code/config.toml with
-    /// support_efforts so the ACP thinking picker shows real levels.
+    /// Default thinking effort for this agent ("" = the CLI's own default).
+    /// Must be one of the selected effort_options when declared.
     #[serde(rename = "defaultEffort")]
     pub default_effort: String,
+    /// Allowed thinking-effort levels (models.rs EFFORT_LEVELS). Empty =
+    /// every level. Declared into the kimi config.toml support_efforts /
+    /// the opencode.json model variants so the chat page's strength picker
+    /// only offers these.
+    #[serde(rename = "effortOptions")]
+    pub effort_options: Vec<String>,
     /// Context size (in K = 1024 tokens) stamped into the config.toml model
-    /// aliases that the 刷新-button bulk sync writes for this agent.
-    /// 0 = fallback 256K.
+    /// alias the effort sync writes for this agent. 0 = fallback 256K.
     #[serde(rename = "maxContextK")]
     pub max_context_k: u32,
     #[serde(default = "default_true")]
@@ -64,11 +67,6 @@ pub struct Agent {
     /// JSON array TEXT (not a nested object) passed through to ACP session/new.
     #[serde(rename = "mcpServers")]
     pub mcp_servers: String,
-    /// Per-model ACP config override (currently drives opencode only). Key =
-    /// model id, value = variants + default. Rendered into a per-agent
-    /// opencode.json injected via OPENCODE_CONFIG at spawn (models.rs).
-    #[serde(rename = "modelConfigs")]
-    pub model_configs: BTreeMap<String, ModelConfig>,
     pub model: String,
     pub name: String,
     #[serde(default = "default_provider")]
@@ -82,18 +80,6 @@ pub struct Agent {
 
 fn default_provider() -> String {
     "kimi".to_string()
-}
-
-/// Per-model ACP config override. `variants` maps a variant name to opencode
-/// model options (e.g. `{reasoningEffort, thinking}`); `default_variant` names
-/// the one whose options also become the model's base `options` so "no variant
-/// picked" behaves exactly like the default.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ModelConfig {
-    #[serde(rename = "defaultVariant")]
-    pub default_variant: String,
-    pub variants: Map<String, Value>,
 }
 
 fn default_cli_path() -> String {
@@ -113,13 +99,13 @@ impl Default for Agent {
             cli_path: default_cli_path(),
             created_at: 0,
             default_effort: String::new(),
+            effort_options: Vec::new(),
             max_context_k: 0,
             enabled: true,
             extra_args: String::new(),
             id: String::new(),
             is_default: false,
             mcp_servers: String::new(),
-            model_configs: BTreeMap::new(),
             model: String::new(),
             name: String::new(),
             provider: default_provider(),
@@ -141,6 +127,8 @@ pub struct AgentPatch {
     pub base_url: Option<String>,
     #[serde(rename = "defaultEffort")]
     pub default_effort: Option<String>,
+    #[serde(rename = "effortOptions")]
+    pub effort_options: Option<Vec<String>>,
     #[serde(rename = "maxContextK")]
     pub max_context_k: Option<u32>,
     #[serde(rename = "cliPath")]
@@ -153,8 +141,6 @@ pub struct AgentPatch {
     pub mcp_servers: Option<String>,
     #[serde(rename = "avatarPath")]
     pub avatar_path: Option<String>,
-    #[serde(rename = "modelConfigs")]
-    pub model_configs: Option<BTreeMap<String, ModelConfig>>,
     pub enabled: Option<bool>,
 }
 
@@ -328,6 +314,9 @@ impl AgentStore {
         if let Some(v) = &patch.default_effort {
             a.default_effort = v.trim().to_lowercase();
         }
+        if let Some(v) = &patch.effort_options {
+            a.effort_options = v.iter().map(|s| s.trim().to_lowercase()).collect();
+        }
         if let Some(v) = patch.max_context_k {
             a.max_context_k = v;
         }
@@ -346,9 +335,6 @@ impl AgentStore {
         // Stored as-is (JSON text); validity is checked when a session starts.
         if let Some(v) = &patch.mcp_servers {
             a.mcp_servers = v.clone();
-        }
-        if let Some(v) = &patch.model_configs {
-            a.model_configs = v.clone();
         }
         // Empty string clears back to the built-in default avatar.
         if let Some(v) = &patch.avatar_path {

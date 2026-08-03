@@ -1,34 +1,41 @@
 // Page state machine + the WC3 three-stage transition (docs/ui-design.md Â§5.6).
 // Six page states: main | config | sessionSelect | chat | todo | usage.
 //
-// All navigation is the same "pull up â†’ wait for the popUp SFX â†’ drop down":
-//   1. Up-slide (770ms, ease-in-quad) of the current layer + popUp SFX.
-//   2. Wait out the popUp audible length (1280ms total from the click, so
-//      ~510ms after the up-slide ends). The drop may NOT start earlier.
-//   3. Drop (popDown SFX): main menu slides down 770ms ease-out-quad; overlay
-//      page content drops 750ms ease-out-quad (ShellFrame dropDuration).
+// All navigation is the same "pull up â†?wait for the popUp SFX â†?drop down":
+//   1. Up-slide (450ms, ease-in-quad) of the current layer + popUp SFX.
+//   2. Wait the drop gate (950ms total from the click, so ~500ms after the
+//      up-slide ends). The drop may NOT start earlier â€?popDown would cut the
+//      popUp tail (gate is tuned down from the raw 1280ms audible length for
+//      snappier transitions; see lib/sfx.ts).
+//   3. Drop (popDown SFX): main menu slides down 450ms ease-out-quad; overlay
+//      page content drops 450ms ease-out-quad (ShellFrame dropDuration).
 // The whole transition runs under uiGate busy (ui.busy) so every WarButton
 // is dead until the new page has landed.
 //
 // Layer model (mirrors Main.qml):
-//   menuY     â€” main-menu band (both rails ride it), 0 on screen / -2400 off
-//   overlayY  â€” whole overlay band, only used for overlayâ†’main and
+//   menuY     â€?main-menu band (both rails ride it), 0 on screen / -2400 off
+//   overlayY  â€?whole overlay band, only used for overlayâ†’main and
 //               overlayâ†’overlay up-slides
-//   contentY  â€” per-page content band inside the overlay (PageShell binds
+//   contentY  â€?per-page content band inside the overlay (PageShell binds
 //               it); parked above the viewport before a page becomes visible
 //               so it never flashes one frame at its final position.
 
 import { defineStore } from 'pinia';
 import { delay, easeInQuad, easeOutQuad, tween } from '../lib/animate';
-import { play, POP_UP_SOUND_MS } from '../lib/sfx';
+import { play } from '../lib/sfx';
 import { useUiStore } from './ui';
 
 export type PageId = 'main' | 'config' | 'sessionSelect' | 'chat' | 'todo' | 'usage';
 
-const POP_UP_DUR = 770; // up-slide of menu / overlay band
-const MENU_DOWN_DUR = 770; // main menu slide-down
-const CONTENT_DROP_DUR = 750; // ShellFrame drop-in for overlay pages
+const POP_UP_DUR = 450; // up-slide of menu / overlay band
+const MENU_DOWN_DUR = 450; // main menu slide-down
+const CONTENT_DROP_DUR = 450; // ShellFrame drop-in for overlay pages
 const OFF_Y = -2400; // off-screen parking position (Main.qml offY)
+
+/** Drop gate (ms from the click): the popUp wav stays audible ~1280ms (see
+ * sfx.ts), but 950ms covers most of its body â€?the popDown start cuts the
+ * inaudible tail (single-channel audio) and keeps the swap snappy. */
+const DROP_GATE_MS = 950;
 
 type Phase = 'idle' | 'up' | 'down';
 
@@ -48,7 +55,7 @@ export const useNavStore = defineStore('nav', {
   }),
 
   actions: {
-    /** main â†’ overlay, or overlay â†’ other overlay. */
+    /** main â†?overlay, or overlay â†?other overlay. */
     async goOverlay(target: PageId): Promise<void> {
       const ui = useUiStore();
       if (this.phase !== 'idle') return;
@@ -69,7 +76,7 @@ export const useNavStore = defineStore('nav', {
         await tween(0, OFF_Y, POP_UP_DUR, easeInQuad, (v) => (this.menuY = v));
         this.menuY = OFF_Y;
       } else {
-        // overlay â†’ overlay: lift the whole band with the current page, then
+        // overlay â†?overlay: lift the whole band with the current page, then
         // swap and reset the band; the new page's content is parked above.
         await tween(0, OFF_Y, POP_UP_DUR, easeInQuad, (v) => (this.overlayY = v));
         this.overlayY = 0;
@@ -78,7 +85,7 @@ export const useNavStore = defineStore('nav', {
       }
 
       // Wait out the popUp SFX audible length from the click (1280ms gate).
-      await delay(Math.max(0, POP_UP_SOUND_MS - (Date.now() - t0)));
+      await delay(Math.max(0, DROP_GATE_MS - (Date.now() - t0)));
 
       this.phase = 'down';
       play('popDown');
@@ -88,7 +95,7 @@ export const useNavStore = defineStore('nav', {
       ui.busy = false;
     },
 
-    /** overlay â†’ main menu. */
+    /** overlay â†?main menu. */
     async goMain(): Promise<void> {
       const ui = useUiStore();
       if (this.phase !== 'idle') return;
@@ -105,7 +112,7 @@ export const useNavStore = defineStore('nav', {
 
       await tween(0, OFF_Y, POP_UP_DUR, easeInQuad, (v) => (this.overlayY = v));
       this.overlayY = OFF_Y;
-      await delay(Math.max(0, POP_UP_SOUND_MS - (Date.now() - t0)));
+      await delay(Math.max(0, DROP_GATE_MS - (Date.now() - t0)));
 
       this.phase = 'down';
       this.page = 'main';

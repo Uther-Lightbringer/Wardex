@@ -258,21 +258,6 @@ async fn resend_config_options(
         .map_err(err)
 }
 
-/// Chat-page model switch for endpoint models the CLI picker does not
-/// advertise; the runtime persists the choice and respawns the CLI.
-#[tauri::command]
-async fn set_session_model(
-    state: State<'_, AppState>,
-    session_id: String,
-    model: String,
-) -> Result<(), String> {
-    state
-        .chat
-        .set_session_model(&session_id, &model)
-        .await
-        .map_err(err)
-}
-
 #[tauri::command]
 async fn retry_cancel(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.retry_cancel(&session_id).await.map_err(err)
@@ -526,26 +511,36 @@ fn save_agent(
             return Err(format!("无效的思考强度: {v}"));
         }
     }
+    if let Some(list) = &patch.effort_options {
+        for s in list {
+            if !crate::models::EFFORT_LEVELS.contains(&s.trim().to_lowercase().as_str()) {
+                return Err(format!("无效的思考强度: {s}"));
+            }
+        }
+    }
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
     stores.agents.update_agent(&paths, &agent_id, &patch).map_err(err)?;
-    // Declare the model in the kimi CLI config with support_efforts so the
-    // ACP thinking picker shows real levels; clearing the effort removes it.
+    // Declare the agent's model in the kimi CLI config with support_efforts =
+    // the selected levels so the ACP thinking picker offers exactly those
+    // (empty selection = every level); a cleared model removes the section.
     // Sync failures never block the save — they come back as a warning.
     let Some(agent) = stores.agents.get(&agent_id).cloned() else {
         return Ok(None);
     };
-    if agent.provider != "kimi" || agent.model.trim().is_empty() {
+    if agent.provider != "kimi" {
         return Ok(None);
     }
-    let result = if agent.default_effort.is_empty() {
-        crate::models::remove_kimi_effort_model(agent.model.trim())
+    let result = if agent.model.trim().is_empty() {
+        Ok(())
     } else {
         crate::models::sync_kimi_effort_model(
             agent.model.trim(),
             &agent.base_url,
             &agent.api_key,
+            &agent.effort_options,
             &agent.default_effort,
+            agent.max_context_k,
         )
     };
     match result {
@@ -1112,9 +1107,14 @@ fn session_usage(state: State<'_, AppState>, session_id: String) -> Value {
 }
 
 #[tauri::command]
-fn usage_backfill(state: State<'_, AppState>) -> Value {
+fn usage_backfill(state: State<'_, AppState>, app: AppHandle) -> Value {
     let mut stores = lock(&state.stores);
-    serde_json::to_value(usage_backfill::backfill(&mut stores)).unwrap_or(Value::Null)
+    let result = usage_backfill::backfill(&mut stores);
+    if result.added > 0 {
+        // 让当前打开的会话立即重挂历史用量（chat store 监听后重新拉取消息）。
+        let _ = app.emit("usage://backfilled", json!({}));
+    }
+    serde_json::to_value(result).unwrap_or(Value::Null)
 }
 
 #[tauri::command]
@@ -1129,6 +1129,9 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
         "railWidth": stores.prefs.rail_width(),
         "panelLayout": stores.prefs.panel_layout(),
         "panelWidth": stores.prefs.panel_width(),
+        "composerHeight": stores.prefs.composer_height(),
+        "actionBayWidth": stores.prefs.action_bay_width(),
+        "actionBayHeight": stores.prefs.action_bay_height(),
         "userAvatarPath": stores.prefs.user_avatar_path(),
     })
 }
@@ -1248,6 +1251,30 @@ fn set_rail_width(state: State<'_, AppState>, width: i64) -> Result<(), String> 
     stores.prefs.set_rail_width(&paths, width).map_err(err)
 }
 
+/// 输入框高度 (px)：拖拽中只改本地 state，松手持久化一次；0 清回响应式默认。
+#[tauri::command]
+fn set_composer_height(state: State<'_, AppState>, height: i64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_composer_height(&paths, height).map_err(err)
+}
+
+/// 右下操作台宽度 (px)：拖拽中只改本地 state，松手持久化一次；0 清回默认 354。
+#[tauri::command]
+fn set_action_bay_width(state: State<'_, AppState>, width: i64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_action_bay_width(&paths, width).map_err(err)
+}
+
+/// 右下操作台高度 (px)：拖拽中只改本地 state，松手持久化一次；0 清回响应式默认。
+#[tauri::command]
+fn set_action_bay_height(state: State<'_, AppState>, height: i64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_action_bay_height(&paths, height).map_err(err)
+}
+
 // ---------------------------------------------------------------------------
 // Rail groups (groups.json): per-project session buckets. Every mutation
 // emits store://sessions so the rail re-pulls both the list and the groups.
@@ -1344,22 +1371,7 @@ fn kimi_model_aliases() -> Vec<String> {
     crate::models::kimi_model_aliases()
 }
 
-/// Bulk sync (配置页「刷新」): full-clean every wardex-* namespace in
-/// config.toml, then declare this agent's provider and every fetched model.
-/// Returns the number of aliases written.
-#[tauri::command]
-fn sync_agent_models(
-    agent_id: String,
-    base_url: String,
-    api_key: String,
-    models: Vec<String>,
-    max_context_k: u32,
-) -> Result<usize, String> {
-    crate::models::sync_agent_models(&agent_id, &base_url, &api_key, &models, max_context_k)
-}
-
-/// Thinking effort levels for the config-page default-effort dropdown
-/// ("" / 跟随 CLI is prepended by the frontend).
+/// Thinking effort levels for the config-page strength multi-select.
 #[tauri::command]
 fn effort_options() -> Vec<String> {
     crate::models::EFFORT_LEVELS.map(str::to_string).into()
@@ -1432,7 +1444,6 @@ pub fn run() {
             cancel,
             set_config_option,
             resend_config_options,
-            set_session_model,
             retry_cancel,
             answer_permission,
             pending_permission,
@@ -1517,6 +1528,9 @@ pub fn run() {
             set_panel_layout,
             set_panel_width,
             set_rail_width,
+            set_composer_height,
+            set_action_bay_width,
+            set_action_bay_height,
             list_groups,
             create_group,
             rename_group,
@@ -1525,7 +1539,6 @@ pub fn run() {
             // model list probing
             fetch_models,
             kimi_model_aliases,
-            sync_agent_models,
             effort_options,
             // database (db/commands.rs)
             db::commands::db_conns,

@@ -3,7 +3,9 @@
 //   - same-name requests within 200ms are dropped (throttle)
 //   - starting a new clip stops the previous one (single channel)
 //   - all three clips are preloaded at startup
-// The 1280ms audible-length popUp gate lives in stores/nav.ts.
+// The audible length of the popUp clip is ~1280ms; the drop gate actually
+// used by page transitions lives in stores/nav.ts (DROP_GATE_MS, tuned down
+// from this raw measure for snappier swaps).
 
 const files: Record<string, string> = {
   click: '/assets/Sound/BigButtonClick.wav',

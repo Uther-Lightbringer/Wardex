@@ -42,6 +42,12 @@ export const usePrefsStore = defineStore('prefs', {
     railWidth: 240,
     /** Shared right-dock drawer width (px) — one width for ALL dock tabs. */
     panelWidth: 240,
+    /** 输入框高度(px)：0=未拖过，用响应式 clamp。 */
+    composerHeight: 0,
+    /** 右下操作台宽度(px)：0=未拖过，用默认 354。 */
+    actionBayWidth: 0,
+    /** 右下操作台高度(px)：0=未拖过，用响应式公式。 */
+    actionBayHeight: 0,
     userAvatarPath: '',
     loaded: false,
   }),
@@ -67,6 +73,9 @@ export const usePrefsStore = defineStore('prefs', {
             railWidth?: number;
             userAvatarPath?: string;
             panelWidth?: number;
+            composerHeight?: number;
+            actionBayWidth?: number;
+            actionBayHeight?: number;
           }>('get_prefs');
           this.fontScale = clampScale(p.fontScale ?? 1.0);
           this.panelLayout = p.panelLayout ?? {};
@@ -76,6 +85,9 @@ export const usePrefsStore = defineStore('prefs', {
           this.previewHeight = p.previewHeight ?? 0;
           this.railWidth = p.railWidth ?? 240;
           this.panelWidth = p.panelWidth ?? 240;
+          this.composerHeight = p.composerHeight ?? 0;
+          this.actionBayWidth = p.actionBayWidth ?? 0;
+          this.actionBayHeight = p.actionBayHeight ?? 0;
           this.userAvatarPath = p.userAvatarPath ?? '';
           return;
         } catch (e) {
@@ -189,6 +201,54 @@ export const usePrefsStore = defineStore('prefs', {
           await cmd('set_panel_width', { width: this.panelWidth });
         } catch (e) {
           console.warn('[prefs] set_panel_width failed', e);
+        }
+      }
+    },
+
+    /** 输入框高度：拖拽中只改本地 state（不落盘），松手后调用一次持久化。 */
+    setComposerHeightLocal(height: number): void {
+      this.composerHeight = Math.round(height);
+    },
+
+    async setComposerHeight(height: number): Promise<void> {
+      this.composerHeight = Math.round(height);
+      if (isTauri) {
+        try {
+          await cmd('set_composer_height', { height: this.composerHeight });
+        } catch (e) {
+          console.warn('[prefs] set_composer_height failed', e);
+        }
+      }
+    },
+
+    /** 操作台宽度：拖拽中只改本地 state（不落盘），松手后调用一次持久化。 */
+    setActionBayWidthLocal(width: number): void {
+      this.actionBayWidth = Math.round(width);
+    },
+
+    async setActionBayWidth(width: number): Promise<void> {
+      this.actionBayWidth = Math.round(width);
+      if (isTauri) {
+        try {
+          await cmd('set_action_bay_width', { width: this.actionBayWidth });
+        } catch (e) {
+          console.warn('[prefs] set_action_bay_width failed', e);
+        }
+      }
+    },
+
+    /** 操作台高度：拖拽中只改本地 state（不落盘），松手后调用一次持久化。 */
+    setActionBayHeightLocal(height: number): void {
+      this.actionBayHeight = Math.round(height);
+    },
+
+    async setActionBayHeight(height: number): Promise<void> {
+      this.actionBayHeight = Math.round(height);
+      if (isTauri) {
+        try {
+          await cmd('set_action_bay_height', { height: this.actionBayHeight });
+        } catch (e) {
+          console.warn('[prefs] set_action_bay_height failed', e);
         }
       }
     },
