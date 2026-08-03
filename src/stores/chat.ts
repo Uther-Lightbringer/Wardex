@@ -184,6 +184,9 @@ const IDLE_STATUS: ChatStatus = {
 /** 引用块长度上限：超出截断并提示（对齐 @文件 的 REF_INJECT_NOTE）。 */
 const SELECTION_QUOTE_MAX = 8000;
 
+/** 子会话层级上限（与后端 MAX_SUB_DEPTH 一致）：顶层=1，最多 3 级。 */
+export const MAX_SUB_DEPTH = 3;
+
 const MODE_SUFFIX: Record<string, string> = {
   default: ' · 需批准',
   plan: ' · 计划',
@@ -772,6 +775,10 @@ export const useChatStore = defineStore('chat', {
     async branchFromMessage(messageId: string): Promise<void> {
       if (!this.sessionId) return;
       const sessions = useSessionsStore();
+      if (this.sessionDepth() >= MAX_SUB_DEPTH) {
+        this.status = { ...this.status, lastError: '子会话层级已达上限（3 级）' };
+        return;
+      }
       const clicked = this.rows.find((r) => r.id === messageId);
       const draft = clicked?.role === 'user' ? clicked.content : '';
       let meta: { id?: string } | null;
@@ -814,6 +821,10 @@ export const useChatStore = defineStore('chat', {
     async askOnSelection(messageId: string, selection: string): Promise<boolean> {
       if (!this.sessionId) return false;
       const sessions = useSessionsStore();
+      if (this.sessionDepth() >= MAX_SUB_DEPTH) {
+        this.status = { ...this.status, lastError: '子会话层级已达上限（3 级）' };
+        return false;
+      }
       const title = this.summarizeSelection(selection);
       let meta: { id?: string } | null;
       try {
@@ -836,6 +847,22 @@ export const useChatStore = defineStore('chat', {
     async jumpToParent(): Promise<void> {
       const pid = this.meta?.parentId;
       if (pid) await this.openSession(pid);
+    },
+
+    /** 当前会话的层级：顶层会话 = 1，每级子会话 +1（沿铁轨 parentId 链）。 */
+    sessionDepth(): number {
+      const sessions = useSessionsStore();
+      let depth = 1;
+      let cur = this.sessionId;
+      const seen = new Set<string>();
+      while (cur && !seen.has(cur)) {
+        seen.add(cur);
+        const row = sessions.rail.find((s) => s.sessionId === cur);
+        if (!row?.parentId) break;
+        depth += 1;
+        cur = row.parentId;
+      }
+      return depth;
     },
 
     // ---- turn actions ----

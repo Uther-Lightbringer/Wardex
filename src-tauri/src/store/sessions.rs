@@ -47,6 +47,11 @@ const EMPTY_REPLY: &str = "（空回复）";
 /// Command rows: head budget of retained output (mirrors cmd.rs forward cap).
 pub const CMD_OUTPUT_MAX: usize = 64 * 1024;
 
+/// Sub-session nesting limit: a session at depth 3 (顶层=1) cannot branch
+/// further — the rail flattens visuals at 3 levels, so the DATA must stop
+/// there too (frontend disables the entry; the backend enforces it).
+pub const MAX_SUB_DEPTH: usize = 3;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SessionsError {
     #[error("io/json error: {0}")]
@@ -59,6 +64,8 @@ pub enum SessionsError {
     DeleteFailed,
     #[error("分支点消息不存在")]
     BranchMessageMissing,
+    #[error("子会话层级已达上限（3 级）")]
+    SubDepthExceeded,
 }
 
 // ---------------------------------------------------------------------------
@@ -639,6 +646,10 @@ impl SessionStore {
         if !self.ensure_open(session_id) {
             return Err(SessionsError::BranchMessageMissing);
         }
+        // Depth cap: 顶层=1；depth 3 的会话不能再往下分支（MAX_SUB_DEPTH）。
+        if self.depth_of(session_id) >= MAX_SUB_DEPTH {
+            return Err(SessionsError::SubDepthExceeded);
+        }
         let (src_meta, rows) = {
             let open = self.open.get(session_id).ok_or(SessionsError::BranchMessageMissing)?;
             let idx = open
@@ -712,6 +723,31 @@ impl SessionStore {
         let mut out = Vec::new();
         collect(&self.index, session_id, &mut out);
         out
+    }
+
+    /// Sub-session depth: 顶层会话 = 1，每级子会话 +1（沿 index 的
+    /// parentId 链，循环/断链安全）。
+    fn depth_of(&self, session_id: &str) -> usize {
+        let mut depth = 1;
+        let mut cur = session_id.to_string();
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(cur.clone()) {
+                break; // 循环保护
+            }
+            let parent = self
+                .index
+                .iter()
+                .find(|r| r.id == cur)
+                .map(|r| r.parent_id.clone())
+                .unwrap_or_default();
+            if parent.is_empty() {
+                break;
+            }
+            depth += 1;
+            cur = parent;
+        }
+        depth
     }
 
     /// deleteSession: removes the session AND its whole sub-session tree

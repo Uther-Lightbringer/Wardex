@@ -499,6 +499,27 @@ fn delete_session_cascades_to_whole_subtree() {
     assert!(!dir_exists(&grand2.id));
 }
 
+#[test]
+fn branch_depth_capped_at_three() {
+    let (_tmp, paths) = temp_paths();
+    let mut store = SessionStore::load(paths.clone());
+    let top = store
+        .create_session(&AgentSnapshot::default(), "")
+        .unwrap();
+    store
+        .append_message(&top, "user", "m1", "kimi", "done", &[], "")
+        .unwrap();
+    let mid = store.open.get(&top).unwrap().messages[0].id.clone();
+    let child = store.branch_session(&top, &mid, Some("子")).unwrap();
+    let grand = store.branch_session(&child.id, &mid, Some("孙")).unwrap();
+    // 深度 3（顶层=1）→ 再分支被拒绝
+    let err = store.branch_session(&grand.id, &mid, Some("重孙"));
+    assert!(matches!(err, Err(SessionsError::SubDepthExceeded)));
+    // 深度 1 / 2 仍可正常分支
+    assert!(store.branch_session(&top, &mid, Some("子2")).is_ok());
+    assert!(store.branch_session(&child.id, &mid, Some("孙2")).is_ok());
+}
+
 // ---------------------------------------------------------------------------
 // Rail groups (groups.json): CRUD, session moves, cascade delete
 // ---------------------------------------------------------------------------

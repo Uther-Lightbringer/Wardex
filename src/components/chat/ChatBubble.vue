@@ -15,10 +15,11 @@
 // hint (思考中… / last tool) and a random flavor line (FLAVOR_LINES).
 import { computed, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue';
 import { fileSrc, openPath } from '../../lib/tauri';
-import { renderMarkdown, renderUserMarkdown, handleMdLinkClick } from '../../lib/markdown';
+import { renderMarkdown, renderUserMarkdown, renderQuoteHighlight, handleMdLinkClick } from '../../lib/markdown';
 import { copyText } from '../../lib/clipboard';
 import { usePrefsStore } from '../../stores/prefs';
 import { useChatStore, type ChatMessage, type ChatSegment } from '../../stores/chat';
+import { MAX_SUB_DEPTH } from '../../stores/chat';
 import { formatTokens } from '../../lib/format';
 import ProcessDialog from './ProcessDialog.vue';
 import WarMenu from '../war/WarMenu.vue';
@@ -398,8 +399,13 @@ function onBubbleContextMenu(e: MouseEvent): void {
   if (!body) return;
   const inside = (n: Node | null): boolean =>
     n !== null && (n === body || body.contains(n));
-  // 无选区 / 选区锚点不在本气泡内 → 提问禁用（复制仍可）
-  const askable = text.length > 0 && !!sel && inside(sel.anchorNode) && inside(sel.focusNode);
+  // 无选区 / 选区锚点不在本气泡内 / 已达子会话层级上限 → 提问禁用
+  const askable =
+    text.length > 0 &&
+    !!sel &&
+    inside(sel.anchorNode) &&
+    inside(sel.focusNode) &&
+    chat.sessionDepth() < MAX_SUB_DEPTH;
   ctxSel.value = text;
   ctxAskable.value = askable;
   ctxX.value = Math.min(e.clientX, window.innerWidth - 240);
@@ -447,6 +453,13 @@ function fileName(p: string): string {
 const MD_IMG_RE = /!\[[^\]]*\]\(/;
 const userMdHtml = computed(() =>
   isUser.value && MD_IMG_RE.test(displayBody.value) ? renderUserMarkdown(displayBody.value) : '',
+);
+
+// <selection>…</selection> quote blocks (sent by the sub-session composer):
+// render as a gold highlight span, same look as the composer overlay.
+const QUOTE_RE = /<selection>[\s\S]*?<\/selection>/;
+const userQuoteHtml = computed(() =>
+  isUser.value && QUOTE_RE.test(displayBody.value) ? renderQuoteHighlight(displayBody.value) : '',
 );
 
 // Attachments already embedded in the message text as markdown images are
@@ -619,7 +632,12 @@ const visibleAtts = computed(() =>
         <!-- fallback: user rows and the pending placeholder have no segments -->
         <div v-else-if="displayBody" class="seg-text">
           <div
-            v-if="userMdHtml"
+            v-if="userQuoteHtml"
+            class="seg-text__md md-body quote-body"
+            v-html="userQuoteHtml"
+          ></div>
+          <div
+            v-else-if="userMdHtml"
             class="seg-text__md md-body"
             :class="{ 'user-clamped': userLong && !userExpanded }"
             v-html="userMdHtml"
@@ -1027,6 +1045,11 @@ const visibleAtts = computed(() =>
   overflow-wrap: break-word;
 }
 
+/* quote-block user messages: keep newlines (rendered via v-html) */
+.quote-body {
+  white-space: pre-wrap;
+}
+
 /* ---- process summary pill: full bubble width, TWO lines. Line 1 = counts
    + activity hint on one row (nowrap/ellipsis backstop). Line 2 = random
    flavor phrase on its own line — its left edge is constant, so hint length
@@ -1314,5 +1337,22 @@ const visibleAtts = computed(() =>
   border: none;
   border-top: 1px solid #2a3344;
   margin: 8px 0;
+}
+
+/* <selection>…</selection> quote block in user bubbles — one elliptical
+   capsule, elided to a fixed length, click-selects as a whole unit
+   (unscoped: it lives inside v-html content) */
+.md-body .md-selection {
+  display: inline-block;
+  max-width: 100%;
+  background: #f2cf6b22;
+  border: 1px solid #f2cf6b3d;
+  border-radius: 999px;
+  padding: 1px 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: baseline;
+  user-select: all;
 }
 </style>

@@ -46,20 +46,47 @@ const composing = ref(false);
 const QS_MARK = '\u200b'; // zero-width space: quote block start
 const QE_MARK = '\u200c'; // zero-width non-joiner: quote block end
 
-/** 带标签文本 → 显示文本（标签连同行首尾换行一起收进零宽标记）。 */
-function toDisplay(src: string): string {
-  return src
+/** 气泡/输入框共用的引用块显示截断长度（字符）。 */
+const QUOTE_ELIDE = 24;
+
+/** 完整引用内容映射（按块出现顺序）：输入框只显示截断摘要，发送/存
+ * 草稿时用这份完整内容还原 <selection>…</selection>。块是原子单元
+ * （只能整体删除/替换），所以数组与文本中的块严格同步。 */
+let quoteBodies: string[] = [];
+
+/** 显示文本截断：压缩空白后取前 QUOTE_ELIDE 字符。 */
+function elideQuote(s: string): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  const chars = [...t];
+  return chars.length <= QUOTE_ELIDE ? t : chars.slice(0, QUOTE_ELIDE).join('') + '…';
+}
+
+/** 带标签文本 → 显示文本（标签连同行首尾换行收进零宽标记，块内容截断，
+ * 完整内容存入 quoteBodies）。 */
+function toDisplayFull(src: string): string {
+  quoteBodies.length = 0;
+  const re = /<selection>([\s\S]*?)<\/selection>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(src)) !== null) quoteBodies.push(m[1]);
+  const marked = src
     .replace(/<selection>\r?\n/g, QS_MARK)
     .replace(/\r?\n<\/selection>/g, QE_MARK)
     .replace(/<selection>/g, QS_MARK)
     .replace(/<\/selection>/g, QE_MARK);
+  return marked.replace(
+    new RegExp(QS_MARK + '([\\s\\S]*?)' + QE_MARK, 'g'),
+    (_all, body: string) => QS_MARK + elideQuote(body) + QE_MARK,
+  );
 }
 
-/** 显示文本 → 带标签文本（发送 / 存草稿）。 */
-function toRaw(src: string): string {
-  return src
-    .replace(new RegExp(QS_MARK, 'g'), '<selection>\n')
-    .replace(new RegExp(QE_MARK, 'g'), '\n</selection>');
+/** 显示文本 → 带标签文本（发送 / 存草稿）：块内截断摘要换回完整内容。 */
+function fromDisplay(src: string): string {
+  let idx = 0;
+  return src.replace(new RegExp(QS_MARK + '[\\s\\S]*?' + QE_MARK, 'g'), () => {
+    const full = quoteBodies[idx] ?? '';
+    idx += 1;
+    return `<selection>\n${full}\n</selection>`;
+  });
 }
 
 /** 显示文本中所有引用块的字符区间（含两端零宽标记）。 */
@@ -188,8 +215,10 @@ function clampQuoteCursor(): void {
   if (r) el.setSelectionRange(r.end, r.end);
 }
 
-/** 选区钳制：完全落在块内的选区 → 原子选中整块；跨块边界的选区 →
- * 截断到块外（Ctrl+A 全选除外——全选删除=清空）。 */
+/** 选区钳制：真实选区（s<t）完全落在块内 → 原子选中整块；跨块边界的
+ * 选区 → 截断到块外。**光标**（s===t）落块内时这里不干预——交给
+ * clampQuoteCursor 弹到块后（否则光标会被误扩成"整块选中"且再也弹不走）。
+ * Ctrl+A 全选除外——全选删除=清空。 */
 function clampQuoteSelection(): void {
   const el = inputEl.value;
   if (!el || document.activeElement !== el) return;
@@ -198,9 +227,10 @@ function clampQuoteSelection(): void {
   const total = text.value.length;
   let s = el.selectionStart;
   let t = el.selectionEnd;
+  const hasSelection = s < t;
   for (const r of ranges) {
     if (s === 0 && t === total) continue; // 全选放行
-    if (s >= r.start && t <= r.end && !(s === r.start && t === r.end)) {
+    if (hasSelection && s >= r.start && t <= r.end && !(s === r.start && t === r.end)) {
       // 双击 / 拖选整段块内文字 → 选中整个引用块
       s = r.start;
       t = r.end;
@@ -229,7 +259,7 @@ function quoteKeyGuard(e: KeyboardEvent): boolean {
   const t = el.selectionEnd;
 
   if (e.key === 'Backspace' || e.key === 'Delete') {
-    const hit = ranges.find((r) => {
+    const hitIdx = ranges.findIndex((r) => {
       if (s === t) {
         if (e.key === 'Backspace' && s === r.end) return true; // 光标紧跟块后
         if (e.key === 'Delete' && s === r.start) return true; // 光标在块前
@@ -238,8 +268,10 @@ function quoteKeyGuard(e: KeyboardEvent): boolean {
       // 有选区：恰好等于整块，或完全落在块内 → 整块删除
       return (s === r.start && t === r.end) || (s >= r.start && t <= r.end);
     });
-    if (hit) {
+    if (hitIdx >= 0) {
       e.preventDefault();
+      const hit = ranges[hitIdx];
+      quoteBodies.splice(hitIdx, 1); // 完整内容映射同步删除
       text.value = text.value.slice(0, hit.start) + text.value.slice(hit.end);
       el.value = text.value;
       el.setSelectionRange(hit.start, hit.start);
@@ -250,9 +282,11 @@ function quoteKeyGuard(e: KeyboardEvent): boolean {
 
   if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
     // 全选块后直接打字 → 删掉整块再插入该字符
-    const hit = ranges.find((r) => s === r.start && t === r.end);
-    if (hit) {
+    const hitIdx = ranges.findIndex((r) => s === r.start && t === r.end);
+    if (hitIdx >= 0) {
       e.preventDefault();
+      const hit = ranges[hitIdx];
+      quoteBodies.splice(hitIdx, 1); // 完整内容映射同步删除
       text.value =
         text.value.slice(0, hit.start) + e.key + text.value.slice(hit.end);
       el.value = text.value;
@@ -304,9 +338,9 @@ watch(termMode, (v, p) => {
 watch(
   () => chat.sessionId,
   (id, prev) => {
-    if (prev && prev !== id) chat.saveDraft(prev, toRaw(text.value), chat.attachments);
+    if (prev && prev !== id) chat.saveDraft(prev, fromDisplay(text.value), chat.attachments);
     const d = id ? chat.drafts[id] : undefined;
-    text.value = d?.text ? toDisplay(d.text) : '';
+    text.value = d?.text ? toDisplayFull(d.text) : '';
     chat.attachments = [...(d?.attachments ?? [])];
     pickerOpen.value = false;
     slashOpen.value = false;
@@ -896,7 +930,7 @@ async function runTermCommand(): Promise<void> {
     showNotice('请输入要执行的命令（! 后跟命令）');
     return;
   }
-  const ok = await chat.runCommand(toRaw(termCmd.value));
+  const ok = await chat.runCommand(fromDisplay(termCmd.value));
   if (ok) {
     text.value = '';
     chat.saveDraft(chat.sessionId, '', []); // executed → drop any stored draft
@@ -906,7 +940,7 @@ async function runTermCommand(): Promise<void> {
 }
 
 async function send(): Promise<void> {
-  const draft = toRaw(text.value).trim();
+  const draft = fromDisplay(text.value).trim();
   if (!draft && chat.attachments.length === 0) return;
   if (!chat.sessionId) return;
   const expanded = draft ? await expandReferences(draft) : draft;
@@ -927,7 +961,7 @@ watch(
   () => sessionsStore.pendingComposerText,
   (v) => {
     if (!v) return;
-    text.value = toDisplay(v);
+    text.value = toDisplayFull(v);
     sessionsStore.pendingComposerText = '';
     void Promise.resolve().then(() => inputEl.value?.focus());
   },
@@ -1167,6 +1201,10 @@ function onExpandConfirm(v: string): void {
   display: flex;
   gap: 4px;
   overflow: hidden; /* clip the overlay <pre> at the wrap edge */
+  background: #10141f; /* panel background lives HERE: it always covers the
+                          whole field regardless of how much text there is
+                          (the overlay pre only spans its content height) */
+  border-radius: 2px;
 }
 
 /* Overlay layer: paints every character UNDER the transparent textarea.
@@ -1188,7 +1226,7 @@ function onExpandConfirm(v: string): void {
   overflow-wrap: break-word;
   word-break: break-word;
   color: var(--war-text);
-  background: #10141f;
+  background: transparent;
   pointer-events: none;
   overflow: hidden;
 }
@@ -1293,11 +1331,18 @@ function onExpandConfirm(v: string): void {
 <style>
 /* <selection>…</selection> quote overlay — v-html content can't carry the
    scoped attribute, so seq-* MUST live in an unscoped block to match.
-   The whole quote (tags + body) sits inside one seq-hl span: inline
-   backgrounds paint per-line with no gaps, so the block reads as one
-   continuous highlight with no blank rows around it. Tags are not rendered
-   at all. */
+   The display text already holds the elided body, so the capsule shows a
+   fixed-length summary; inline background paints per-line. */
 .seq-hl {
+  display: inline-block;
+  max-width: 100%;
   background: #f2cf6b22;
+  border: 1px solid #f2cf6b3d;
+  border-radius: 999px;
+  padding: 1px 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: baseline;
 }
 </style>

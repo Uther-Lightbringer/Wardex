@@ -74,6 +74,30 @@ export function renderUserMarkdown(text: string): string {
   return mdUser.render(text);
 }
 
+/** User-message quote blocks: <selection>…</selection> → one elliptical
+ * capsule with the body elided to a fixed length (matches the composer
+ * overlay's gold wash; the capsule reads as a single atomic unit). */
+export function renderQuoteHighlight(text: string): string {
+  const QUOTE_ELIDE = 24;
+  const esc = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const elide = (s: string): string => {
+    const t = s.replace(/\s+/g, ' ').trim();
+    const chars = [...t];
+    return chars.length <= QUOTE_ELIDE ? t : chars.slice(0, QUOTE_ELIDE).join('') + '…';
+  };
+  return text
+    .split(/(<selection>[\s\S]*?<\/selection>)/g)
+    .map((p) => {
+      if (/^<selection>[\s\S]*?<\/selection>$/.test(p)) {
+        const body = p.replace(/^<selection>/, '').replace(/<\/selection>$/, '');
+        return `<span class="md-selection">${esc(elide(body))}</span>`;
+      }
+      return esc(p);
+    })
+    .join('');
+}
+
 /** Click delegation for v-html markdown bodies — a plain <a href> click
  * would make the Tauri webview navigate to the URL and REPLACE the whole
  * app, so every anchor click is intercepted here instead:
