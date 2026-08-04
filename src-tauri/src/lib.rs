@@ -1178,6 +1178,8 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
         "composerHeight": stores.prefs.composer_height(),
         "actionBayWidth": stores.prefs.action_bay_width(),
         "actionBayHeight": stores.prefs.action_bay_height(),
+        "monitorChatWidth": stores.prefs.monitor_chat_width(),
+        "monitorChatHeight": stores.prefs.monitor_chat_height(),
         "userAvatarPath": stores.prefs.user_avatar_path(),
     })
 }
@@ -1268,6 +1270,16 @@ fn set_preview_size(state: State<'_, AppState>, width: i64, height: i64) -> Resu
     stores.prefs.set_preview_height(&paths, height).map_err(err)
 }
 
+/// Monitor page mini chat window size (corner-grip drag; 0/0 clears back to
+/// the frontend default 560×74vh).
+#[tauri::command]
+fn set_monitor_chat_size(state: State<'_, AppState>, width: i64, height: i64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_monitor_chat_width(&paths, width).map_err(err)?;
+    stores.prefs.set_monitor_chat_height(&paths, height).map_err(err)
+}
+
 #[tauri::command]
 fn set_panel_layout(
     state: State<'_, AppState>,
@@ -1281,8 +1293,9 @@ fn set_panel_layout(
 
 /// Monitor page sandbox layout: key=projectDir, value={x: 0..1, y: 0..1}
 /// (relative coords, window-resize safe); entry=None razes the barracks.
-/// Deploy (entry=Some) is an empty-barracks start: the project's existing
-/// sessions are all shelved in the same call (restorable via the building menu).
+/// Deploy (entry=Some) is an empty-barracks start AND raze (entry=None) also
+/// clears the field: in both cases the project's un-shelved sessions are all
+/// shelved in the same call (restorable via the building menu).
 #[tauri::command]
 fn set_monitor_layout(
     state: State<'_, AppState>,
@@ -1291,14 +1304,11 @@ fn set_monitor_layout(
 ) -> Result<(), String> {
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
-    let deploying = entry.is_some();
     stores
         .prefs
         .set_monitor_layout(&paths, &project_dir, entry)
         .map_err(err)?;
-    if deploying {
-        stores.sessions.shelve_all_for_project(&project_dir);
-    }
+    stores.sessions.shelve_all_for_project(&project_dir);
     Ok(())
 }
 
@@ -1597,6 +1607,7 @@ pub fn run() {
             clear_user_avatar,
             set_font_scale,
             set_preview_size,
+            set_monitor_chat_size,
             set_panel_layout,
             set_monitor_layout,
             set_panel_width,

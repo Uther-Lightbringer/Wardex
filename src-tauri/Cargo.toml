@@ -1,6 +1,6 @@
 [package]
 name = "wardex-tauri"
-version = "0.0.1"
+version = "0.0.2"
 description = "WarDex - WC3 style AI coding assistant GUI (Tauri rewrite)"
 edition = "2021"
 

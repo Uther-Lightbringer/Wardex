@@ -1002,7 +1002,8 @@ impl SessionStore {
     }
 
     /// Shelve every un-shelved session of a project (monitor deploy = empty
-    /// barracks: history goes to the「已搁置」list, restorable one by one).
+    /// barracks start, raze = clear the field: history goes to the「已搁置」
+    /// list, restorable one by one).
     /// Returns how many were shelved.
     pub fn shelve_all_for_project(&mut self, project_dir: &str) -> usize {
         let ids: Vec<String> = self

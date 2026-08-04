@@ -67,6 +67,10 @@ pub struct UserPrefs {
     composer_height: Option<i64>,
     #[serde(rename = "fontScale")]
     font_scale: f64,
+    #[serde(rename = "monitorChatHeight", skip_serializing_if = "Option::is_none")]
+    monitor_chat_height: Option<i64>,
+    #[serde(rename = "monitorChatWidth", skip_serializing_if = "Option::is_none")]
+    monitor_chat_width: Option<i64>,
     #[serde(rename = "monitorLayout")]
     monitor_layout: Map<String, Value>,
     #[serde(rename = "panelLayout")]
@@ -112,6 +116,10 @@ struct PrefsFile {
     rail_width: Option<i64>,
     #[serde(rename = "fontScale", default = "default_font_scale")]
     font_scale: f64,
+    #[serde(rename = "monitorChatHeight")]
+    monitor_chat_height: Option<i64>,
+    #[serde(rename = "monitorChatWidth")]
+    monitor_chat_width: Option<i64>,
     #[serde(rename = "monitorLayout")]
     monitor_layout: Map<String, Value>,
     #[serde(rename = "panelLayout")]
@@ -134,6 +142,8 @@ impl Default for PrefsFile {
             preview_height: 0,
             rail_width: None,
             font_scale: default_font_scale(),
+            monitor_chat_height: None,
+            monitor_chat_width: None,
             monitor_layout: Map::new(),
             panel_layout: Map::new(),
             panel_width: None,
@@ -163,6 +173,8 @@ impl Default for UserPrefs {
             preview_height: 0,
             rail_width: None,
             font_scale: 1.0,
+            monitor_chat_height: None,
+            monitor_chat_width: None,
             monitor_layout: Map::new(),
             panel_layout: Map::new(),
             panel_width: None,
@@ -216,6 +228,21 @@ const ACTION_BAY_WIDTH_MAX: i64 = 480;
 const ACTION_BAY_HEIGHT_MIN: i64 = 100;
 const ACTION_BAY_HEIGHT_MAX: i64 = 360;
 
+/// 监控页会话小窗尺寸（MonitorChatWin 右下角 grip 拉伸）：边界与前端
+/// WIN_MIN_W/WIN_MIN_H 一致；0（未拖）用前端默认 560×74vh。
+const MONITOR_CHAT_WIDTH_MIN: i64 = 480;
+const MONITOR_CHAT_WIDTH_MAX: i64 = 3840;
+const MONITOR_CHAT_HEIGHT_MIN: i64 = 360;
+const MONITOR_CHAT_HEIGHT_MAX: i64 = 2160;
+
+fn clamp_monitor_chat_width(v: i64) -> i64 {
+    v.clamp(MONITOR_CHAT_WIDTH_MIN, MONITOR_CHAT_WIDTH_MAX)
+}
+
+fn clamp_monitor_chat_height(v: i64) -> i64 {
+    v.clamp(MONITOR_CHAT_HEIGHT_MIN, MONITOR_CHAT_HEIGHT_MAX)
+}
+
 fn clamp_composer_height(v: i64) -> i64 {
     v.clamp(COMPOSER_HEIGHT_MIN, COMPOSER_HEIGHT_MAX)
 }
@@ -258,6 +285,8 @@ impl UserPrefs {
             preview_height: clamp_preview_size(file.preview_height),
             rail_width: file.rail_width.map(clamp_rail_width),
             font_scale: clamp_font_scale(file.font_scale),
+            monitor_chat_height: file.monitor_chat_height.map(clamp_monitor_chat_height),
+            monitor_chat_width: file.monitor_chat_width.map(clamp_monitor_chat_width),
             monitor_layout: file.monitor_layout,
             panel_layout: file.panel_layout,
             panel_width: file.panel_width.map(clamp_panel_width).or(legacy_width),
@@ -550,6 +579,36 @@ impl UserPrefs {
         }
         self.save(paths)
     }
+
+    // ---- monitorChat size (mini chat window, dragged via corner grip) ----
+
+    /// 会话小窗宽度 (px)。0 = 未拖过，前端用默认 560。
+    pub fn monitor_chat_width(&self) -> i64 {
+        self.monitor_chat_width.unwrap_or(0)
+    }
+
+    pub fn set_monitor_chat_width(&mut self, paths: &Paths, w: i64) -> Result<(), PrefsError> {
+        let w = (w > 0).then_some(clamp_monitor_chat_width(w));
+        if self.monitor_chat_width == w {
+            return Ok(());
+        }
+        self.monitor_chat_width = w;
+        self.save(paths)
+    }
+
+    /// 会话小窗高度 (px)。0 = 未拖过，前端用默认 74vh。
+    pub fn monitor_chat_height(&self) -> i64 {
+        self.monitor_chat_height.unwrap_or(0)
+    }
+
+    pub fn set_monitor_chat_height(&mut self, paths: &Paths, h: i64) -> Result<(), PrefsError> {
+        let h = (h > 0).then_some(clamp_monitor_chat_height(h));
+        if self.monitor_chat_height == h {
+            return Ok(());
+        }
+        self.monitor_chat_height = h;
+        self.save(paths)
+    }
 }
 
 /// Old per-panel `panelLayout.<id>.width` → the shared panelWidth, taking
@@ -666,6 +725,37 @@ mod tests {
         assert_eq!(reloaded.composer_height(), 0);
         assert_eq!(reloaded.action_bay_width(), 180);
         assert_eq!(reloaded.action_bay_height(), 100);
+    }
+
+    #[test]
+    fn monitor_chat_size_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+
+        let mut prefs = UserPrefs::load(&paths);
+        assert_eq!(prefs.monitor_chat_width(), 0);
+        assert_eq!(prefs.monitor_chat_height(), 0);
+
+        prefs.set_monitor_chat_width(&paths, 720).unwrap();
+        prefs.set_monitor_chat_height(&paths, 520).unwrap();
+        assert_eq!(prefs.monitor_chat_width(), 720);
+        assert_eq!(prefs.monitor_chat_height(), 520);
+
+        // Clamped into the sane ranges.
+        prefs.set_monitor_chat_width(&paths, 10).unwrap();
+        assert_eq!(prefs.monitor_chat_width(), 480);
+        prefs.set_monitor_chat_height(&paths, 99999).unwrap();
+        assert_eq!(prefs.monitor_chat_height(), 2160);
+
+        // 0 → cleared back to the frontend default.
+        prefs.set_monitor_chat_width(&paths, 0).unwrap();
+        assert_eq!(prefs.monitor_chat_width(), 0);
+
+        // Round-trip through disk.
+        drop(prefs);
+        let reloaded = UserPrefs::load(&paths);
+        assert_eq!(reloaded.monitor_chat_width(), 0);
+        assert_eq!(reloaded.monitor_chat_height(), 2160);
     }
 
     #[test]

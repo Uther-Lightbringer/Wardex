@@ -56,6 +56,9 @@ export const usePrefsStore = defineStore('prefs', {
     actionBayHeight: 0,
     /** 战场监控页：projectDir → 兵营落点（比例坐标）。 */
     monitorLayout: {} as Record<string, MonitorLayoutEntry>,
+    /** 监控页会话小窗尺寸(px)：0=未拖过，用默认 560×74vh。 */
+    monitorChatWidth: 0,
+    monitorChatHeight: 0,
     userAvatarPath: '',
     loaded: false,
   }),
@@ -85,6 +88,8 @@ export const usePrefsStore = defineStore('prefs', {
             actionBayWidth?: number;
             actionBayHeight?: number;
             monitorLayout?: Record<string, MonitorLayoutEntry>;
+            monitorChatWidth?: number;
+            monitorChatHeight?: number;
           }>('get_prefs');
           this.fontScale = clampScale(p.fontScale ?? 1.0);
           this.panelLayout = p.panelLayout ?? {};
@@ -98,6 +103,8 @@ export const usePrefsStore = defineStore('prefs', {
           this.actionBayWidth = p.actionBayWidth ?? 0;
           this.actionBayHeight = p.actionBayHeight ?? 0;
           this.monitorLayout = p.monitorLayout ?? {};
+          this.monitorChatWidth = p.monitorChatWidth ?? 0;
+          this.monitorChatHeight = p.monitorChatHeight ?? 0;
           this.userAvatarPath = p.userAvatarPath ?? '';
           return;
         } catch (e) {
@@ -296,6 +303,19 @@ export const usePrefsStore = defineStore('prefs', {
         }
       }
       localStorage.setItem(LS_PANEL_LAYOUT, JSON.stringify(this.panelLayout));
+    },
+
+    /** 监控页会话小窗尺寸：拖拽松手后调用一次持久化；0/0 = 清除回默认。 */
+    async setMonitorChatSize(width: number, height: number): Promise<void> {
+      this.monitorChatWidth = Math.round(width);
+      this.monitorChatHeight = Math.round(height);
+      if (isTauri) {
+        try {
+          await cmd('set_monitor_chat_size', { width: this.monitorChatWidth, height: this.monitorChatHeight });
+        } catch (e) {
+          console.warn('[prefs] set_monitor_chat_size failed', e);
+        }
+      }
     },
 
     /** 战场监控页兵营落点：先改本地（即时反馈）再落盘；entry=null = 销毁。 */

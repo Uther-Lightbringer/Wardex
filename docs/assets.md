@@ -83,6 +83,16 @@
 | `wc3_extracted/ui/GlueScreen-Button-KeyboardHighlight.png` | 蓝色高亮条，加色混合 `mix-blend-mode: screen`（菜单高亮、最近项目 0.55 透明度） |
 | `wc3_extracted/ui/GlueScreen-Profile-Stretch2.png` | 资料拉伸条（SteelPanel 装饰） |
 
+## ui/monitor/ —— 战场监控（4 张）
+
+| 文件 | 用途 |
+|---|---|
+| `ui/monitor/barracks.png` | 兵营建筑图 |
+| `ui/monitor/dirt.png` | 泥土贴图（旧平铺地面，已被 `map.webp` 取代，留作备用） |
+| `ui/monitor/map.webp` | 整张战场地面图（AI 生成 1024×1024 草地，WebP q88 压缩 1900KB→286KB）：世界层 `center / cover` 铺满，小地图加暗罩作底色 |
+| `ui/monitor/footman.png` | 步兵头像（旧静态图标，现仅作备用） |
+| `ui/monitor/footman_walk.png` | 步兵行走循环精灵表（AI 生成绿幕图经 `tools/sprite_extract.py` 抠图重排）：透明背景，4 行 × 8 列、单元格 204×176，行序 下/上/左/右，帧 0 为站立帧；`MonitorPage.vue` 以 `background-position` + `transform: scale()` 驱动 |
+
 ## Sound/ —— 音效（3 个 WAV）
 
 | 文件 | 事件 | 说明 |

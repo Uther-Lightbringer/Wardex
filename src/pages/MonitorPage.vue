@@ -2,16 +2,20 @@
 // 战场监控页（原型 tools/monitor-mockup/monitor.html 的正式移植）：
 // 左 rail 项目列表（已部署置灰）+ 右 field 土地沙盘。项目部署为兵营（比例
 // 坐标持久化在 prefs.monitorLayout），会话为步兵（2 行 × 4 列、最多 8 个）。
-// field 内是 2.5 倍大的"世界层"（兵营/步兵/部署 ghost 都在世界层内，比例
+// field 内是 WORLD_SCALE 倍大的"世界层"（兵营/步兵/部署 ghost 都在世界层内，比例
 // 坐标相对世界层），可视区 overflow hidden，按住鼠标中键拖动平移（clamp
 // 到世界边界，边缘不露空白）；右下角小地图实时镜像世界层，左键按住拖动
 // 可把视口中心跳到对应世界坐标。
-// 左键步兵 = 默认动作（等审批的开审批，其余开迷你会话窗）；右键兵营/步兵
-// 出内联菜单（新会话选 Agent + 权限模式 / 销毁二次确认 / 搁置恢复 /
-// 重命名 / 删除）。 Esc/快捷键照 SessionSelectPage 模式。
+// RTS 式交互：左键步兵 = 选中（脚下绿圈；待审批的例外，仍直接开审批弹窗），
+// 双击步兵 = 开迷你会话窗；左键点地面空白 = 取消选中；有选中步兵时右键地面 =
+// 命令其走过去（行走精灵动画）。右键兵营/步兵出内联菜单（新会话选 Agent +
+// 权限模式 / 销毁二次确认 / 搁置恢复 / 重命名 / 删除）。
+// Esc/快捷键照 SessionSelectPage 模式。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import PageShell from '../components/PageShell.vue';
 import WarButton from '../components/war/WarButton.vue';
+import WarFrame from '../components/war/WarFrame.vue';
+import WarScrollBar from '../components/war/WarScrollBar.vue';
 import MonitorChatWin from '../components/monitor/MonitorChatWin.vue';
 import MonitorPermDialog from '../components/monitor/MonitorPermDialog.vue';
 import { useNavStore } from '../stores/nav';
@@ -49,6 +53,7 @@ watch(
     if (p === 'monitor') {
       void projects.load();
       void monitor.refresh();
+      centerView(); // 每次进入战场监控，视角回到地图正中央
     }
   },
 );
@@ -56,6 +61,9 @@ watch(
 // ---------------------------------------------------------------------------
 // 左 rail：项目列表（最近项目；已部署置灰）
 // ---------------------------------------------------------------------------
+
+/** 项目列表滚动容器（WarScrollBar 的 target）。 */
+const projListEl = ref<HTMLElement | null>(null);
 
 /** monitorLayout 的 key 是部署时的 canonical dir；大小写不敏感比较。 */
 function layoutEntryOf(dir: string): { x: number; y: number } | undefined {
@@ -83,12 +91,14 @@ const fieldW = ref(800);
 const fieldH = ref(600);
 let resizeObs: ResizeObserver | null = null;
 
-// ---- 世界层（2.5 倍大地图）+ 中键拖动平移 ----
+// ---- 世界层（WORLD_SCALE 倍大地图）+ 中键拖动平移 ----
 // 兵营/步兵/ghost 渲染在世界层内，比例坐标相对世界层；可视区只露出一块，
 // 世界层 transform: translate(panX, panY)，pan clamp 到 [field-world, 0]。
 
-const worldW = computed(() => Math.round(fieldW.value * 2.5));
-const worldH = computed(() => Math.round(fieldH.value * 2.5));
+/** 世界相对可视区的倍数。越大可平移范围越大，但地图图被放大越多越糊。 */
+const WORLD_SCALE = 1.6;
+const worldW = computed(() => Math.round(fieldW.value * WORLD_SCALE));
+const worldH = computed(() => Math.round(fieldH.value * WORLD_SCALE));
 const panX = ref(0);
 const panY = ref(0);
 /** 世界大于可视区才有得拖（此时显示"中键拖动地图"提示）。 */
@@ -101,14 +111,19 @@ function clampPan(): void {
   panY.value = Math.max(minY, Math.min(0, panY.value));
 }
 
+/** 把视角对准世界正中央（进入页面时调用）。 */
+function centerView(): void {
+  panX.value = (fieldW.value - worldW.value) / 2;
+  panY.value = (fieldH.value - worldH.value) / 2;
+  clampPan();
+}
+
 /** 初次测量后把世界中心对到可视区中心（既有居中部署的兵营保持在视野内）。 */
 let panInited = false;
 function initPan(): void {
   if (panInited) return;
   panInited = true;
-  panX.value = (fieldW.value - worldW.value) / 2;
-  panY.value = (fieldH.value - worldH.value) / 2;
-  clampPan();
+  centerView();
 }
 
 watch([fieldW, fieldH], clampPan);
@@ -150,7 +165,7 @@ onBeforeUnmount(onPanUp);
 
 const mmEl = ref<HTMLElement | null>(null);
 const mmW = 180;
-/** 高度按世界层宽高比等比（world 2.5x 两边同比，即 field 宽高比）。 */
+/** 高度按世界层宽高比等比（world 两边同比放大，即 field 宽高比）。 */
 const mmH = computed(() => Math.round((mmW * worldH.value) / worldW.value));
 /** 世界 px → 小地图 px 缩放比。 */
 const mmSx = computed(() => mmW / worldW.value);
@@ -234,6 +249,7 @@ function onFieldMouseMove(e: MouseEvent): void {
 
 function onFieldClick(e: MouseEvent): void {
   if (!monitor.deploying || !fieldEl.value) {
+    selectedId.value = null; // RTS：点地面空白取消选中
     closePop(); // 原型：点空白处关闭右键菜单
     return;
   }
@@ -253,6 +269,18 @@ function onFieldContextMenu(e: MouseEvent): void {
     monitor.cancelDeploy();
     ghost.value = null;
     toast('已取消部署');
+    closePop();
+    return;
+  }
+  // RTS：有选中步兵时右键地面 = 命令其走过去（不弹菜单，目标 = 右键的世界坐标）
+  if (selectedId.value && fieldEl.value) {
+    const r = fieldEl.value.getBoundingClientRect();
+    // 世界坐标 = 屏幕坐标 - pan（同 ghost / 部署落点换算），clamp 到世界边界
+    const wx = Math.max(0, Math.min(worldW.value, e.clientX - r.left - panX.value));
+    const wy = Math.max(0, Math.min(worldH.value, e.clientY - r.top - panY.value));
+    commandMove(selectedId.value, wx, wy);
+    closePop();
+    return;
   }
   closePop();
 }
@@ -282,8 +310,21 @@ function slotPos(dir: string, i: number): { x: number; y: number } {
   return { x: b.x - 95 + col * FW, y: b.y - 38 + (1 - row) * FH };
 }
 
+/** 每个兵营的栏位会话缓存：只在 sessions/布局/部署过渡标记变化时重算，
+ *  行走动画每帧触发的重渲染直接复用（否则每个兵营每次渲染都 filter+sort 全量会话）。
+ *  部署过渡期（落盘+搁置重拉中）返回空，避免旧会话闪一下再消失。 */
+const slotsByDir = computed(() => {
+  const m: Record<string, SessionIndexRow[]> = {};
+  for (const b of deployedList.value) {
+    m[b.dir] = monitor.deploySettling.includes(b.dir)
+      ? []
+      : monitor.sessionsOf(b.dir).slice(0, 8);
+  }
+  return m;
+});
+
 function slotsOf(dir: string): SessionIndexRow[] {
-  return monitor.sessionsOf(dir).slice(0, 8);
+  return slotsByDir.value[dir] ?? [];
 }
 
 function isPermPending(id: string): boolean {
@@ -320,11 +361,123 @@ function barracksNeed(dir: string): boolean {
   return slotsOf(dir).some((s) => isPermPending(s.id));
 }
 
-/** 左键 = 默认动作：等审批的直接审批，其余开小窗直聊。 */
+/** 左键 = 选中（例外：等审批的仍直接开审批弹窗）；双击 = 开迷你会话窗。 */
 function onFootmanClick(s: SessionIndexRow): void {
-  if (isPermPending(s.id)) void monitor.openPermDialog(s.id);
-  else monitor.openChatWin(s.id);
+  if (isPermPending(s.id)) {
+    void monitor.openPermDialog(s.id);
+    return;
+  }
+  selectedId.value = s.id;
 }
+
+function onFootmanDblclick(s: SessionIndexRow): void {
+  if (isPermPending(s.id)) return; // 等审批的走左键审批，不在双击里开窗
+  monitor.openChatWin(s.id);
+}
+
+// ---------------------------------------------------------------------------
+// RTS：选中 + 右键移动 + 行走精灵动画（位置不持久化，重启回栏位）
+// ---------------------------------------------------------------------------
+
+/** 当前选中的步兵（会话 id）。 */
+const selectedId = ref<string | null>(null);
+
+/** 世界坐标覆盖层：被命令移动过的步兵不再跟随栏位，left/top 优先取这里。 */
+const posOverride = ref<Record<string, { x: number; y: number }>>({});
+
+/** 渲染用位置：覆盖值优先，否则回退栏位计算值（小地图同源）。 */
+function footmanPos(id: string, dir: string, i: number): { x: number; y: number } {
+  return posOverride.value[id] ?? slotPos(dir, i);
+}
+
+// 行走精灵表 footman_walk.png：4 行 × 8 列，单元格 204×176。
+// 行：0=下（正面）1=上（背面）2=左 3=右；每行 8 帧行走循环，帧 0 兼作站立。
+const SPRITE_W = 204;
+const SPRITE_H = 176;
+
+/** 每个步兵的动画状态：row = 朝向行，frame = 帧，acc = 帧计时（秒）。 */
+const footAnim = ref<Record<string, { row: number; frame: number; acc: number }>>({});
+
+/** 内层精灵 div 的 background-position（响应式数据驱动帧/行切换）。 */
+function spriteStyle(id: string): { backgroundPosition: string } {
+  const a = footAnim.value[id] ?? { row: 0, frame: 0 };
+  return { backgroundPosition: `-${a.frame * SPRITE_W}px -${a.row * SPRITE_H}px` };
+}
+
+const MOVE_SPEED = 90; // 世界像素/秒
+const FRAME_DT = 0.1; // 行走帧 ~10fps
+
+/** 正在移动的步兵目标（世界坐标，非响应式；rAF 循环消费）。 */
+const moveTargets = new Map<string, { tx: number; ty: number }>();
+let rafId = 0;
+let lastTs = 0;
+
+/** 会话是否还在某个兵营栏位里（移动中被删除/搁置时停掉循环）。 */
+function sessionAlive(id: string): boolean {
+  return deployedList.value.some((b) => slotsOf(b.dir).some((s) => s.id === id));
+}
+
+/** 右键地面下令：目标点 wx/wy 是"脚"的落点，换算成盒子左上角存入覆盖层。 */
+function commandMove(id: string, wx: number, wy: number): void {
+  if (!sessionAlive(id)) return;
+  if (!posOverride.value[id]) posOverride.value[id] = { ...footmanPosCurrent(id) };
+  moveTargets.set(id, { tx: wx - 31, ty: wy - 56 }); // 盒子 62×56，脚在底部中心
+  if (!rafId) {
+    lastTs = performance.now();
+    rafId = requestAnimationFrame(tick);
+  }
+}
+
+/** 当前实际位置（覆盖值优先，否则栏位）。 */
+function footmanPosCurrent(id: string): { x: number; y: number } {
+  const o = posOverride.value[id];
+  if (o) return o;
+  for (const b of deployedList.value) {
+    const i = slotsOf(b.dir).findIndex((s) => s.id === id);
+    if (i >= 0) return slotPos(b.dir, i);
+  }
+  return { x: 0, y: 0 };
+}
+
+/** 统一 rAF 循环：处理所有正在走的步兵，全到位后自停。 */
+function tick(ts: number): void {
+  const dt = Math.min(0.05, (ts - lastTs) / 1000);
+  lastTs = ts;
+  for (const [id, t] of moveTargets) {
+    const p = posOverride.value[id];
+    if (!p || !sessionAlive(id)) {
+      moveTargets.delete(id);
+      continue;
+    }
+    const a = footAnim.value[id] ?? (footAnim.value[id] = { row: 0, frame: 0, acc: 0 });
+    const dx = t.tx - p.x;
+    const dy = t.ty - p.y;
+    const dist = Math.hypot(dx, dy);
+    // 朝向行：横向占优 → 左/右（行 2/3），否则上/下（行 1/0）
+    a.row = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? 2 : 3) : (dy < 0 ? 1 : 0);
+    const step = MOVE_SPEED * dt;
+    if (dist <= step) {
+      p.x = t.tx;
+      p.y = t.ty;
+      a.frame = 0; // 到位后停在该朝向行的站立帧
+      a.acc = 0;
+      moveTargets.delete(id);
+    } else {
+      p.x += (dx / dist) * step;
+      p.y += (dy / dist) * step;
+      a.acc += dt;
+      if (a.acc >= FRAME_DT) {
+        a.acc -= FRAME_DT;
+        a.frame = (a.frame + 1) % 8;
+      }
+    }
+  }
+  rafId = moveTargets.size > 0 ? requestAnimationFrame(tick) : 0;
+}
+
+onBeforeUnmount(() => {
+  if (rafId) cancelAnimationFrame(rafId);
+});
 
 // ---------------------------------------------------------------------------
 // 右键弹出菜单（原型 .pop，含内联面板；一个实例，点别处关闭）
@@ -503,8 +656,8 @@ function onPageKey(e: KeyboardEvent): void {
   if (nav.page !== 'monitor') return;
   if (e.key !== 'Escape') return;
   if (renamingId.value) return; // 内联输入自己处理 Esc
-  if (monitor.chatWinSessionId) {
-    monitor.closeChatWin();
+  if (monitor.chatWins.length > 0) {
+    monitor.closeTopChatWin(); // 关最上层小窗
     return;
   }
   if (monitor.permDialogSessionId) {
@@ -518,6 +671,10 @@ function onPageKey(e: KeyboardEvent): void {
   }
   if (pop.value) {
     closePop();
+    return;
+  }
+  if (selectedId.value) {
+    selectedId.value = null; // RTS：Esc 取消选中
     return;
   }
   void nav.goMain();
@@ -536,48 +693,66 @@ const permDialogRequest = computed(() =>
   <!-- embed=0：监控页左右内容不嵌到窗框铁轨下（不透明 rail 被铁轨压住会裁字） -->
   <PageShell :embed="0">
     <div class="mon">
-      <!-- 左 rail：项目列表 -->
+      <!-- 左 rail：项目列表（frame_popup_small 框，照 RecentProjectsPanel） -->
       <div class="mon__rail">
-        <div class="mon__rail-head" :style="{ fontSize: prefs.fs(18) + 'px' }">
-          项目列表
-          <span v-if="monitor.permPendingCount > 0" class="mon__perm-count" :style="{ fontSize: prefs.fs(12) + 'px' }">
-            ⚠ {{ monitor.permPendingCount }} 个会话等待审批
-          </span>
-        </div>
-        <div class="mon__rail-hint" :style="{ fontSize: prefs.fs(12) + 'px' }">
-          点击未部署的项目，在右侧土地上部署兵营
-        </div>
-        <div class="mon__proj-list">
-          <div
-            v-for="p in projects.recent"
-            :key="p.path"
-            class="mon__proj"
-            :class="{ deployed: isDeployed(p.path) }"
-            @click="!isDeployed(p.path) && startDeploy(p.path)"
-          >
-            <img class="mon__proj-icon" src="/assets/wc3_extracted/ui/icon-folder.png" draggable="false" />
-            <span class="mon__proj-name" :style="{ fontSize: prefs.fs(14) + 'px' }">
-              {{ projects.displayName(p.path) }}
-            </span>
-            <span class="mon__proj-path" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ p.path }}</span>
-            <span v-if="isDeployed(p.path)" class="mon__proj-tag" :style="{ fontSize: prefs.fs(10) + 'px' }">已部署</span>
+        <WarFrame
+          class="mon__rail-frame"
+          src="/assets/ui/frames/frame_popup_small.png"
+          :slice="[44, 50, 45, 50]"
+          :inset="[23, 33, 24, 31]"
+          fill
+        >
+          <div class="mon__rail-col">
+            <div class="mon__rail-head" :style="{ fontSize: prefs.fs(18) + 'px' }">
+              项目列表
+              <span v-if="monitor.permPendingCount > 0" class="mon__perm-count" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                ⚠ {{ monitor.permPendingCount }} 个会话等待审批
+              </span>
+            </div>
+            <div class="mon__rail-hint" :style="{ fontSize: prefs.fs(12) + 'px' }">
+              点击未部署的项目，在右侧土地上部署兵营
+            </div>
+            <div class="mon__proj-wrap">
+              <div ref="projListEl" class="mon__proj-list">
+                <div
+                  v-for="p in projects.recent"
+                  :key="p.path"
+                  class="mon__proj"
+                  :class="{ deployed: isDeployed(p.path) }"
+                  @click="!isDeployed(p.path) && startDeploy(p.path)"
+                >
+                  <span class="mon__proj-glow"></span>
+                  <img class="mon__proj-icon" src="/assets/wc3_extracted/ui/icon-folder.png" draggable="false" />
+                  <span class="mon__proj-name" :style="{ fontSize: prefs.fs(14) + 'px' }">
+                    {{ projects.displayName(p.path) }}
+                  </span>
+                  <span class="mon__proj-path" :style="{ fontSize: prefs.fs(10) + 'px' }">{{ p.path }}</span>
+                  <span v-if="isDeployed(p.path)" class="mon__proj-tag" :style="{ fontSize: prefs.fs(10) + 'px' }">
+                    已部署
+                  </span>
+                </div>
+                <div v-if="projects.recent.length === 0" class="mon__proj-empty" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                  暂无最近项目
+                  <br />
+                  请先在主菜单「打开项目」
+                </div>
+              </div>
+              <WarScrollBar :target="projListEl" :scale="0.8" />
+            </div>
+            <div class="mon__rail-foot">
+              <WarButton
+                :width="190"
+                text="返回(B)"
+                shortcut-key="B"
+                :shortcut-active="pageKeysOn && monitor.chatWins.length === 0 && !monitor.permDialogSessionId"
+                @activated="nav.goMain()"
+              />
+            </div>
           </div>
-          <div v-if="projects.recent.length === 0" class="mon__proj-empty" :style="{ fontSize: prefs.fs(12) + 'px' }">
-            暂无最近项目\n请先在主菜单「打开项目」
-          </div>
-        </div>
-        <div class="mon__rail-foot">
-          <WarButton
-            :width="222"
-            text="返回(B)"
-            shortcut-key="B"
-            :shortcut-active="pageKeysOn && !monitor.chatWinSessionId && !monitor.permDialogSessionId"
-            @activated="nav.goMain()"
-          />
-        </div>
+        </WarFrame>
       </div>
 
-      <!-- 右 field：土地沙盘（可视区；世界层 2.5 倍大，中键平移） -->
+      <!-- 右 field：土地沙盘（可视区；世界层 WORLD_SCALE 倍大，中键平移） -->
       <div
         ref="fieldEl"
         class="mon__field"
@@ -587,7 +762,7 @@ const permDialogRequest = computed(() =>
         @contextmenu="onFieldContextMenu"
       >
         <div class="mon__field-hint" :style="{ fontSize: prefs.fs(15) + 'px' }">
-          — 旷 野 —（左键步兵直接聊 / 右键兵营·步兵出菜单）
+          — 旷 野 —（左键选中步兵 / 双击直聊 / 右键地面命令移动 / 右键兵营·步兵出菜单）
         </div>
 
         <!-- 世界层：兵营/步兵/部署 ghost 都在其中，随 pan 平移 -->
@@ -620,12 +795,13 @@ const permDialogRequest = computed(() =>
               v-for="(s, i) in slotsOf(b.dir)"
               :key="s.id"
               class="mon__footman"
-              :class="footmanClass(s)"
-              :style="{ left: slotPos(b.dir, i).x + 'px', top: slotPos(b.dir, i).y + 'px' }"
+              :class="[footmanClass(s), { sel: selectedId === s.id }]"
+              :style="{ left: footmanPos(s.id, b.dir, i).x + 'px', top: footmanPos(s.id, b.dir, i).y + 'px' }"
               @click.stop="onFootmanClick(s)"
+              @dblclick.stop="onFootmanDblclick(s)"
               @contextmenu="openFootmanMenu(s, $event)"
             >
-              <img src="/assets/ui/monitor/footman.png" draggable="false" />
+              <div class="mon__fspr" :style="spriteStyle(s.id)"></div>
               <div v-if="isPermPending(s.id)" class="mon__bang" :style="{ fontSize: prefs.fs(13) + 'px' }">!</div>
               <div v-else-if="hasUnread(s.id)" class="mon__unread" :style="{ fontSize: prefs.fs(9) + 'px' }">NEW</div>
               <div v-if="isBusy(s.id)" class="mon__talk">•••</div>
@@ -693,8 +869,8 @@ const permDialogRequest = computed(() =>
               class="mon__mm-f"
               :class="footmanClass(s)"
               :style="{
-                left: slotPos(b.dir, i).x * mmSx + 'px',
-                top: slotPos(b.dir, i).y * mmSy + 'px',
+                left: footmanPos(s.id, b.dir, i).x * mmSx + 'px',
+                top: footmanPos(s.id, b.dir, i).y * mmSy + 'px',
               }"
             ></div>
           </template>
@@ -810,11 +986,15 @@ const permDialogRequest = computed(() =>
         </div>
       </div>
 
-      <!-- 迷你会话窗 -->
+      <!-- 迷你会话窗（多开，叠放序在窗口自身 z 上） -->
       <MonitorChatWin
-        v-if="monitor.chatWinSessionId"
-        :session-id="monitor.chatWinSessionId"
-        @close="monitor.closeChatWin()"
+        v-for="w in monitor.chatWins"
+        :key="w.sessionId"
+        :session-id="w.sessionId"
+        :x="w.x"
+        :y="w.y"
+        :z="w.z"
+        @close="monitor.closeChatWin(w.sessionId)"
         @toast="toast"
       />
 
@@ -853,20 +1033,26 @@ export default {
   font-family: SimSun, serif;
 }
 
-/* ---- 左 rail ---- */
+/* ---- 左 rail（frame_popup_small 框，照 RecentProjectsPanel） ---- */
 .mon__rail {
   flex: none;
   width: 264px;
-  background: #10141fee;
-  border-right: 2px solid #3a4a63;
+  z-index: 10;
+  filter: drop-shadow(4px 0 14px #000a);
+}
+
+.mon__rail-frame {
+  height: 100%;
+}
+
+.mon__rail-col {
   display: flex;
   flex-direction: column;
-  box-shadow: 4px 0 20px #000a;
-  z-index: 10;
+  height: 100%;
 }
 
 .mon__rail-head {
-  padding: 14px 16px 10px;
+  padding: 6px 8px 8px;
   color: var(--war-gold);
   font-weight: bold;
   text-shadow: 1px 1px 0 #000;
@@ -883,31 +1069,54 @@ export default {
 }
 
 .mon__rail-hint {
-  padding: 8px 16px;
+  padding: 7px 8px;
   color: var(--war-text-muted);
   border-bottom: 1px solid #2a3344;
 }
 
-.mon__proj-list {
+/* 列表 + WC3 滚动条并排 */
+.mon__proj-wrap {
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+
+.mon__proj-list {
+  flex: 1;
+  min-width: 0;
   overflow-y: auto;
-  scrollbar-width: none;
-  padding: 6px;
+  scrollbar-width: none; /* 原生条隐藏，WC3 WarScrollBar 替代 */
+  padding: 6px 2px;
 }
 
 .mon__proj {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
-  border: 1px solid transparent;
+  gap: 6px;
+  padding: 9px 8px;
+  border: 1px solid #1a2230;
   border-radius: 3px;
+  background: #10141dcc;
+  margin-bottom: 5px;
 }
 
 .mon__proj:hover {
-  background: #32509640;
-  border-color: #2a3344;
+  border-color: #2c4a7a;
+}
+
+/* 行悬停辉光（KeyboardHighlight，照 RecentProjectsPanel recent__glow） */
+.mon__proj-glow {
+  position: absolute;
+  inset: 0;
+  background: url('/assets/wc3_extracted/ui/GlueScreen-Button-KeyboardHighlight.png') 0 0 / 100% 100% no-repeat;
+  mix-blend-mode: screen;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mon__proj:hover:not(.deployed) .mon__proj-glow {
+  opacity: 0.55;
 }
 
 .mon__proj.deployed {
@@ -915,17 +1124,18 @@ export default {
 }
 
 .mon__proj.deployed:hover {
-  background: none;
-  border-color: transparent;
+  border-color: #1a2230;
 }
 
 .mon__proj-icon {
+  position: relative;
   flex: none;
   width: 18px;
   height: 14px;
 }
 
 .mon__proj-name {
+  position: relative;
   flex: 1;
   min-width: 0;
   color: #e8d9a0;
@@ -940,8 +1150,9 @@ export default {
 }
 
 .mon__proj-path {
+  position: relative;
   flex: none;
-  max-width: 90px;
+  max-width: 62px;
   color: var(--war-text-faint);
   white-space: nowrap;
   overflow: hidden;
@@ -949,6 +1160,7 @@ export default {
 }
 
 .mon__proj-tag {
+  position: relative;
   flex: none;
   color: #7ec97a;
   border: 1px solid #7ec97a55;
@@ -965,7 +1177,7 @@ export default {
 
 .mon__rail-foot {
   flex: none;
-  padding: 10px;
+  padding: 8px 0 4px;
   border-top: 1px solid #2a3344;
   display: flex;
   justify-content: center;
@@ -979,13 +1191,12 @@ export default {
   overflow: hidden;
 }
 
-/* ---- 世界层（2.5 倍大地图，随 pan 平移；泥土背景在世界层上） ---- */
+/* ---- 世界层（WORLD_SCALE 倍大地图，随 pan 平移；整张地图铺满世界层） ---- */
 .mon__world {
   position: absolute;
   left: 0;
   top: 0;
-  background: url('/assets/ui/monitor/dirt.png');
-  background-size: 512px;
+  background: url('/assets/ui/monitor/map.webp') center / cover no-repeat;
 }
 
 .mon__field::before {
@@ -1024,7 +1235,7 @@ export default {
   right: 12px;
   bottom: 12px;
   z-index: 8; /* 世界层/暗角之上，右键菜单(40)/小窗(70)之下 */
-  background: #10141fd9;
+  background: linear-gradient(#10141fb3, #10141fb3), url('/assets/ui/monitor/map.webp') center / 100% 100% no-repeat;
   border: 2px solid #3a4a63;
   border-radius: 3px;
   box-shadow: 0 4px 16px #000a;
@@ -1122,11 +1333,11 @@ export default {
   }
 }
 
-/* ---- 步兵 ---- */
+/* ---- 步兵（行走精灵；盒子 62×56，脚在盒子底部中心） ---- */
 .mon__footman {
   position: absolute;
-  width: 52px;
-  height: 54px;
+  width: 62px;
+  height: 56px;
   animation: mon-spawn 0.35s ease-out;
 }
 
@@ -1136,33 +1347,54 @@ export default {
   }
 }
 
-.mon__footman img {
-  width: 100%;
-  height: 100%;
-  border-radius: 4px;
-  border: 2px solid #4a5b75;
-  box-shadow: 2px 3px 6px #000a;
-  box-sizing: border-box;
+/* 精灵层：204×176 单元格按 background-position 取帧，scale 缩放到盒子大小 */
+.mon__fspr {
+  position: absolute;
+  left: -3px; /* 缩放后 67×58 相对盒子居中、脚贴盒子底 */
+  top: -2px;
+  width: 204px;
+  height: 176px;
+  background-image: url(/assets/ui/monitor/footman_walk.png);
+  background-repeat: no-repeat;
+  transform: scale(0.33);
+  transform-origin: top left;
+  pointer-events: none;
+  filter: drop-shadow(2px 3px 3px #0009);
 }
 
-.mon__footman.run img {
-  border-color: #7ec97a;
-  box-shadow:
-    0 0 10px #7ec97a88,
-    2px 3px 6px #000a;
+/* 选中：脚下椭圆光环 */
+.mon__footman.sel::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -3px;
+  width: 44px;
+  height: 14px;
+  transform: translateX(-50%);
+  border: 2px solid #7ec97a;
+  border-radius: 50%;
+  box-shadow: 0 0 8px #7ec97a88;
+  pointer-events: none;
+}
+
+/* 运行中：角色外圈绿光呼吸（不依赖边框） */
+.mon__footman.run .mon__fspr {
   animation: mon-run-glow 1.4s infinite;
 }
 
 @keyframes mon-run-glow {
+  0%,
+  100% {
+    filter: drop-shadow(2px 3px 3px #0009) drop-shadow(0 0 4px #7ec97a66);
+  }
   50% {
-    box-shadow:
-      0 0 18px #7ec97acc,
-      2px 3px 6px #000a;
+    filter: drop-shadow(2px 3px 3px #0009) drop-shadow(0 0 10px #7ec97acc);
   }
 }
 
-.mon__footman.perm img {
-  border-color: var(--war-gold-dim);
+/* 待审批：角色外圈金光 */
+.mon__footman.perm .mon__fspr {
+  filter: drop-shadow(2px 3px 3px #0009) drop-shadow(0 0 7px var(--war-gold-dim));
 }
 
 .mon__bang {
@@ -1305,16 +1537,18 @@ export default {
   z-index: 5;
 }
 
-/* ---- 右键弹出菜单（原型 .pop） ---- */
+/* ---- 右键弹出菜单（原型 .pop；dropdown_panel2 九宫格面板，照 WarDropdown） ---- */
 .mon__pop {
   position: absolute;
   z-index: 40;
-  background: #10141ff5;
-  border: 2px solid #3a4a63;
-  border-radius: 4px;
-  box-shadow:
-    0 6px 24px #000d,
-    inset 0 0 30px #0007;
+  border-style: solid;
+  border-color: transparent;
+  border-width: 13px 14px 12px 14px; /* T R B L（slice 21/23/20/23） */
+  border-image: url('/assets/ui/dropdown/dropdown_panel2.png') 21 23 20 23 fill stretch;
+  /* WebView2 不一定绘制 border-image 中心切片，深蓝兜底层（照 WarDropdown） */
+  background: #060d33d9 padding-box;
+  box-sizing: border-box;
+  box-shadow: 0 6px 24px #000d;
   padding: 10px;
   min-width: 190px;
   max-width: 340px;

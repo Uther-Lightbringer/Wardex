@@ -15,14 +15,26 @@ import type { PermissionRequest } from './chat';
 let listenersReady = false;
 const unlisteners: UnlistenFn[] = [];
 
+/** 迷你会话窗实例（多开）：x/y 是 left/top 定位（不持久化），z 是叠放序
+ * （70 起步递增，永远低于审批弹窗的 75）。 */
+export interface ChatWin {
+  sessionId: string;
+  x: number;
+  y: number;
+  z: number;
+}
+
 export const useMonitorStore = defineStore('monitor', {
   state: () => ({
     /** 待部署的项目目录（'' = 未在部署；ghost 跟随鼠标）。 */
     deploying: '',
+    /** 部署落盘 + 搁置重拉进行中的项目（期间不渲染步兵，
+     *  避免旧会话在栏位里闪一下再被搁置消失）。 */
+    deploySettling: [] as string[],
     /** 每个会话待审批的权限 payload（acp://permission 实时 + 补拉）。 */
     permPayloads: {} as Record<string, PermissionRequest>,
-    /** 迷你会话窗当前会话（'' = 关闭）。 */
-    chatWinSessionId: '',
+    /** 迷你会话窗（可多开；同一会话只开一个）。 */
+    chatWins: [] as ChatWin[],
     /** 权限审批弹窗当前会话（'' = 关闭）。 */
     permDialogSessionId: '',
     /** 小窗已看过的会话：本地抑制 NEW 角标（后端 unread 只在 open_session
@@ -151,14 +163,21 @@ export const useMonitorStore = defineStore('monitor', {
      *  后端在同一个命令里把该项目既有会话全部搁置（会话保留，可从兵营菜单「已搁置」恢复）。 */
     async deploy(dir: string, x: number, y: number): Promise<void> {
       this.deploying = '';
-      const prefs = usePrefsStore();
-      await prefs.setMonitorLayout(dir, { x, y });
-      await useSessionsStore().reloadAll();
+      this.deploySettling = [...this.deploySettling, dir];
+      try {
+        const prefs = usePrefsStore();
+        await prefs.setMonitorLayout(dir, { x, y });
+        await useSessionsStore().reloadAll();
+      } finally {
+        this.deploySettling = this.deploySettling.filter((d) => d !== dir);
+      }
     },
-    /** 销毁兵营（会话保留；重新部署后是空地，历史会话进「已搁置」可恢复）。 */
+    /** 销毁兵营：后端在同一个命令里把该项目未搁置会话全部搁置
+     * （与部署一致，历史会话进「已搁置」可逐个恢复）。 */
     async raze(dir: string): Promise<void> {
       const prefs = usePrefsStore();
       await prefs.setMonitorLayout(dir, null);
+      await useSessionsStore().reloadAll();
     },
 
     // ---- 会话 ----
@@ -269,12 +288,37 @@ export const useMonitorStore = defineStore('monitor', {
 
     // ---- 迷你会话窗 ----
 
+    /** 开小窗：已开则置前；未开则新增（级联偏移初始位置，避免完全重叠）。 */
     openChatWin(id: string): void {
-      this.chatWinSessionId = id;
+      const cur = this.chatWins.find((w) => w.sessionId === id);
+      if (!cur) {
+        const i = this.chatWins.length;
+        this.chatWins = [...this.chatWins, { sessionId: id, x: 60 + i * 32, y: 80 + i * 32, z: 0 }];
+      }
+      this.raiseChatWin(id);
       if (!this.readLocal.includes(id)) this.readLocal = [...this.readLocal, id];
     },
-    closeChatWin(): void {
-      this.chatWinSessionId = '';
+    closeChatWin(id: string): void {
+      this.chatWins = this.chatWins
+        .filter((w) => w.sessionId !== id)
+        .map((w, i) => ({ ...w, z: 70 + i })); // 保持叠放序紧凑、相对不变
+    },
+    /** 置前：z 重排为 70..70+n（永远低于审批弹窗的 75）。 */
+    raiseChatWin(id: string): void {
+      const cur = this.chatWins.find((w) => w.sessionId === id);
+      if (!cur) return;
+      const rest = this.chatWins.filter((w) => w.sessionId !== id);
+      this.chatWins = [...rest, cur].map((w, i) => ({ ...w, z: 70 + i }));
+    },
+    /** 标题栏拖动改位置（不持久化）。 */
+    moveChatWin(id: string, x: number, y: number): void {
+      this.chatWins = this.chatWins.map((w) => (w.sessionId === id ? { ...w, x, y } : w));
+    },
+    /** Esc：关最上层小窗。 */
+    closeTopChatWin(): void {
+      if (this.chatWins.length === 0) return;
+      const top = this.chatWins.reduce((a, b) => (b.z > a.z ? b : a));
+      this.closeChatWin(top.sessionId);
     },
 
     /** 小窗发送：后台会话先确保有 runtime，再发 prompt。 */
