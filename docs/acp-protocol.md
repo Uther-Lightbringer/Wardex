@@ -542,9 +542,9 @@ ACP 客户端直接相关的契约，保证两边接口对齐。
 
 ### 9.4 进程并发上限
 
-参照：`ChatController.cpp:293-317`；常量 `kMaxParallelAcp = 3`（`ChatController.h:50`）。
+参照：`ChatController.cpp:293-317`；常量 `K_MAX_PARALLEL_ACP = 20`（`src-tauri/src/chat/runtime.rs:39`）。
 
-每次要启动新 ACP 进程前执行：运行中进程数 ≥ 3 时，停掉**最久未活动（LRU）的空闲**
+每次要启动新 ACP 进程前执行：运行中进程数 ≥ 20 时，停掉**最久未活动（LRU）的空闲**
 进程（busy 的绝不动）；全是 busy 则允许临时超限。被停的会话下次发言时经
 `session/load` 恢复。
 
@@ -651,7 +651,7 @@ chat 层契约（`src-tauri/src/chat/`，详见 features/chat.md）：
 - [ ] 50ms/250ms 合并 flush；tool/turnFinished 前强制 flush；buffer 尾部保留 2000
 - [ ] 限流重试：isRateLimitError 六个特征串、3 次、20→40→80s 封顶 300s、图片回合不重试
 - [ ] 断线续写：2 次上限、合成 prompt 带尾部 500 字符、不入历史
-- [ ] 进程上限 3、LRU 杀空闲、busy 不动
+- [ ] 进程上限 20、LRU 杀空闲、busy 不动
 - [ ] switchAgent：同 provider 保留 acpSessionId、跨 provider 清空
 - [ ] cancel 2500ms 强杀兜底；guideAt 800ms 兜底且先取消权限请求
 - [ ] 队列上限 10；附件不入队；非图片附件内联 `"[附件] <路径>"`

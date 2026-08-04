@@ -14,14 +14,22 @@ import { useNavStore } from '../stores/nav';
 import { useUiStore } from '../stores/ui';
 import { useProjectsStore } from '../stores/projects';
 import { useChatStore } from '../stores/chat';
+import { useSessionsStore } from '../stores/sessions';
+import { useMonitorStore } from '../stores/monitor';
 import { cmd, isTauri } from '../lib/tauri';
 
 const nav = useNavStore();
 const ui = useUiStore();
 const projects = useProjectsStore();
 const chat = useChatStore();
+const sessions = useSessionsStore();
+const monitor = useMonitorStore();
 
-onMounted(() => void projects.load());
+// 等待审批角标：runtime_states 快照（重启兜底），事件标记由监控/聊天页监听维护。
+onMounted(() => {
+  void projects.load();
+  void sessions.refreshRuntimeStates();
+});
 
 // Letter shortcuts only while the menu is on screen and idle — the old app
 // had C/L/S/A stealing keys while chatting ("random leave" bug).
@@ -119,6 +127,18 @@ async function onExit(): Promise<void> {
                   :shortcut-active="menuKeysOn"
                   @activated="nav.goOverlay('sessionSelect')"
                 />
+                <div class="monitor-btn-wrap">
+                  <WarButton
+                    :width="250"
+                    text="战场监控(M)"
+                    shortcut-key="M"
+                    :shortcut-active="menuKeysOn"
+                    @activated="nav.goOverlay('monitor')"
+                  />
+                  <span v-if="monitor.permPendingCount > 0" class="monitor-badge">
+                    {{ monitor.permPendingCount }}
+                  </span>
+                </div>
                 <WarButton
                   :width="250"
                   text="配置(S)"
@@ -230,6 +250,40 @@ async function onExit(): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* 战场监控按钮的等待审批角标（原型 .war-btn .badge） */
+.monitor-btn-wrap {
+  position: relative;
+  width: 250px;
+}
+
+.monitor-badge {
+  position: absolute;
+  right: -8px;
+  top: -8px;
+  min-width: 22px;
+  height: 22px;
+  line-height: 22px;
+  border-radius: 11px;
+  background: #c9a227;
+  color: #1a1000;
+  font-size: 13px;
+  font-weight: bold;
+  font-family: SimSun, serif;
+  text-align: center;
+  padding: 0 5px;
+  border: 1px solid #ffe9a0;
+  box-shadow: 0 0 8px #c9a227;
+  box-sizing: border-box;
+  pointer-events: none;
+  animation: monitor-badge-pulse 1.2s infinite;
+}
+
+@keyframes monitor-badge-pulse {
+  50% {
+    transform: scale(1.15);
+  }
 }
 
 .exit-panel {

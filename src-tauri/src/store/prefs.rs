@@ -12,6 +12,8 @@
 //                      <root>/user_avatar.png if that exists
 //   - panelLayout    → NEW field (old files lack it — must load fine):
 //                      per-panel dock layout memory, see panels.md §1.2
+//   - monitorLayout  → NEW field (old files lack it): monitor page sandbox
+//                      layout, key=projectDir, value={x: 0..1, y: 0..1}
 //   - panelWidth     → shared drawer width for ALL dock panels (dragged
 //                      once, applies to every tab), 200..276
 //   - composerHeight → 输入框高度 100..360; 0 (未拖) 用前端响应式 clamp
@@ -65,6 +67,8 @@ pub struct UserPrefs {
     composer_height: Option<i64>,
     #[serde(rename = "fontScale")]
     font_scale: f64,
+    #[serde(rename = "monitorLayout")]
+    monitor_layout: Map<String, Value>,
     #[serde(rename = "panelLayout")]
     panel_layout: Map<String, Value>,
     #[serde(rename = "panelWidth", skip_serializing_if = "Option::is_none")]
@@ -108,6 +112,8 @@ struct PrefsFile {
     rail_width: Option<i64>,
     #[serde(rename = "fontScale", default = "default_font_scale")]
     font_scale: f64,
+    #[serde(rename = "monitorLayout")]
+    monitor_layout: Map<String, Value>,
     #[serde(rename = "panelLayout")]
     panel_layout: Map<String, Value>,
     #[serde(rename = "panelWidth")]
@@ -128,6 +134,7 @@ impl Default for PrefsFile {
             preview_height: 0,
             rail_width: None,
             font_scale: default_font_scale(),
+            monitor_layout: Map::new(),
             panel_layout: Map::new(),
             panel_width: None,
         }
@@ -156,6 +163,7 @@ impl Default for UserPrefs {
             preview_height: 0,
             rail_width: None,
             font_scale: 1.0,
+            monitor_layout: Map::new(),
             panel_layout: Map::new(),
             panel_width: None,
         }
@@ -250,6 +258,7 @@ impl UserPrefs {
             preview_height: clamp_preview_size(file.preview_height),
             rail_width: file.rail_width.map(clamp_rail_width),
             font_scale: clamp_font_scale(file.font_scale),
+            monitor_layout: file.monitor_layout,
             panel_layout: file.panel_layout,
             panel_width: file.panel_width.map(clamp_panel_width).or(legacy_width),
         };
@@ -514,6 +523,31 @@ impl UserPrefs {
                 source: e,
             })?;
         self.panel_layout.insert(panel_id.to_string(), value);
+        self.save(paths)
+    }
+
+    // ---- monitorLayout (new field; absent in old files) ----
+
+    pub fn monitor_layout(&self) -> &Map<String, Value> {
+        &self.monitor_layout
+    }
+
+    /// Deploy/reposition one barracks (key = projectDir); None razes it.
+    /// The store writes immediately, like set_panel_layout.
+    pub fn set_monitor_layout(
+        &mut self,
+        paths: &Paths,
+        project_dir: &str,
+        entry: Option<Value>,
+    ) -> Result<(), PrefsError> {
+        match entry {
+            Some(v) => {
+                self.monitor_layout.insert(project_dir.to_string(), v);
+            }
+            None => {
+                self.monitor_layout.remove(project_dir);
+            }
+        }
         self.save(paths)
     }
 }

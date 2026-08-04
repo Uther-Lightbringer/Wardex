@@ -428,7 +428,7 @@
 
 旧: `src/ChatController.cpp:293-317, 1359-1384`、`src/SessionStore.cpp:27-28, 385-398, 508-538`
 
-- 每个并行会话一个 runtime（ACP 进程 + 回合状态）；并发进程软上限 3（`kMaxParallelAcp`）——超限时停最久未活动的**空闲**进程（会话经 `session/load` 恢复）；全忙时允许临时超限。
+- 每个并行会话一个 runtime（ACP 进程 + 回合状态）；并发进程软上限 20（`K_MAX_PARALLEL_ACP`）——超限时停最久未活动的**空闲**进程（会话经 `session/load` 恢复）；全忙时允许临时超限。
 - 后台 runtime 继续流式写入自己的会话模型与磁盘。后台回合完成 → 该会话标未读（rail 行 `NEW` 前缀 / 会话选择页 NEW 徽标）；打开该会话即清除。未读是运行期标记，不落盘。
 - 前台/后台共用同一条代码路径；QML 可见属性（busy/statusText/queueLength/permissionRequest/subagents/retry*）始终代理**活动** runtime。
 
@@ -485,5 +485,5 @@
 - [ ] guideAt：先回应权限取消，800ms 超时杀进程再发 guide，pendingGuide 优先于队列
 - [ ] discardIfEmpty：切走/新建时删空会话；启动清理
 - [ ] 断线续写：尾 500 字合成 prompt 不写历史、continueRetries<2、startFailed 保留部分输出、（已中断）追加而非替换
-- [ ] 多会话并发：进程上限 3 LRU 停空闲、后台未读标记、属性代理活动 runtime
+- [ ] 多会话并发：进程上限 20 LRU 停空闲、后台未读标记、属性代理活动 runtime
 - [ ] 复制 transcript：User:/Assistant: 行、跳过 pending、未打开会话直接解析 JSONL

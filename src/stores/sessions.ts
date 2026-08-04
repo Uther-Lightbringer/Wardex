@@ -48,6 +48,12 @@ export interface SessionIndexRow {
   parentId: string;
   /** 所在组 id；'' = 默认会话组。 */
   groupId: string;
+  /** 搁置（监控页不显示；老 meta 无此字段）。 */
+  shelved?: boolean;
+  /** 每会话权限模式覆盖（default|plan|auto|yolo）；无 = 跟随全局。 */
+  permMode?: string;
+  /** 最后一条消息摘要（监控页兵营 label 副标题）。 */
+  lastMessage?: string;
 }
 
 /** Full-text search hit (SearchHit in Rust; ≤3 per session, ≤50 total). */
@@ -80,6 +86,8 @@ export interface RuntimeState {
   agentId: string;
   imageSupported: boolean;
   lastActivity: number;
+  /** 该会话有未答复的权限请求（监控页金叹号 / 主菜单角标）。 */
+  permPending: boolean;
 }
 
 /** One messages.jsonl row as returned by session_messages (camelCase). */
@@ -169,6 +177,20 @@ export const useSessionsStore = defineStore('sessions', {
         this.defaultAgentId = v.defaultAgentId ?? '';
       } catch (e) {
         console.warn('[sessions] list_agents failed', e);
+      }
+    },
+
+    /** 只拉 runtime_states（主菜单审批角标 / 监控页；不依赖当前项目）。 */
+    async refreshRuntimeStates(): Promise<void> {
+      if (!isTauri) return;
+      try {
+        this.runtimeStates = await cmd<Record<string, RuntimeState>>(
+          'runtime_states',
+          undefined,
+          {},
+        );
+      } catch (e) {
+        console.warn('[sessions] runtime_states failed', e);
       }
     },
 

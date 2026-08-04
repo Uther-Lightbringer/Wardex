@@ -150,10 +150,17 @@ async fn create_session(
     state: State<'_, AppState>,
     project_dir: String,
     group_id: Option<String>,
+    agent_id: Option<String>,
+    perm_mode: Option<String>,
 ) -> Result<String, String> {
     state
         .chat
-        .create_session_in_group(&project_dir, group_id.as_deref().unwrap_or(""))
+        .create_session_in_group(
+            &project_dir,
+            group_id.as_deref().unwrap_or(""),
+            agent_id.as_deref(),
+            perm_mode.as_deref(),
+        )
         .await
         .map_err(err)
 }
@@ -161,6 +168,13 @@ async fn create_session(
 #[tauri::command]
 async fn open_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.open_session(&session_id).await.map_err(err)
+}
+
+/// Monitor page mini-chat: create/warm the runtime for a session that has
+/// meta but no live runtime, WITHOUT switching the active session.
+#[tauri::command]
+async fn ensure_runtime(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state.chat.ensure_runtime(&session_id).await.map_err(err)
 }
 
 #[tauri::command]
@@ -202,6 +216,36 @@ fn set_session_pinned(
     stores
         .sessions
         .set_session_pinned(&session_id, pinned)
+        .map_err(err)
+}
+
+/// Monitor page: hide/show a session there (like set_session_pinned — the
+/// frontend updates its local copy and re-pulls list_sessions).
+#[tauri::command]
+fn set_session_shelved(
+    state: State<'_, AppState>,
+    session_id: String,
+    shelved: bool,
+) -> Result<bool, String> {
+    let mut stores = lock(&state.stores);
+    stores
+        .sessions
+        .set_session_shelved(&session_id, shelved)
+        .map_err(err)
+}
+
+/// Per-session permission-mode override (default|plan|auto|yolo; null 清除
+/// 回全局 prefs 默认)。运行时发 prompt 前读 meta 里的这个值。
+#[tauri::command]
+fn set_session_perm_mode(
+    state: State<'_, AppState>,
+    session_id: String,
+    mode: Option<String>,
+) -> Result<bool, String> {
+    let mut stores = lock(&state.stores);
+    stores
+        .sessions
+        .set_session_perm_mode(&session_id, mode.as_deref())
         .map_err(err)
 }
 
@@ -387,6 +431,7 @@ fn runtime_states(state: State<'_, AppState>) -> Value {
                 "agentId": s.agent_id,
                 "imageSupported": s.image_supported,
                 "lastActivity": s.last_activity_ms,
+                "permPending": s.perm_pending.is_some(),
             }))
         })
         .collect::<serde_json::Map<String, Value>>())
@@ -1128,6 +1173,7 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
         "previewHeight": stores.prefs.preview_height(),
         "railWidth": stores.prefs.rail_width(),
         "panelLayout": stores.prefs.panel_layout(),
+        "monitorLayout": stores.prefs.monitor_layout(),
         "panelWidth": stores.prefs.panel_width(),
         "composerHeight": stores.prefs.composer_height(),
         "actionBayWidth": stores.prefs.action_bay_width(),
@@ -1231,6 +1277,29 @@ fn set_panel_layout(
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
     stores.prefs.set_panel_layout(&paths, &panel_id, &entry).map_err(err)
+}
+
+/// Monitor page sandbox layout: key=projectDir, value={x: 0..1, y: 0..1}
+/// (relative coords, window-resize safe); entry=None razes the barracks.
+/// Deploy (entry=Some) is an empty-barracks start: the project's existing
+/// sessions are all shelved in the same call (restorable via the building menu).
+#[tauri::command]
+fn set_monitor_layout(
+    state: State<'_, AppState>,
+    project_dir: String,
+    entry: Option<Value>,
+) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    let deploying = entry.is_some();
+    stores
+        .prefs
+        .set_monitor_layout(&paths, &project_dir, entry)
+        .map_err(err)?;
+    if deploying {
+        stores.sessions.shelve_all_for_project(&project_dir);
+    }
+    Ok(())
 }
 
 /// Shared right-dock drawer width (px) — one width for ALL dock tabs,
@@ -1434,12 +1503,15 @@ pub fn run() {
             // chat runtime
             create_session,
             open_session,
+            ensure_runtime,
             close_session,
             delete_session,
             set_active_session,
             rename_session,
             set_session_project,
             set_session_pinned,
+            set_session_shelved,
+            set_session_perm_mode,
             send_prompt,
             cancel,
             set_config_option,
@@ -1526,6 +1598,7 @@ pub fn run() {
             set_font_scale,
             set_preview_size,
             set_panel_layout,
+            set_monitor_layout,
             set_panel_width,
             set_rail_width,
             set_composer_height,

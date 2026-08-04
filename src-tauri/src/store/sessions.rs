@@ -108,6 +108,16 @@ pub struct SessionMeta {
     // is written back, matching the old QVariantMap insert behavior.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    // Later-added keys, absent in old files (same insert-once-set behavior
+    // as pinned): shelved = hidden on the monitor page; permMode = per-session
+    // permission-mode override (default|plan|auto|yolo, None = global prefs);
+    // lastMessage = plain-text snippet of the latest user/assistant message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shelved: Option<bool>,
+    #[serde(rename = "permMode", skip_serializing_if = "Option::is_none")]
+    pub perm_mode: Option<String>,
+    #[serde(rename = "lastMessage", skip_serializing_if = "Option::is_none")]
+    pub last_message: Option<String>,
     #[serde(rename = "projectDir")]
     pub project_dir: String,
     pub provider: String,
@@ -125,6 +135,10 @@ pub struct SessionMeta {
 impl SessionMeta {
     pub fn pinned(&self) -> bool {
         self.pinned.unwrap_or(false)
+    }
+
+    pub fn shelved(&self) -> bool {
+        self.shelved.unwrap_or(false)
     }
 }
 
@@ -340,6 +354,14 @@ pub struct SessionIndexRow {
     #[serde(rename = "projectDir")]
     pub project_dir: String,
     pub pinned: bool,
+    /// Monitor page: hidden when shelved.
+    pub shelved: bool,
+    /// Per-session permission-mode override (null = global prefs default).
+    #[serde(rename = "permMode")]
+    pub perm_mode: Option<String>,
+    /// Latest user/assistant message snippet (null before the first write).
+    #[serde(rename = "lastMessage")]
+    pub last_message: Option<String>,
     /// Sub-session source id ("" for top-level sessions).
     #[serde(rename = "parentId")]
     pub parent_id: String,
@@ -478,6 +500,7 @@ impl SessionStore {
                     continue; // unreadable/corrupt meta → not in the list
                 };
                 let pinned = meta.pinned();
+                let shelved = meta.shelved();
                 self.index.push(SessionIndexRow {
                     id,
                     title: meta.title,
@@ -490,6 +513,9 @@ impl SessionStore {
                     summary: meta.summary,
                     project_dir: meta.project_dir,
                     pinned,
+                    shelved,
+                    perm_mode: meta.perm_mode,
+                    last_message: meta.last_message,
                     parent_id: meta.parent_id.unwrap_or_default(),
                     group_id: meta.group_id.unwrap_or_default(),
                 });
@@ -953,6 +979,63 @@ impl SessionStore {
         self.write_meta(&meta)?;
         if let Some(row) = self.index.iter_mut().find(|r| r.id == session_id) {
             row.pinned = pinned;
+        }
+        Ok(true)
+    }
+
+    /// Shelve flag (monitor page hides shelved sessions) — like pin: no
+    /// updatedAt bump, no resort (§3.1).
+    pub fn set_session_shelved(&mut self, session_id: &str, shelved: bool) -> Result<bool, SessionsError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let Some(meta) = self.meta_mut(session_id) else {
+            return Ok(false);
+        };
+        meta.shelved = Some(shelved);
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
+        if let Some(row) = self.index.iter_mut().find(|r| r.id == session_id) {
+            row.shelved = shelved;
+        }
+        Ok(true)
+    }
+
+    /// Shelve every un-shelved session of a project (monitor deploy = empty
+    /// barracks: history goes to the「已搁置」list, restorable one by one).
+    /// Returns how many were shelved.
+    pub fn shelve_all_for_project(&mut self, project_dir: &str) -> usize {
+        let ids: Vec<String> = self
+            .index
+            .iter()
+            .filter(|r| r.project_dir.eq_ignore_ascii_case(project_dir) && !r.shelved)
+            .map(|r| r.id.clone())
+            .collect();
+        let mut n = 0;
+        for id in ids {
+            if self.set_session_shelved(&id, true).unwrap_or(false) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    /// Per-session permission-mode override (whitelisted to the same four
+    /// modes as prefs; anything else or None clears back to the global
+    /// default). No updatedAt bump, no resort (§3.1).
+    pub fn set_session_perm_mode(&mut self, session_id: &str, mode: Option<&str>) -> Result<bool, SessionsError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let mode = mode.filter(|m| crate::store::prefs::PERMISSION_MODES.contains(m));
+        let Some(meta) = self.meta_mut(session_id) else {
+            return Ok(false);
+        };
+        meta.perm_mode = mode.map(str::to_string);
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
+        if let Some(row) = self.index.iter_mut().find(|r| r.id == session_id) {
+            row.perm_mode = meta.perm_mode.clone();
         }
         Ok(true)
     }
@@ -1510,6 +1593,7 @@ impl SessionStore {
 
     /// summary/messageCount/updatedAt (+optional title) bookkeeping after any
     /// message write, then writeMeta. summary = source.left(80) + "…" (§3.1).
+    /// lastMessage = latest user/assistant row's plain text, left(120) + "…".
     fn update_meta_after_write(
         &mut self,
         session_id: &str,
@@ -1519,9 +1603,16 @@ impl SessionStore {
         let Some(open) = self.open.get_mut(session_id) else {
             return Ok(());
         };
+        let last_message = open
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant" || m.role == "user")
+            .map(|m| ellipsize(&m.content, 120));
         open.meta.summary = ellipsize(summary_source, 80);
         open.meta.message_count = open.messages.len() as i64;
         open.meta.updated_at = now_ms();
+        open.meta.last_message = last_message;
         if let Some(hint) = title_hint {
             if !hint.is_empty() {
                 open.meta.title = hint.to_string();
@@ -1539,6 +1630,7 @@ impl SessionStore {
             row.message_count = meta.message_count;
             row.summary = meta.summary.clone();
             row.title = meta.title.clone();
+            row.last_message = meta.last_message.clone();
             row.parent_id = meta.parent_id.clone().unwrap_or_default();
             row.group_id = meta.group_id.clone().unwrap_or_default();
             self.index.insert(0, row);

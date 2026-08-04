@@ -36,7 +36,7 @@ use crate::store::StoreRegistry;
 // ---- budget constants (performance.md §3, ChatController.h:47-168) ----
 
 pub const K_MAX_QUEUE_SIZE: usize = 10;
-pub const K_MAX_PARALLEL_ACP: usize = 3;
+pub const K_MAX_PARALLEL_ACP: usize = 20;
 /// Streaming buffer keeps only this tail after each flush (resume anchor +
 /// emptiness checks); the full text lives in the session store.
 pub const K_STREAM_BUFFER_KEEP: usize = 2000;
@@ -2387,11 +2387,19 @@ impl Actor {
         }
     }
 
+    /// Session meta's permMode override, else the global prefs default —
+    /// the single read point so prompts/spawns/status lines all agree.
+    fn current_permission_mode(&self) -> String {
+        let mut stores = lock_ok(&self.stores);
+        stores
+            .sessions
+            .meta_for(&self.session_id)
+            .and_then(|m| m.perm_mode)
+            .unwrap_or_else(|| stores.prefs.permission_mode().to_string())
+    }
+
     fn current_mapped_mode(&self) -> String {
-        let mode = {
-            let stores = lock_ok(&self.stores);
-            stores.prefs.permission_mode().to_string()
-        };
+        let mode = self.current_permission_mode();
         self.mapped_mode(&mode)
     }
 
@@ -2448,10 +2456,7 @@ impl Actor {
     /// refreshStatusLine (ChatController.cpp:1398-1427). `override_text` is a
     /// one-shot custom line ("已切换 Agent · name", "连接中断，自动续写…").
     fn status_text(&self) -> String {
-        let mode = {
-            let stores = lock_ok(&self.stores);
-            stores.prefs.permission_mode().to_string()
-        };
+        let mode = self.current_permission_mode();
         let mut s = if self.retry_active {
             format!(
                 "限流，{} 秒后自动重试（第 {}/{K_MAX_RATE_LIMIT_RETRIES} 次）…",

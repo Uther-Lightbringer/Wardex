@@ -1,10 +1,10 @@
 // Page state machine + the WC3 three-stage transition (docs/ui-design.md Â§5.6).
 // Six page states: main | config | sessionSelect | chat | todo | usage.
 //
-// All navigation is the same "pull up â†?wait for the popUp SFX â†?drop down":
+// All navigation is the same "pull up ï¿½?wait for the popUp SFX ï¿½?drop down":
 //   1. Up-slide (450ms, ease-in-quad) of the current layer + popUp SFX.
 //   2. Wait the drop gate (950ms total from the click, so ~500ms after the
-//      up-slide ends). The drop may NOT start earlier â€?popDown would cut the
+//      up-slide ends). The drop may NOT start earlier ï¿½?popDown would cut the
 //      popUp tail (gate is tuned down from the raw 1280ms audible length for
 //      snappier transitions; see lib/sfx.ts).
 //   3. Drop (popDown SFX): main menu slides down 450ms ease-out-quad; overlay
@@ -13,10 +13,10 @@
 // is dead until the new page has landed.
 //
 // Layer model (mirrors Main.qml):
-//   menuY     â€?main-menu band (both rails ride it), 0 on screen / -2400 off
-//   overlayY  â€?whole overlay band, only used for overlayâ†’main and
+//   menuY     ï¿½?main-menu band (both rails ride it), 0 on screen / -2400 off
+//   overlayY  ï¿½?whole overlay band, only used for overlayâ†’main and
 //               overlayâ†’overlay up-slides
-//   contentY  â€?per-page content band inside the overlay (PageShell binds
+//   contentY  ï¿½?per-page content band inside the overlay (PageShell binds
 //               it); parked above the viewport before a page becomes visible
 //               so it never flashes one frame at its final position.
 
@@ -25,7 +25,7 @@ import { delay, easeInQuad, easeOutQuad, tween } from '../lib/animate';
 import { play } from '../lib/sfx';
 import { useUiStore } from './ui';
 
-export type PageId = 'main' | 'config' | 'sessionSelect' | 'chat' | 'todo' | 'usage';
+export type PageId = 'main' | 'config' | 'sessionSelect' | 'chat' | 'todo' | 'usage' | 'monitor';
 
 const POP_UP_DUR = 450; // up-slide of menu / overlay band
 const MENU_DOWN_DUR = 450; // main menu slide-down
@@ -33,7 +33,7 @@ const CONTENT_DROP_DUR = 450; // ShellFrame drop-in for overlay pages
 const OFF_Y = -2400; // off-screen parking position (Main.qml offY)
 
 /** Drop gate (ms from the click): the popUp wav stays audible ~1280ms (see
- * sfx.ts), but 950ms covers most of its body â€?the popDown start cuts the
+ * sfx.ts), but 950ms covers most of its body ï¿½?the popDown start cuts the
  * inaudible tail (single-channel audio) and keeps the swap snappy. */
 const DROP_GATE_MS = 950;
 
@@ -55,7 +55,7 @@ export const useNavStore = defineStore('nav', {
   }),
 
   actions: {
-    /** main â†?overlay, or overlay â†?other overlay. */
+    /** main ï¿½?overlay, or overlay ï¿½?other overlay. */
     async goOverlay(target: PageId): Promise<void> {
       const ui = useUiStore();
       if (this.phase !== 'idle') return;
@@ -76,7 +76,7 @@ export const useNavStore = defineStore('nav', {
         await tween(0, OFF_Y, POP_UP_DUR, easeInQuad, (v) => (this.menuY = v));
         this.menuY = OFF_Y;
       } else {
-        // overlay â†?overlay: lift the whole band with the current page, then
+        // overlay ï¿½?overlay: lift the whole band with the current page, then
         // swap and reset the band; the new page's content is parked above.
         await tween(0, OFF_Y, POP_UP_DUR, easeInQuad, (v) => (this.overlayY = v));
         this.overlayY = 0;
@@ -95,7 +95,7 @@ export const useNavStore = defineStore('nav', {
       ui.busy = false;
     },
 
-    /** overlay â†?main menu. */
+    /** overlay ï¿½?main menu. */
     async goMain(): Promise<void> {
       const ui = useUiStore();
       if (this.phase !== 'idle') return;

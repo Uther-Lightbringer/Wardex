@@ -187,16 +187,21 @@ impl ChatManager {
     /// startNewSession (ChatController.cpp:688-721): default agent required,
     /// session created + warmed, previous empty session discarded.
     pub async fn create_session(&self, project_dir: &str) -> Result<String, ChatError> {
-        self.create_session_in_group(project_dir, "").await
+        self.create_session_in_group(project_dir, "", None, None).await
     }
 
     /// createSession landing directly in a rail group ("" = default group).
+    /// `agent_id`/`perm_mode` are the monitor page's overrides: a specific
+    /// agent instead of the default, and a per-session permission mode.
     pub async fn create_session_in_group(
         &self,
         project_dir: &str,
         group_id: &str,
+        agent_id: Option<&str>,
+        perm_mode: Option<&str>,
     ) -> Result<String, ChatError> {
-        self.create_session_with(project_dir, "", true, group_id).await
+        self.create_session_with(project_dir, "", true, group_id, agent_id, perm_mode)
+            .await
     }
 
     /// Internal: `title` empty → default title. `active` false keeps the
@@ -208,15 +213,22 @@ impl ChatManager {
         title: &str,
         active: bool,
         group_id: &str,
+        agent_id: Option<&str>,
+        perm_mode: Option<&str>,
     ) -> Result<String, ChatError> {
         let agent = {
             let stores = lock_ok(&self.stores);
-            stores.agents.default_agent().cloned()
+            match agent_id {
+                Some(id) if !id.is_empty() => stores.agents.get(id).cloned(),
+                _ => stores.agents.default_agent().cloned(),
+            }
         };
         let Some(agent) = agent.filter(can_use_for_chat) else {
-            return Err(ChatError::Message(
-                "请先在配置中创建 Kimi Agent 并设为默认".to_string(),
-            ));
+            return Err(ChatError::Message(if agent_id.is_some() {
+                "Agent 不可用，请在配置页检查".to_string()
+            } else {
+                "请先在配置中创建 Kimi Agent 并设为默认".to_string()
+            }));
         };
         let id = {
             let mut stores = lock_ok(&self.stores);
@@ -225,6 +237,9 @@ impl ChatManager {
                 .create_session_with_group(&snapshot_of(&agent), project_dir, Some(group_id))?;
             if !title.trim().is_empty() {
                 let _ = stores.sessions.rename_session(&id, title.trim());
+            }
+            if perm_mode.is_some() {
+                let _ = stores.sessions.set_session_perm_mode(&id, perm_mode);
             }
             id
         };
@@ -256,6 +271,24 @@ impl ChatManager {
         // 切走一个从未发言的空会话 → 直接丢弃
         if !prev.is_empty() && prev != session_id {
             self.discard_if_empty(&prev).await;
+        }
+        if self.entry_tx(session_id).is_none() {
+            let agent = self.resolve_agent_for(session_id);
+            self.create_runtime(session_id, agent);
+            self.send(session_id, RuntimeCmd::EnsureAcp).await?;
+        }
+        Ok(())
+    }
+
+    /// open_session's runtime half WITHOUT the active switch (monitor page
+    /// mini-chat): create + warm a runtime for a session that has meta but
+    /// no live runtime. Emits no events, touches no active/unread state.
+    pub async fn ensure_runtime(&self, session_id: &str) -> Result<(), ChatError> {
+        {
+            let mut stores = lock_ok(&self.stores);
+            if !stores.sessions.ensure_open(session_id) {
+                return Err(ChatError::SessionMissing);
+            }
         }
         if self.entry_tx(session_id).is_none() {
             let agent = self.resolve_agent_for(session_id);
@@ -477,7 +510,7 @@ impl ChatManager {
     async fn fire_project_due(&self, r: crate::store::todos::TodoRow) {
         // Name = the todo title (40 chars cap).
         let title: String = r.title.trim().chars().take(40).collect();
-        let session_id = match self.create_session_with(&r.project_dir, &title, false, "").await {
+        let session_id = match self.create_session_with(&r.project_dir, &title, false, "", None, None).await {
             Ok(id) => id,
             Err(e) => {
                 log::warn!("todos: project due create_session failed: {e}");

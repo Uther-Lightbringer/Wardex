@@ -321,8 +321,9 @@ async fn process_cap_stops_lru_idle_process() {
     let h = harness();
     // Empty sessions would be discarded when the next one is created, so each
     // session first completes one turn (busy -> idle, messageCount > 0).
+    let cap = crate::chat::runtime::K_MAX_PARALLEL_ACP;
     let mut ids = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..cap + 1 {
         let before = lock_ok(&h.mocks).len();
         let id = ready_session(&h, "").await;
         h.manager.send_prompt(&id, "one turn", &[]).await.expect("send");
@@ -342,15 +343,15 @@ async fn process_cap_stops_lru_idle_process() {
         );
         ids.push(id);
     }
-    // Cap is 3: the 4th spawn evicted the least-recently-active idle process.
+    // The (cap+1)th spawn evicted the least-recently-active idle process.
     assert!(
         wait_for(|| {
             let states = h.manager.runtime_states();
-            states.values().filter(|s| s.acp_running).count() == 3
+            states.values().filter(|s| s.acp_running).count() == cap
                 && states.get(&ids[0]).is_some_and(|s| !s.acp_running)
         })
         .await,
-        "exactly 3 processes stay alive, oldest evicted"
+        "exactly K_MAX_PARALLEL_ACP processes stay alive, oldest evicted"
     );
 }
 

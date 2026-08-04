@@ -58,7 +58,7 @@ lib.rs (Tauri commands/events)
 关键行为（细节见各专题文档）：
 
 - **流式合并**：chunk 先入 pending 缓冲，50ms 单发定时器合并后经事件推前端；积压 >64KB 升 250ms。
-- **进程上限**：`kMaxParallelAcp = 3`，超限停最久未活动的 idle 进程（全 busy 允许临时超限）；会话恢复靠 `session/load`。
+- **进程上限**：`kMaxParallelAcp = 20`，超限停最久未活动的 idle 进程（全 busy 允许临时超限）；会话恢复靠 `session/load`。
 - **会话驻留**：消息模型 LRU 淘汰（旧版无淘汰是内存暴涨 P3 根源），磁盘 JSONL 为唯一持久真相。
 - **限流重试**：429/quota 检测，20→40→80s backoff 上限 300s，重试 3 次；依赖 ACP 层错误事件顺序（见 [acp-protocol.md](./acp-protocol.md) §7）。
 - **断线续写**：进程崩溃且有部分输出时合成续写 prompt（附尾部 500 字符）接同一气泡。
@@ -79,7 +79,7 @@ lib.rs (Tauri commands/events)
 |---|---|
 | P1 每 flush O(N²) 全量重建 | 前端增量 DOM append；markdown 回合结束渲染一次 |
 | P2 消息 2~3 倍重复存储 | segments 单一数据源；运行期 buffer 只留尾部 |
-| P3 会话/runtime 无淘汰 | 消息模型 LRU + ACP 进程上限 3 |
+| P3 会话/runtime 无淘汰 | 消息模型 LRU + ACP 进程上限 20 |
 | P4 工具 payload 全量 + O(n²) 解析 | 内存截断 64KB（全文只落盘）；只解析最后一个累积块 |
 
 ## 7. 兼容性边界

@@ -24,7 +24,7 @@
 ### R3 —— 有界驻留，必须淘汰
 
 - 内存中打开会话的消息模型设上限，LRU 淘汰；淘汰后可从 messages.jsonl 按需重建。
-- ACP 子进程上限 `kMaxParallelAcp = 3`，超限停最久未活动的 idle 进程（全 busy 允许临时超限）。
+- ACP 子进程上限 `kMaxParallelAcp = 20`，超限停最久未活动的 idle 进程（全 busy 允许临时超限）。
 - 任何"打开过就永远留在内存"的结构一律禁止。
 
 ### R4 —— 工具 payload 有界

@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>WarDex 战场监控 - UI 原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0d14;
+    font-family: SimSun, serif; }
+
+  /* ============ 入口（模拟主菜单） ============ */
+  #entry { position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; gap: 40px; background:
+    radial-gradient(ellipse at 30% 20%, #1a2438 0%, #0a0d14 70%); z-index: 50; }
+  #entry .title { position: absolute; top: 12%; width: 100%; text-align: center;
+    font-size: 42px; color: #f5c452; text-shadow: 0 0 18px #f5c45255, 2px 2px 0 #000;
+    letter-spacing: 8px; }
+  .menu-panel { background: #10141fdd; border: 2px solid #3a4a63; border-radius: 4px;
+    padding: 28px 34px; display: flex; flex-direction: column; gap: 12px;
+    box-shadow: 0 0 30px #000c, inset 0 0 40px #0008; }
+  .war-btn { width: 260px; height: 44px; line-height: 44px; text-align: center;
+    font-size: 17px; color: #e8d9a0; background: linear-gradient(#2b3a50, #1a2233);
+    border: 1px solid #4a5b75; border-radius: 3px; cursor: pointer; position: relative;
+    text-shadow: 1px 1px 0 #000; }
+  .war-btn:hover { border-color: #f5c452; color: #f5c452; box-shadow: 0 0 10px #f5c45244; }
+  .war-btn .badge { position: absolute; right: -8px; top: -8px; min-width: 22px;
+    height: 22px; line-height: 22px; border-radius: 11px; background: #c9a227;
+    color: #1a1000; font-size: 13px; font-weight: bold; padding: 0 5px;
+    border: 1px solid #ffe9a0; box-shadow: 0 0 8px #c9a227; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { transform: scale(1.15); } }
+
+  /* ============ 沙盘页 ============ */
+  #sandbox { position: absolute; inset: 0; display: none; }
+  /* 左侧项目列表 */
+  #rail { position: absolute; left: 0; top: 0; bottom: 0; width: 264px;
+    background: #10141fee; border-right: 2px solid #3a4a63; z-index: 10;
+    display: flex; flex-direction: column; box-shadow: 4px 0 20px #000a; }
+  #rail .head { padding: 14px 16px 10px; color: #f5c452; font-size: 18px;
+    font-weight: bold; text-shadow: 1px 1px 0 #000; border-bottom: 1px solid #2a3344;
+    display: flex; justify-content: space-between; align-items: center; }
+  #rail .head .perm-count { font-size: 12px; color: #c9a227; }
+  #rail .hint { padding: 8px 16px; font-size: 12px; color: #7a86a0;
+    border-bottom: 1px solid #2a3344; }
+  #proj-list { flex: 1; overflow-y: auto; scrollbar-width: none; padding: 6px; }
+  .proj { display: flex; align-items: center; gap: 8px; padding: 9px 10px;
+    border: 1px solid transparent; border-radius: 3px; cursor: pointer; }
+  .proj:hover { background: #32509640; border-color: #2a3344; }
+  .proj .icon { width: 18px; height: 14px; background: #c9a227; clip-path:
+    polygon(0 100%, 0 35%, 42% 35%, 50% 0, 100% 0, 100% 100%); flex: none; }
+  .proj .name { flex: 1; color: #e8d9a0; font-size: 14px; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; text-shadow: 1px 1px 0 #000; }
+  .proj .path { font-size: 10px; color: #5a6a85; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; max-width: 90px; }
+  .proj.deployed { opacity: 0.45; cursor: default; }
+  .proj.deployed .name { color: #7a86a0; }
+  .proj .tag { flex: none; font-size: 10px; color: #7ec97a; border: 1px solid #7ec97a55;
+    padding: 0 4px; border-radius: 2px; }
+  #rail .foot { padding: 10px; border-top: 1px solid #2a3344; }
+  #rail .foot .war-btn { width: 100%; height: 36px; line-height: 36px; font-size: 14px; }
+
+  /* 右侧土地 */
+  #field { position: absolute; left: 264px; right: 0; top: 0; bottom: 0;
+    background: url('dirt.png'); background-size: 512px; overflow: hidden;
+    cursor: none; }
+  #field::before { content: ''; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, #0009 100%);
+    pointer-events: none; }
+  #field-hint { position: absolute; top: 18px; width: 100%; text-align: center;
+    color: #5a4a28; font-size: 15px; text-shadow: 0 1px 0 #ffffff30; pointer-events: none; }
+
+  /* 自定义鼠标 */
+  #cursor { position: absolute; z-index: 60; pointer-events: none; display: none; }
+  #cursor img.hand { width: 34px; }
+  #cursor img.ghost { width: 190px; opacity: 0.55; filter: drop-shadow(0 0 12px #7ec97a88); }
+
+  /* 兵营 */
+  .barracks { position: absolute; transform: translate(-50%, -100%); cursor: none; }
+  .barracks img { width: 190px; display: block; filter: drop-shadow(6px 10px 8px #0008); }
+  .barracks .label { position: absolute; top: -26px; width: 100%; text-align: center;
+    color: #f5c452; font-size: 14px; font-weight: bold; white-space: nowrap;
+    text-shadow: 1px 1px 0 #000, 0 0 8px #000; }
+  .barracks .label .sub { color: #d8cba0; font-weight: normal; font-size: 11px; }
+  .barracks.need { animation: bshake 0.5s infinite; }
+  @keyframes bshake { 0%,100%{margin-top:0} 50%{margin-top:-3px} }
+
+  /* 步兵 */
+  .footman { position: absolute; width: 52px; height: 54px; cursor: none;
+    animation: spawn 0.35s ease-out; }
+  @keyframes spawn { from { transform: scale(0); } }
+  .footman img { width: 100%; height: 100%; border-radius: 4px;
+    border: 2px solid #4a5b75; box-shadow: 2px 3px 6px #000a; }
+  .footman.run img { border-color: #7ec97a; box-shadow: 0 0 10px #7ec97a88, 2px 3px 6px #000a;
+    animation: run-glow 1.4s infinite; }
+  @keyframes run-glow { 50% { box-shadow: 0 0 18px #7ec97acc, 2px 3px 6px #000a; } }
+  .footman.perm img { border-color: #c9a227; }
+  .footman .bang { position: absolute; top: -22px; left: 50%; margin-left: -9px;
+    width: 18px; height: 18px; line-height: 18px; text-align: center; font-size: 13px;
+    font-weight: bold; color: #1a1000; background: #ffd93b; border: 1px solid #a8840a;
+    border-radius: 50%; animation: bounce 0.8s infinite; box-shadow: 0 0 8px #ffd93b; }
+  @keyframes bounce { 0%,100%{ transform: translateY(0);} 50%{ transform: translateY(-6px);} }
+  .footman .unread { position: absolute; top: -8px; right: -10px; font-size: 9px;
+    color: #ff6b5e; font-weight: bold; text-shadow: 1px 1px 0 #000; }
+  .footman .fname { position: absolute; top: 100%; width: 76px; left: -12px;
+    text-align: center; font-size: 10px; color: #e8d9a0; text-shadow: 1px 1px 0 #000;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* 弹出面板通用（war 风） */
+  .pop { position: absolute; z-index: 40; background: #10141ff5;
+    border: 2px solid #3a4a63; border-radius: 4px; box-shadow: 0 6px 24px #000d,
+    inset 0 0 30px #0007; padding: 10px; min-width: 190px; }
+  .pop .ptitle { color: #f5c452; font-size: 13px; font-weight: bold; padding-bottom: 7px;
+    margin-bottom: 7px; border-bottom: 1px solid #2a3344; text-shadow: 1px 1px 0 #000;
+    white-space: nowrap; }
+  .pop .item { padding: 7px 12px; font-size: 13px; color: #e8d9a0; cursor: pointer;
+    border-radius: 2px; white-space: nowrap; text-shadow: 1px 1px 0 #000; }
+  .pop .item:hover { background: #32509660; color: #f5c452; }
+  .pop .item.danger:hover { background: #6b2d2d80; color: #ff9b8a; }
+  .pop .item.danger.armed { background: #6b2d2d; color: #ff9b8a;
+    border: 1px solid #b0552f; }
+  .pop .item.disabled { color: #5a6a85; cursor: default; }
+  .pop .item.disabled:hover { background: none; color: #5a6a85; }
+  .pop .shelved-row { display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    font-size: 12px; color: #b9ad8a; }
+  .pop .shelved-row .restore { margin-left: auto; color: #7ec97a; cursor: pointer;
+    border: 1px solid #7ec97a55; padding: 0 5px; border-radius: 2px; font-size: 11px; }
+  .pop .shelved-row .restore:hover { background: #7ec97a22; }
+
+  /* 新会话内联面板（选 Agent + 权限模式） */
+  .pop .newbox { border: 1px solid #2a3344; background: #0a0d14; margin: 4px 2px 8px;
+    padding: 8px; }
+  .pop .nsub { font-size: 11px; color: #7a86a0; margin: 4px 0 5px; }
+  .pop .agent-row { display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    font-size: 13px; color: #b9c4dc; cursor: pointer; border-radius: 2px;
+    border: 1px solid transparent; }
+  .pop .agent-row:hover { background: #32509640; }
+  .pop .agent-row.on { border-color: #c9a227; color: #f5c452; background: #c9a22714; }
+  .pop .agent-row .star { color: #c9a227; font-size: 11px; }
+  .pop .mode-row { display: flex; gap: 5px; }
+  .pop .mode-btn { flex: 1; text-align: center; font-size: 12px; padding: 4px 0;
+    color: #b9c4dc; border: 1px solid #2a3344; border-radius: 2px; cursor: pointer;
+    background: #10141f; }
+  .pop .mode-btn:hover { border-color: #4a5b75; }
+  .pop .mode-btn.on { border-color: #c9a227; color: #f5c452; background: #c9a2271f; }
+  .pop .mode-btn.on.yolo { border-color: #b0552f; color: #ff9b8a; background: #b0552f1f; }
+  .pop .create-btn { margin-top: 8px; text-align: center; padding: 6px 0; font-size: 13px;
+    color: #a8e6a0; border: 1px solid #7ec97a66; border-radius: 2px; cursor: pointer;
+    background: #7ec97a12; }
+  .pop .create-btn:hover { background: #7ec97a2a; }
+
+  /* 迷你会话窗（会话详情） */
+  #chatwin { position: absolute; z-index: 70; left: 50%; top: 50%;
+    transform: translate(-50%, -50%); width: 540px; height: 74%;
+    display: none; flex-direction: column; background: #10141f;
+    border: 2px solid #3a4a63; border-radius: 4px;
+    box-shadow: 0 0 60px #000, inset 0 0 40px #0007; }
+  #chatwin .cw-head { flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid #2a3344; }
+  #chatwin .cw-title { color: #f5c452; font-size: 15px; font-weight: bold;
+    text-shadow: 1px 1px 0 #000; }
+  #chatwin .cw-agent { font-size: 11px; color: #7a86a0; }
+  #chatwin .cw-full { margin-left: auto; font-size: 12px; color: #7ec9e0;
+    cursor: pointer; border: 1px solid #7ec9e044; padding: 2px 8px; border-radius: 2px; }
+  #chatwin .cw-full:hover { background: #7ec9e022; }
+  #chatwin .cw-close { font-size: 14px; color: #b9c4dc; cursor: pointer;
+    padding: 2px 8px; border: 1px solid #2a3344; border-radius: 2px; }
+  #chatwin .cw-close:hover { color: #ff9b8a; border-color: #b0552f; }
+  #chatwin .cw-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none;
+    padding: 14px; display: flex; flex-direction: column; gap: 10px; background: #0a0d14; }
+  .bubble { max-width: 80%; padding: 8px 12px; font-size: 13px; line-height: 1.6;
+    border-radius: 6px; user-select: text; }
+  .bubble.user { align-self: flex-end; background: #2b3a50; color: #e8d9a0;
+    border: 1px solid #4a5b75; }
+  .bubble.ai { align-self: flex-start; background: #141a26; color: #b9c4dc;
+    border: 1px solid #2a3344; }
+  .bubble.sys { align-self: center; background: none; border: none; color: #7a86a0;
+    font-size: 11px; padding: 0; }
+  #chatwin .cw-composer { flex: none; border-top: 1px solid #2a3344; padding: 10px; }
+  #chatwin textarea { width: 100%; height: 56px; background: #0a0d14;
+    border: 1px solid #2a3344; border-radius: 3px; color: #e8d9a0;
+    font-family: SimSun, serif; font-size: 13px; padding: 7px; resize: none;
+    outline: none; user-select: text; }
+  #chatwin textarea:focus { border-color: #c9a22766; }
+  .cw-bar { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .cw-bar .sel-wrap { display: flex; align-items: center; gap: 4px; font-size: 11px;
+    color: #7a86a0; }
+  .cw-bar select { background: #10141f; color: #e8d9a0; border: 1px solid #4a5b75;
+    border-radius: 2px; font-family: SimSun, serif; font-size: 12px; height: 26px;
+    padding: 0 4px; outline: none; cursor: pointer; }
+  .cw-bar .send { margin-left: auto; padding: 4px 22px; font-size: 13px; color: #a8e6a0;
+    border: 1px solid #7ec97a66; border-radius: 2px; cursor: pointer;
+    background: #7ec97a12; }
+  .cw-bar .send:hover { background: #7ec97a2a; }
+
+  /* 权限审批对话框 */
+  #perm-dialog { position: absolute; z-index: 75; left: 50%; top: 50%;
+    transform: translate(-50%, -50%); width: 380px; background: #10141f;
+    border: 2px solid #c9a227; border-radius: 4px; box-shadow: 0 0 60px #000,
+    0 0 24px #c9a22744; padding: 16px; display: none; }
+  #perm-dialog h3 { color: #f5c452; font-size: 16px; text-shadow: 1px 1px 0 #000;
+    margin-bottom: 10px; }
+  #perm-dialog .pbody { font-size: 13px; color: #d8cba0; line-height: 1.6;
+    background: #0a0d14; border: 1px solid #2a3344; padding: 10px; margin-bottom: 14px; }
+  #perm-dialog .pbody .tool { color: #7ec9e0; }
+  #perm-dialog .pbtns { display: flex; gap: 10px; justify-content: center; }
+  #perm-dialog .war-btn { width: 110px; height: 34px; line-height: 34px; font-size: 13px; }
+  #perm-dialog .war-btn.ok { border-color: #7ec97a; color: #a8e6a0; }
+  #perm-dialog .war-btn.no { border-color: #b0552f; color: #ff9b8a; }
+
+  /* toast */
+  #toast { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%);
+    background: #10141fee; border: 1px solid #f5c45266; color: #f5c452; font-size: 13px;
+    padding: 8px 18px; border-radius: 3px; z-index: 80; display: none;
+    text-shadow: 1px 1px 0 #000; }
+</style>
+</head>
+<body>
+
+<!-- ================= 入口画面 ================= -->
+<div id="entry">
+  <div class="title">WarDex</div>
+  <div class="menu-panel">
+    <div class="war-btn">打开项目(O)</div>
+    <div class="war-btn">新建会话(C)</div>
+    <div class="war-btn">加载会话(L)</div>
+    <div class="war-btn" id="btn-monitor" style="border-color:#c9a227;color:#f5c452">
+      战场监控(M)
+      <span class="badge" id="menu-badge">1</span>
+    </div>
+    <div class="war-btn">配置(S)</div>
+    <div class="war-btn">待办(T)</div>
+  </div>
+</div>
+
+<!-- ================= 沙盘 ================= -->
+<div id="sandbox">
+  <div id="rail">
+    <div class="head">项目列表 <span class="perm-count" id="rail-perm"></span></div>
+    <div class="hint">点击未部署的项目，在右侧土地上部署兵营</div>
+    <div id="proj-list"></div>
+    <div class="foot"><div class="war-btn" id="btn-back">返回(B)</div></div>
+  </div>
+  <div id="field">
+    <div id="field-hint">— 旷 野 —（左键步兵直接聊 / 右键兵营·步兵出菜单）</div>
+  </div>
+</div>
+
+<div id="cursor"></div>
+
+<!-- 迷你会话窗 -->
+<div id="chatwin">
+  <div class="cw-head">
+    <span class="cw-title" id="cw-title"></span>
+    <span class="cw-agent" id="cw-agent"></span>
+    <span class="cw-full" id="cw-full">在完整页面打开 →</span>
+    <span class="cw-close" id="cw-close">✕</span>
+  </div>
+  <div class="cw-body" id="cw-body"></div>
+  <div class="cw-composer">
+    <textarea id="cw-input" placeholder="输入消息，Enter 发送，Shift+Enter 换行…"></textarea>
+    <div class="cw-bar">
+      <span class="sel-wrap">模型 <select id="cw-model"></select></span>
+      <span class="sel-wrap">权限 <select id="cw-mode">
+        <option value="default">默认</option>
+        <option value="plan">计划</option>
+        <option value="auto">自动</option>
+        <option value="yolo">放任</option>
+      </select></span>
+      <span class="send" id="cw-send">发送</span>
+    </div>
+  </div>
+</div>
+
+<!-- 权限审批 -->
+<div id="perm-dialog">
+  <h3>⚠ 权限请求</h3>
+  <div class="pbody" id="perm-body"></div>
+  <div class="pbtns">
+    <div class="war-btn ok" id="perm-allow">批准</div>
+    <div class="war-btn" id="perm-always">总是允许</div>
+    <div class="war-btn no" id="perm-deny">拒绝</div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+/* ==================== 假数据 ==================== */
+const agents = [
+  { id: 'kimi',   name: 'Kimi Code',   star: true,  models: ['kimi-for-coding', 'k2-thinking'] },
+  { id: 'claude', name: 'Claude Code', star: false, models: ['sonnet-4.5', 'opus-4.5'] },
+  { id: 'codex',  name: 'Codex CLI',   star: false, models: ['gpt-5.3-codex'] },
+];
+const permModes = [
+  ['default', '默认'], ['plan', '计划'], ['auto', '自动'], ['yolo', '放任'],
+];
+
+const projects = [
+  { dir: 'C:/workspace/Wardex-rust', name: 'Wardex-rust', deployed: false },
+  { dir: 'C:/dev/shop-backend',      name: 'shop-backend', deployed: false },
+  { dir: 'C:/dev/blog-site',         name: 'blog-site', deployed: false },
+  { dir: 'D:/games/mod-tools',       name: 'mod-tools', deployed: false },
+];
+let sidSeq = 100;
+const sessions = []; // {id, projDir, title, state, unread, shelved, agentId, model, permMode}
+const transcripts = {}; // sid -> [{role:'user'|'ai'|'sys', text}]
+const buildings = []; // {projDir, x, y, el}
+
+function seed() {
+  deploy('C:/workspace/Wardex-rust', 460, 420);
+  let s = addSession('C:/workspace/Wardex-rust', '多会话监控页', 'run', false, 'kimi', 'kimi-for-coding', 'default');
+  transcripts[s.id] = [
+    { role: 'user', text: '帮我做一个多项目多会话的进度监控页' },
+    { role: 'ai', text: '好的，我先调查现有架构。后端 ChatManager 已支持多会话并存，主要工作在前端…' },
+    { role: 'user', text: 'UI 我想要魔兽基地风格' },
+    { role: 'ai', text: '有意思，兵营=项目、步兵=会话。我先画个 HTML 原型给你确认…' },
+  ];
+  s = addSession('C:/workspace/Wardex-rust', '修复登录崩溃', 'perm', false, 'kimi', 'kimi-for-coding', 'default');
+  transcripts[s.id] = [
+    { role: 'user', text: '登录页偶现白屏，查一下' },
+    { role: 'ai', text: '定位到是 token 刷新竞态。我修改了 auth.ts，现在需要提交代码。' },
+    { role: 'sys', text: '⚠ 等待权限审批：Bash(git commit …)' },
+  ];
+  s = addSession('C:/workspace/Wardex-rust', '重构 store 层', 'idle', true, 'claude', 'sonnet-4.5', 'auto');
+  transcripts[s.id] = [
+    { role: 'user', text: '把 stores 拆成按域划分的模块' },
+    { role: 'ai', text: '重构完成，全部测试通过。' },
+  ];
+  deploy('C:/dev/shop-backend', 900, 560);
+  s = addSession('C:/dev/shop-backend', '订单接口优化', 'run', false, 'kimi', 'k2-thinking', 'auto');
+  transcripts[s.id] = [
+    { role: 'user', text: 'orders 列表接口 800ms，优化到 200ms 内' },
+    { role: 'ai', text: '正在给 orders 表加联合索引…' },
+  ];
+  addSession('C:/dev/shop-backend', '写单元测试', 'idle', false, 'codex', 'gpt-5.3-codex', 'yolo');
+}
+
+/* ==================== 渲染 ==================== */
+const field = document.getElementById('field');
+const rail  = document.getElementById('proj-list');
+
+function renderRail() {
+  rail.innerHTML = '';
+  projects.forEach(p => {
+    const d = document.createElement('div');
+    d.className = 'proj' + (p.deployed ? ' deployed' : '');
+    d.innerHTML = `<span class="icon"></span><span class="name">${p.name}</span>
+      <span class="path">${p.dir}</span>${p.deployed ? '<span class="tag">已部署</span>' : ''}`;
+    if (!p.deployed) d.onclick = () => startDeploy(p);
+    rail.appendChild(d);
+  });
+  const n = sessions.filter(s => s.state === 'perm' && !s.shelved).length;
+  document.getElementById('rail-perm').textContent = n ? `⚠ ${n} 个会话等待审批` : '';
+  document.getElementById('menu-badge').style.display = n ? '' : 'none';
+  document.getElementById('menu-badge').textContent = n;
+}
+
+function shortDir(dir) { const a = dir.split('/'); return a[a.length-1]; }
+
+/* ==================== 部署流程 ==================== */
+const cursor = document.getElementById('cursor');
+let deploying = null;
+
+document.addEventListener('mousemove', e => {
+  if (document.getElementById('sandbox').style.display !== 'block') return;
+  const r = field.getBoundingClientRect();
+  if (e.clientX < r.left) { cursor.style.display = 'none'; return; }
+  cursor.style.display = 'block';
+  if (deploying) {
+    cursor.style.left = (e.clientX - 95) + 'px';
+    cursor.style.top  = (e.clientY - 190) + 'px';
+  } else {
+    cursor.style.left = (e.clientX - 4) + 'px';
+    cursor.style.top  = (e.clientY - 2) + 'px';
+  }
+});
+
+function startDeploy(p) {
+  deploying = p;
+  cursor.innerHTML = '<img class="ghost" src="barracks.png">';
+  toast(`部署「${p.name}」：在土地上左键点击放置兵营，右键取消`);
+}
+function normalCursor() {
+  cursor.innerHTML = '<img class="hand" src="cursor.png">';
+}
+
+field.addEventListener('click', e => {
+  if (!deploying) return;
+  const r = field.getBoundingClientRect();
+  deploy(deploying.dir, e.clientX - r.left, e.clientY - r.top);
+  deploying = null;
+  normalCursor();
+});
+field.addEventListener('contextmenu', e => {
+  e.preventDefault();
+  if (deploying) { deploying = null; normalCursor(); toast('已取消部署'); }
+  closePops();
+});
+
+function deploy(dir, x, y) {
+  const p = projects.find(p => p.dir === dir);
+  if (p) p.deployed = true;
+  const el = document.createElement('div');
+  el.className = 'barracks';
+  el.style.left = x + 'px'; el.style.top = y + 'px';
+  el.innerHTML = `<div class="label">${p ? p.name : shortDir(dir)}</div><img src="barracks.png">`;
+  el.addEventListener('contextmenu', e => {
+    e.preventDefault(); e.stopPropagation();
+    openBuildingMenu(dir, e.clientX, e.clientY);
+  });
+  field.appendChild(el);
+  buildings.push({ projDir: dir, x, y, el });
+  layoutFootmen(dir); // 重新部署时恢复之前的步兵
+  renderRail();
+}
+
+function raze(dir) {
+  const i = buildings.findIndex(b => b.projDir === dir);
+  if (i < 0) return;
+  buildings[i].el.remove();
+  buildings.splice(i, 1);
+  field.querySelectorAll(`.footman[data-dir="${dir}"]`).forEach(e => e.remove());
+  const p = projects.find(p => p.dir === dir);
+  if (p) p.deployed = false;
+  renderRail();
+  toast(`已销毁「${p ? p.name : shortDir(dir)}」兵营（会话保留，重新部署后恢复）`);
+}
+
+/* ==================== 会话（步兵） ==================== */
+const FW = 62, FH = 56; // 步兵格子步进
+function slotsOf(dir) {
+  return sessions.filter(s => s.projDir === dir && !s.shelved);
+}
+function slotPos(b, i) {
+  // 兵营左下角起，每行 4 个向右，两行；row0 在前（贴近底座），row1 在其后（略叠进建筑）
+  const col = i % 4, row = Math.floor(i / 4);
+  return { x: b.x - 95 + col * FW, y: b.y - 38 + (1 - row) * FH };
+}
+
+function addSession(dir, title, state, unread, agentId, model, permMode) {
+  const s = { id: ++sidSeq, projDir: dir, title, state, unread, shelved: false,
+    agentId: agentId || 'kimi', model: model || 'kimi-for-coding',
+    permMode: permMode || 'default' };
+  sessions.push(s);
+  transcripts[s.id] = transcripts[s.id] || [];
+  layoutFootmen(dir);
+  renderRail();
+  return s;
+}
+
+function layoutFootmen(dir) {
+  field.querySelectorAll(`.footman[data-dir="${dir}"]`).forEach(e => e.remove());
+  const b = buildings.find(b => b.projDir === dir);
+  if (!b) return;
+  const list = slotsOf(dir);
+  list.forEach((s, i) => {
+    const pos = slotPos(b, i);
+    const el = document.createElement('div');
+    el.className = `footman ${s.state}`;
+    el.dataset.dir = dir;
+    el.dataset.sid = s.id;
+    el.style.left = pos.x + 'px'; el.style.top = pos.y + 'px';
+    el.innerHTML = `<img src="footman.png">
+      ${s.state === 'perm' ? '<div class="bang">!</div>' : ''}
+      ${s.unread ? '<div class="unread">NEW</div>' : ''}
+      <div class="fname">${s.title}</div>`;
+    el.addEventListener('click', e => {
+      e.stopPropagation();
+      // 左键 = 默认动作：等审批的直接审批，其余开小窗直聊
+      if (s.state === 'perm') openPermDialog(s);
+      else openChatWin(s);
+    });
+    el.addEventListener('contextmenu', e => {
+      e.preventDefault(); e.stopPropagation();
+      openFootmanMenu(s, e.clientX, e.clientY);
+    });
+    field.appendChild(el);
+  });
+  b.el.classList.toggle('need', list.some(s => s.state === 'perm'));
+}
+
+/* ==================== 弹出菜单 ==================== */
+let popEl = null;
+function closePops() { if (popEl) { popEl.remove(); popEl = null; } }
+function makePop(x, y) {
+  closePops();
+  popEl = document.createElement('div');
+  popEl.className = 'pop';
+  const W = 340;
+  popEl.style.left = Math.min(x, innerWidth - W - 20) + 'px';
+  popEl.style.top  = Math.min(y, innerHeight - 420) + 'px';
+  popEl.addEventListener('click', e => e.stopPropagation());
+  document.body.appendChild(popEl);
+  return popEl;
+}
+document.addEventListener('click', closePops);
+
+function openBuildingMenu(dir, x, y) {
+  const p = projects.find(p => p.dir === dir);
+  const list = slotsOf(dir);
+  const shelved = sessions.filter(s => s.projDir === dir && s.shelved);
+  const pop = makePop(x, y);
+  let html = `<div class="ptitle">⚔ ${p ? p.name : shortDir(dir)}（${list.length}/8）</div>`;
+  html += list.length >= 8
+    ? `<div class="item disabled">＋ 新会话（已满 8 个）</div>`
+    : `<div class="item" data-act="new">＋ 新会话 ▸</div>
+       <div class="newbox" style="display:none">
+         <div class="nsub">选择 Agent（★ 为默认）</div>
+         ${agents.map(a => `<div class="agent-row${a.star ? ' on' : ''}" data-agent="${a.id}">
+           <span>${a.name}</span>${a.star ? '<span class="star">★</span>' : ''}</div>`).join('')}
+         <div class="nsub" style="margin-top:8px">权限模式</div>
+         <div class="mode-row">
+           ${permModes.map(([v, t], i) => `<span class="mode-btn${i === 0 ? ' on' : ''}${v === 'yolo' ? ' yolo' : ''}" data-mode="${v}">${t}</span>`).join('')}
+         </div>
+         <div class="create-btn" data-act="create">⚒ 创建会话</div>
+       </div>`;
+  html += `<div class="item danger" data-act="raze">💥 销毁兵营</div>`;
+  if (shelved.length) {
+    html += `<div class="ptitle" style="margin-top:6px">已搁置（${shelved.length}）</div>`;
+    shelved.forEach(s => {
+      html += `<div class="shelved-row">🗃 ${s.title}<span class="restore" data-restore="${s.id}">恢复</span></div>`;
+    });
+  }
+  pop.innerHTML = html;
+
+  // 展开新会话面板
+  const newbox = pop.querySelector('.newbox');
+  pop.querySelector('[data-act="new"]')?.addEventListener('click', () => {
+    newbox.style.display = newbox.style.display === 'none' ? 'block' : 'none';
+  });
+  // 选 Agent
+  let pickAgent = agents.find(a => a.star)?.id || agents[0].id;
+  pop.querySelectorAll('.agent-row').forEach(el => el.addEventListener('click', () => {
+    pop.querySelectorAll('.agent-row').forEach(e => e.classList.remove('on'));
+    el.classList.add('on');
+    pickAgent = el.dataset.agent;
+  }));
+  // 选权限模式
+  let pickMode = 'default';
+  pop.querySelectorAll('.mode-btn').forEach(el => el.addEventListener('click', () => {
+    pop.querySelectorAll('.mode-btn').forEach(e => e.classList.remove('on'));
+    el.classList.add('on');
+    pickMode = el.dataset.mode;
+  }));
+  // 创建
+  pop.querySelector('[data-act="create"]')?.addEventListener('click', () => {
+    closePops();
+    const ag = agents.find(a => a.id === pickAgent);
+    const s = addSession(dir, '新会话 ' + (sessions.length - 99), 'idle', false,
+      pickAgent, ag.models[0], pickMode);
+    toast(`已在「${p.name}」创建会话（${ag.name} · ${{default:'默认',plan:'计划',auto:'自动',yolo:'放任'}[pickMode]}）`);
+    setTimeout(() => { s.state = 'run'; layoutFootmen(dir); }, 1500);
+  });
+  // 销毁（二次确认）
+  pop.querySelector('[data-act="raze"]')?.addEventListener('click', function () {
+    if (this.classList.contains('armed')) { closePops(); raze(dir); return; }
+    this.classList.add('armed');
+    this.textContent = '⚠ 再次点击确认销毁（会话保留）';
+  });
+  // 恢复搁置
+  pop.querySelectorAll('[data-restore]').forEach(el => el.addEventListener('click', () => {
+    const s = sessions.find(s => s.id == el.dataset.restore);
+    if (slotsOf(dir).length >= 8) { toast('栏位已满（8 个），请先搁置其他会话'); return; }
+    s.shelved = false; layoutFootmen(dir); closePops(); toast(`已恢复「${s.title}」`);
+  }));
+}
+
+function openFootmanMenu(s, x, y) {
+  const pop = makePop(x, y);
+  pop.innerHTML = `
+    <div class="ptitle">🛡 ${s.title}</div>
+    <div class="item" data-act="enter">▶ 进入会话（完整页面）</div>
+    <div class="item" data-act="detail">💬 会话详情（小窗直接聊）</div>
+    <div class="item" data-act="rename">✎ 重命名</div>
+    <div class="item" data-act="shelve">🗃 搁置（保留会话，不在此显示）</div>
+    <div class="item danger" data-act="del">✕ 删除会话</div>`;
+  pop.addEventListener('click', e => {
+    const act = e.target.dataset?.act;
+    if (!act) return;
+    closePops();
+    if (act === 'enter') toast(`进入会话「${s.title}」→ 跳转 ChatPage`);
+    if (act === 'detail') openChatWin(s);
+    if (act === 'rename') startFootmanRename(s);
+    if (act === 'shelve') { s.shelved = true; layoutFootmen(s.projDir); toast(`已搁置「${s.title}」（会话保留）`); }
+    if (act === 'del') {
+      sessions.splice(sessions.indexOf(s), 1);
+      layoutFootmen(s.projDir); renderRail();
+      toast(`已删除「${s.title}」`);
+    }
+  });
+}
+
+/* ==================== 步兵重命名 ==================== */
+function startFootmanRename(s) {
+  const label = field.querySelector(`.footman[data-sid="${s.id}"] .fname`);
+  if (!label) return;
+  const input = document.createElement('input');
+  input.value = s.title;
+  input.maxLength = 24;
+  input.style.cssText = `width:76px;font-size:10px;font-family:SimSun,serif;color:#f5c452;
+    background:#0a0d14;border:1px solid #c9a227;outline:none;text-align:center;padding:1px 2px;`;
+  label.textContent = '';
+  label.appendChild(input);
+  input.focus(); input.select();
+  let done = false;
+  const commit = (ok) => {
+    if (done) return; done = true;
+    const t = input.value.trim();
+    if (ok && t && t !== s.title) { s.title = t; toast(`已重命名为「${t}」`); }
+    layoutFootmen(s.projDir);
+  };
+  input.addEventListener('keydown', e => {
+    e.stopPropagation();
+    if (e.key === 'Enter') commit(true);
+    if (e.key === 'Escape') commit(false);
+  });
+  input.addEventListener('click', e => e.stopPropagation());
+  input.addEventListener('blur', () => commit(true));
+}
+
+/* ==================== 迷你会话窗 ==================== */
+const chatwin = document.getElementById('chatwin');
+let cwSession = null;
+
+function openChatWin(s) {
+  cwSession = s;
+  s.unread = false; layoutFootmen(s.projDir);
+  const ag = agents.find(a => a.id === s.agentId) || agents[0];
+  document.getElementById('cw-title').textContent = '🛡 ' + s.title;
+  document.getElementById('cw-agent').textContent = `${ag.name} · ${s.projDir}`;
+  const modelSel = document.getElementById('cw-model');
+  modelSel.innerHTML = ag.models.map(m => `<option${m === s.model ? ' selected' : ''}>${m}</option>`).join('');
+  document.getElementById('cw-mode').value = s.permMode;
+  renderTranscript();
+  chatwin.style.display = 'flex';
+}
+
+function renderTranscript() {
+  const body = document.getElementById('cw-body');
+  body.innerHTML = '';
+  (transcripts[cwSession.id] || []).forEach(m => {
+    const d = document.createElement('div');
+    d.className = 'bubble ' + m.role;
+    d.textContent = m.text;
+    body.appendChild(d);
+  });
+  body.scrollTop = body.scrollHeight;
+}
+
+function cwSend() {
+  const input = document.getElementById('cw-input');
+  const text = input.value.trim();
+  if (!text || !cwSession) return;
+  cwSession.model = document.getElementById('cw-model').value;
+  cwSession.permMode = document.getElementById('cw-mode').value;
+  transcripts[cwSession.id].push({ role: 'user', text });
+  input.value = '';
+  cwSession.state = 'run'; layoutFootmen(cwSession.projDir);
+  renderTranscript();
+  setTimeout(() => {
+    if (!cwSession) return;
+    transcripts[cwSession.id].push({ role: 'ai', text: '【模拟回复】收到，开始处理：' + text.slice(0, 30) + '…' });
+    cwSession.state = 'idle'; cwSession.unread = true;
+    layoutFootmen(cwSession.projDir); renderRail();
+    if (chatwin.style.display === 'flex') { cwSession.unread = false; layoutFootmen(cwSession.projDir); renderTranscript(); }
+  }, 900);
+}
+document.getElementById('cw-send').onclick = cwSend;
+document.getElementById('cw-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); cwSend(); }
+});
+document.getElementById('cw-close').onclick = () => { chatwin.style.display = 'none'; cwSession = null; };
+document.getElementById('cw-full').onclick = () => {
+  toast(`进入会话「${cwSession.title}」→ 跳转 ChatPage`);
+  chatwin.style.display = 'none'; cwSession = null;
+};
+
+/* ==================== 权限审批 ==================== */
+let permSession = null;
+function openPermDialog(s) {
+  permSession = s;
+  document.getElementById('perm-body').innerHTML =
+    `会话「<b>${s.title}</b>」请求执行：<br><span class="tool">Bash(git commit -m "fix: login crash")</span><br><br>定位到 token 刷新竞态，修改了 auth.ts，现在需要提交代码。`;
+  document.getElementById('perm-dialog').style.display = 'block';
+}
+function closePerm(result) {
+  document.getElementById('perm-dialog').style.display = 'none';
+  if (!permSession) return;
+  toast(`已${result}「${permSession.title}」的权限请求`);
+  transcripts[permSession.id].push({ role: 'sys', text: `权限已${result}（${new Date().toLocaleTimeString()}）` });
+  if (result !== '拒绝') permSession.state = 'run';
+  else permSession.state = 'idle';
+  layoutFootmen(permSession.projDir); renderRail();
+  permSession = null;
+}
+document.getElementById('perm-allow').onclick  = () => closePerm('批准');
+document.getElementById('perm-always').onclick = () => closePerm('总是允许');
+document.getElementById('perm-deny').onclick   = () => closePerm('拒绝');
+
+/* ==================== 其余 ==================== */
+let toastTimer = null;
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.style.display = 'none', 2200);
+}
+document.getElementById('btn-monitor').onclick = () => {
+  document.getElementById('entry').style.display = 'none';
+  document.getElementById('sandbox').style.display = 'block';
+  normalCursor();
+};
+document.getElementById('btn-back').onclick = () => {
+  document.getElementById('sandbox').style.display = 'none';
+  document.getElementById('entry').style.display = 'flex';
+  cursor.style.display = 'none';
+};
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (chatwin.style.display === 'flex') { chatwin.style.display = 'none'; cwSession = null; return; }
+    if (deploying) { deploying = null; normalCursor(); return; }
+    if (document.getElementById('perm-dialog').style.display === 'block') {
+      document.getElementById('perm-dialog').style.display = 'none'; return;
+    }
+    closePops();
+  }
+});
+
+seed();
+renderRail();
+</script>
+</body>
+</html>
