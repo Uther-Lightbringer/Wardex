@@ -64,7 +64,10 @@ function parseQuoted(src: string): { quotes: string[]; text: string } {
 // keyboard layout) routes the input to LOCAL execution instead of the
 // agent: Enter runs the command, output streams back as a kind=="command"
 // chat row (term://output), never entering the agent context.
-const TERM_PREFIX_RE = /^[!！]/;
+// `![` is excluded: a pasted/dropped image embeds as `![name](<path>)` at
+// the cursor and must stay a message, not a command. A real command
+// starting with `[` (test shorthand) can still be run as `! [ … ]`.
+const TERM_PREFIX_RE = /^[!！](?!\[)/;
 
 const termMode = computed(() => {
   const t = text.value.trimStart();
