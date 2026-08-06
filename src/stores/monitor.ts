@@ -321,16 +321,16 @@ export const useMonitorStore = defineStore('monitor', {
       this.closeChatWin(top.sessionId);
     },
 
-    /** 小窗发送：后台会话先确保有 runtime，再发 prompt。 */
-    async sendTo(sessionId: string, text: string): Promise<boolean> {
-      if (!isTauri) return false;
+    /** 小窗发送：后台会话先确保有 runtime，再发 prompt。返回后端 ack
+     * （'sent' 直发 / 'enqueued' 入队），失败 null——小窗据此维护本地队列镜像。 */
+    async sendTo(sessionId: string, text: string): Promise<'sent' | 'enqueued' | null> {
+      if (!isTauri) return null;
       try {
         await cmd('ensure_runtime', { sessionId });
-        await cmd<'sent' | 'enqueued'>('send_prompt', { sessionId, text, attachments: [] });
-        return true;
+        return await cmd<'sent' | 'enqueued'>('send_prompt', { sessionId, text, attachments: [] });
       } catch (e) {
         console.warn('[monitor] send_prompt failed', e);
-        return false;
+        return null;
       }
     },
   },

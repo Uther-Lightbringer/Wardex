@@ -197,10 +197,10 @@ const activityHint = computed(() => {
 
 // Streaming-only flavor lines: a random quote loaded from the Warcraft quotes
 // file (public/assets/Warcraft3-Quotes/…), shown on its OWN second line of the
-// process pill, re-picked on every structural event (new segment / tool
-// upsert) — its left edge never moves, so no layout jitter. Loaded once at
-// runtime and cached module-wide; built-in lines cover the window while the
-// file loads (or if it is missing).
+// process pill, re-picked on a fixed 5-second timer while streaming — its left
+// edge never moves, so no layout jitter. Loaded once at runtime and cached
+// module-wide; built-in lines cover the window while the file loads (or if it
+// is missing).
 const QUOTES_URL =
   '/assets/Warcraft3-Quotes/' + encodeURIComponent('魔兽争霸3角色台词-中文.md');
 const FLAVOR_LINES = [
@@ -244,14 +244,29 @@ void loadQuotes()
   .catch(() => {
     /* keep built-in fallback lines */
   });
+// Re-pick on a fixed 5-second timer while the streaming row has process
+// segments (not per structural event); the timer stops when streaming ends.
+const FLAVOR_INTERVAL_MS = 5000;
+let flavorTimer: ReturnType<typeof setInterval> | null = null;
+function stopFlavorTimer(): void {
+  if (flavorTimer) {
+    clearInterval(flavorTimer);
+    flavorTimer = null;
+  }
+}
 watch(
-  () => segs.value,
-  () => {
-    if (!props.streaming || structSegs.value.length === 0) return;
-    pickFlavor();
+  () => props.streaming && structSegs.value.length > 0,
+  (active) => {
+    if (active) {
+      pickFlavor();
+      if (!flavorTimer) flavorTimer = setInterval(pickFlavor, FLAVOR_INTERVAL_MS);
+    } else {
+      stopFlavorTimer();
+    }
   },
   { immediate: true },
 );
+onBeforeUnmount(stopFlavorTimer);
 
 /** Flavor line split on the first "：": the character name renders gold, the
  * quote itself white (fallback lines without a colon render all-white). */
@@ -569,9 +584,9 @@ const visibleAtts = computed(() =>
             class="bubble-head__usage"
             :style="{ fontSize: fs(11) + 'px' }"
           >
-            <span class="bubble-head__usage-in">↑</span
+            <span class="bubble-head__usage-in">输入</span
             ><span class="bubble-head__usage-num">{{ formatTokens(usage.inputTokens) }}</span>
-            <span class="bubble-head__usage-out">↓</span
+            <span class="bubble-head__usage-out">输出</span
             ><span class="bubble-head__usage-num">{{ formatTokens(usage.outputTokens) }}</span>
           </span>
           <span

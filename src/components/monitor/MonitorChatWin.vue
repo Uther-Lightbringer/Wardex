@@ -23,7 +23,9 @@
 //     工具×n）」一行（procSummary 逻辑移植自 ChatBubble），点击开复用的
 //     ProcessDialog（segments 传该消息完整 segments，流式中也实时）。
 //   - 发送：ensure_runtime → send_prompt；user 气泡靠 chat://messageAppended
-//     回来渲染（不本地插，与主窗一致），失败才本地补一条提示行。
+//     回来渲染（不本地插，与主窗一致），失败才本地补一条提示行。busy 时
+//     后端自动入队（ack 'enqueued'），输入区上方浮出队列面板（照对话页
+//     QueuePanel：引导/移除/清空；镜像本地维护并按 queueLength 对账）。
 //   - 底栏：Agent 下拉（可切换，monitor.switchAgent → 后端 switch_agent）
 //     + 模型（只读展示当前模型——ChatPage composer 本就无模型切换，
 //     模型挂在 Agent 配置上）+ 权限模式下拉（set_session_perm_mode）+ 发送。
@@ -43,6 +45,7 @@ import { useAgentsStore } from '../../stores/agents';
 import { useNavStore } from '../../stores/nav';
 import { useUiStore } from '../../stores/ui';
 import { usePrefsStore } from '../../stores/prefs';
+import { useProjectsStore } from '../../stores/projects';
 import WarButton from '../war/WarButton.vue';
 import WarDropdown from '../war/WarDropdown.vue';
 import WarScrollBar from '../war/WarScrollBar.vue';
@@ -58,6 +61,13 @@ const agents = useAgentsStore();
 const nav = useNavStore();
 const ui = useUiStore();
 const prefs = usePrefsStore();
+const projects = useProjectsStore();
+
+/** 会话所属项目名（小窗多开时在标题栏区分归属）。 */
+const projectName = computed(() => {
+  const row = sessions.all.find((s) => s.id === props.sessionId);
+  return row ? projects.displayName(row.projectDir) : '';
+});
 
 // ---- 消息模型：完整 ChatMessage（保留 thinking/tool 段），响应式直接更新 ----
 
@@ -103,6 +113,52 @@ function activityHint(row: ChatMessage): string {
   return '';
 }
 
+// ---- 流式随机话语（移植 ChatBubble flavor：流式时过程行第二行显示一句
+//      WC3 角色台词，每 5 秒固定轮换；加载失败用内建） ----
+
+const QUOTES_URL =
+  '/assets/Warcraft3-Quotes/' + encodeURIComponent('魔兽争霸3角色台词-中文.md');
+const FLAVOR_LINES = [
+  '战争已经打响。',
+  '力量与荣耀！',
+  '为了联盟！',
+  '为了部落！',
+  '号角已吹响。',
+];
+let quotesCache: Promise<string[]> | null = null;
+function loadQuotes(): Promise<string[]> {
+  if (!quotesCache) {
+    quotesCache = fetch(QUOTES_URL)
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((text) =>
+        text
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l && !l.startsWith('#') && !l.startsWith('>') && l.includes('：')),
+      );
+  }
+  return quotesCache;
+}
+const flavorLines = ref<string[]>(FLAVOR_LINES);
+const flavor = ref('');
+let lastFlavorIdx = -1;
+function pickFlavor(): void {
+  const lines = flavorLines.value;
+  if (lines.length === 0) return;
+  let idx = Math.floor(Math.random() * lines.length);
+  if (lines.length > 1 && idx === lastFlavorIdx) idx = (idx + 1) % lines.length;
+  lastFlavorIdx = idx;
+  flavor.value = lines[idx];
+}
+const flavorName = computed(() => {
+  const i = flavor.value.indexOf('：');
+  return i > 0 ? flavor.value.slice(0, i + 1) : '';
+});
+const flavorText = computed(() => {
+  const i = flavor.value.indexOf('：');
+  return i > 0 ? flavor.value.slice(i + 1) : flavor.value;
+});
+
 /** 过程详情弹窗（复用 ProcessDialog）：记录当前打开的行 id，内容随流式实时。 */
 const procRowId = ref('');
 const procOpen = ref(false);
@@ -111,6 +167,46 @@ function openProc(row: ChatMessage): void {
   procRowId.value = row.id;
   procOpen.value = true;
 }
+
+/** 当前流式行（chunk/tool 事件的追加目标）的 structSegs，用于判定随机话语显隐。 */
+const streamStructSegs = computed(() => {
+  for (let i = rows.value.length - 1; i >= 0; i--) {
+    const r = rows.value[i];
+    if (isStreaming(r)) return structSegsOf(r);
+  }
+  return [];
+});
+/** 随机话语固定轮换：流式中出现过程段时每 5 秒重抽一句，流式结束停表。 */
+const FLAVOR_INTERVAL_MS = 5000;
+let flavorTimer: ReturnType<typeof setInterval> | null = null;
+function stopFlavorTimer(): void {
+  if (flavorTimer) {
+    clearInterval(flavorTimer);
+    flavorTimer = null;
+  }
+}
+watch(
+  () => streamStructSegs.value.length > 0,
+  (active) => {
+    if (active) {
+      pickFlavor();
+      if (!flavorTimer) flavorTimer = setInterval(pickFlavor, FLAVOR_INTERVAL_MS);
+    } else {
+      stopFlavorTimer();
+    }
+  },
+  { immediate: true },
+);
+onBeforeUnmount(stopFlavorTimer);
+void loadQuotes()
+  .then((lines) => {
+    if (lines.length === 0) return;
+    flavorLines.value = lines;
+    if (streamStructSegs.value.length > 0) pickFlavor();
+  })
+  .catch(() => {
+    /* keep built-in fallback lines */
+  });
 
 // ---- markdown（照 ChatBubble：content-addressed 缓存 + 用户图判定） ----
 
@@ -432,6 +528,8 @@ async function loadMeta(): Promise<void> {
 onMounted(async () => {
   void loadMeta();
   await reload();
+  // 队列快照重建镜像（队列跨开窗存活，照主窗 syncStatusFromRuntime）。
+  queueMirror.value = [...(sessions.runtimeStates[props.sessionId]?.queue ?? [])];
   unlisteners.push(
     await listen<{ sessionId: string; kind: string; text: string }>('acp://chunk', (e) => onChunk(e.payload)),
     await listen<{ sessionId: string; tool: Record<string, unknown> }>('acp://tool', (e) => onTool(e.payload)),
@@ -449,15 +547,73 @@ onBeforeUnmount(() => {
   for (const u of unlisteners) u();
 });
 
+// ---- 发送队列（照对话页 QueuePanel：busy 时发送入队；镜像本地维护，
+//      与 chat://status 推进来的 queueLength 对账——drain 从头部弹出） ----
+
+const queueOpen = ref(false);
+/** 队列预览镜像：开窗时从 runtime 快照重建，之后本地增删 + 按长度对账。 */
+const queueMirror = ref<string[]>([]);
+const queueLength = computed(() => sessions.runtimeStates[props.sessionId]?.queueLength ?? 0);
+const queueFull = computed(() => busy.value && queueLength.value >= 10);
+/** 发送按钮文案（照 chat store sendLabel）：生成中时可入队，满 10 条停用。 */
+const sendLabel = computed(() => {
+  if (!busy.value) return '发送';
+  return queueLength.value >= 10 ? '已满' : '入队';
+});
+
+watch(queueLength, (len) => {
+  // drainQueue 弹头部但不说弹了哪条——按权威长度对账（照 chat store）。
+  if (len < queueMirror.value.length) {
+    queueMirror.value = queueMirror.value.slice(queueMirror.value.length - len);
+  }
+  if (len === 0) queueOpen.value = false;
+});
+
+function queuePreview(t: string): string {
+  const flat = t.replace(/\s+/g, ' ').trim();
+  return flat.length > 48 ? flat.slice(0, 48) + '…' : flat;
+}
+
+async function queueGuide(i: number): Promise<void> {
+  queueMirror.value = queueMirror.value.filter((_, j) => j !== i);
+  try {
+    await cmd('guide_at', { sessionId: props.sessionId, index: i });
+  } catch (e) {
+    console.warn('[monitor] guide_at failed', e);
+  }
+}
+
+async function queueRemove(i: number): Promise<void> {
+  queueMirror.value = queueMirror.value.filter((_, j) => j !== i);
+  try {
+    await cmd('remove_queue_at', { sessionId: props.sessionId, index: i });
+  } catch (e) {
+    console.warn('[monitor] remove_queue_at failed', e);
+  }
+}
+
+async function queueClear(): Promise<void> {
+  queueMirror.value = [];
+  queueOpen.value = false;
+  try {
+    await cmd('clear_queue', { sessionId: props.sessionId });
+  } catch (e) {
+    console.warn('[monitor] clear_queue failed', e);
+  }
+}
+
 async function send(): Promise<void> {
   const text = input.value.trim();
-  if (!text || sending.value) return;
+  if (!text || sending.value || queueFull.value) return;
   sending.value = true;
   try {
     // user 气泡靠 chat://messageAppended 回来渲染（不本地插，与主窗一致）。
     input.value = '';
-    const ok = await monitor.sendTo(props.sessionId, text);
-    if (!ok) {
+    const outcome = await monitor.sendTo(props.sessionId, text);
+    if (outcome === 'enqueued') {
+      queueMirror.value = [...queueMirror.value, text];
+      queueOpen.value = true; // 入队后自动展开（照主窗）
+    } else if (outcome === null) {
       rows.value.push({
         id: `sys-${Date.now()}`,
         role: 'sys',
@@ -507,6 +663,7 @@ async function openFull(): Promise<void> {
         @pointercancel="onHeadUp"
       >
         <span class="cw__title" :style="{ fontSize: prefs.fs(15) + 'px' }">🛡 {{ title }}</span>
+        <span v-if="projectName" class="cw__proj" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ projectName }}</span>
         <span class="cw__agent" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ agentLine }}</span>
         <span class="cw__full" :style="{ fontSize: prefs.fs(12) + 'px' }" @click="openFull">在完整页面打开 →</span>
         <span class="cw__close" :style="{ fontSize: prefs.fs(14) + 'px' }" @click="emit('close')">✕</span>
@@ -528,10 +685,16 @@ async function openFull(): Promise<void> {
                 :style="{ fontSize: prefs.fs(12) + 'px' }"
                 @click="openProc(row)"
               >
-                <span class="cw__proc-summary">{{ procSummary(row) }}</span>
-                <span v-if="isStreaming(row) && activityHint(row)" class="cw__proc-hint">
-                  · {{ activityHint(row) }}</span
-                >
+                <div class="cw__proc-main">
+                  <span class="cw__proc-summary">{{ procSummary(row) }}</span>
+                  <span v-if="isStreaming(row) && activityHint(row)" class="cw__proc-hint">
+                    · {{ activityHint(row) }}</span
+                  >
+                </div>
+                <div v-if="isStreaming(row) && flavor" class="cw__proc-flavor">
+                  <span v-if="flavorName" class="cw__proc-flavor-name">{{ flavorName }}</span
+                  ><span class="cw__proc-flavor-text">{{ flavorText }}</span>
+                </div>
               </div>
               <!-- 正文：ai 落盘后 markdown，流式中/其它纯文本；user 嵌图才走渲染器 -->
               <template v-if="textOf(row)">
@@ -572,6 +735,34 @@ async function openFull(): Promise<void> {
           </div>
         </div>
         <WarScrollBar :target="bodyEl" :scale="0.8" />
+      </div>
+
+      <!-- 发送队列（照对话页 QueuePanel：浮在输入区上方，busy 时发送入队） -->
+      <div v-if="queueLength > 0" class="cw__queue">
+        <div class="cw__queue-head" @click="queueOpen = !queueOpen">
+          <span :style="{ fontSize: prefs.fs(12) + 'px' }">
+            {{ queueOpen ? '▼' : '▶' }} 发送队列 ({{ queueLength }}/10)
+          </span>
+          <span class="cw__queue-clear" :style="{ fontSize: prefs.fs(11) + 'px' }" @click.stop="queueClear">
+            清空
+          </span>
+        </div>
+        <div v-if="queueOpen" class="cw__queue-list">
+          <div v-for="(t, i) in queueMirror" :key="i" class="cw__queue-row">
+            <span class="cw__queue-text" :style="{ fontSize: prefs.fs(12) + 'px' }"
+              >{{ i + 1 }}. {{ queuePreview(t) }}</span
+            >
+            <span class="cw__queue-op guide" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="queueGuide(i)">
+              引导
+            </span>
+            <span class="cw__queue-op remove" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="queueRemove(i)">
+              移除
+            </span>
+          </div>
+          <div v-if="queueMirror.length === 0" class="cw__queue-row dim" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            （队列内容在后台运行时）
+          </div>
+        </div>
       </div>
 
       <div class="cw__composer">
@@ -618,8 +809,8 @@ async function openFull(): Promise<void> {
             skin="dialog"
             :width="96"
             :art-aspect="5.34"
-            text="发送"
-            :enabled="!sending"
+            :text="sendLabel"
+            :enabled="!sending && !queueFull"
             @activated="send"
           />
         </div>
@@ -698,6 +889,19 @@ async function openFull(): Promise<void> {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 40%;
+}
+
+/* 项目名标签：标题后，金色描边胶囊，多开时区分归属 */
+.cw__proj {
+  flex: none;
+  color: var(--war-gold-dim);
+  border: 1px solid var(--war-gold-dim);
+  border-radius: 3px;
+  padding: 0 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30%;
 }
 
 .cw__agent {
@@ -801,9 +1005,6 @@ async function openFull(): Promise<void> {
 
 /* ---- 过程行（移植 ChatBubble .seg-proc 风格，单行摘要 + 流式动作提示） ---- */
 .cw__proc {
-  display: flex;
-  align-items: baseline;
-  min-width: 0;
   margin: 0 0 4px;
   padding: 2px 10px;
   background: #12151c44;
@@ -813,12 +1014,18 @@ async function openFull(): Promise<void> {
   user-select: none;
   cursor: pointer;
   overflow: hidden;
-  white-space: nowrap;
 }
 
 .cw__proc:hover {
   color: var(--war-gold);
   border-color: var(--war-gold-dim);
+}
+
+.cw__proc-main {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .cw__proc-summary,
@@ -830,10 +1037,107 @@ async function openFull(): Promise<void> {
   text-overflow: ellipsis;
 }
 
+.cw__proc-hint {
+  color: var(--war-gold);
+}
+
+.cw__proc-flavor {
+  margin-top: 2px;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--war-text-muted);
+}
+
+.cw__proc-flavor-name {
+  color: var(--war-gold);
+}
+
+.cw__proc-flavor-text {
+  color: #ffffff;
+}
+
 .cw__composer {
   flex: none;
   border-top: 1px solid #2a3344;
   padding-top: 8px;
+}
+
+/* ---- 发送队列（移植 QueuePanel 风格，浮在输入区上方） ---- */
+.cw__queue {
+  flex: none;
+  background: #0d1116f0;
+  border: 1px solid #6a5a3f;
+  border-radius: 3px;
+}
+
+.cw__queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  padding: 0 10px;
+  color: var(--war-gold);
+  user-select: none;
+  cursor: pointer;
+}
+
+.cw__queue-clear {
+  color: var(--war-error);
+  cursor: pointer;
+}
+
+.cw__queue-clear:hover {
+  color: #ffb0a0;
+}
+
+.cw__queue-list {
+  max-height: calc(5 * 24px);
+  overflow-y: auto;
+  scrollbar-width: none;
+  padding: 0 6px 6px;
+}
+
+.cw__queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 24px;
+  padding: 0 4px;
+}
+
+.cw__queue-row.dim {
+  color: var(--war-text-faint);
+}
+
+.cw__queue-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--war-text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cw__queue-op {
+  cursor: pointer;
+}
+
+.cw__queue-op.guide {
+  color: var(--war-gold);
+}
+
+.cw__queue-op.guide:hover {
+  color: var(--war-gold-bright);
+}
+
+.cw__queue-op.remove {
+  color: var(--war-error);
+}
+
+.cw__queue-op.remove:hover {
+  color: #ffb0a0;
 }
 
 .cw__input {

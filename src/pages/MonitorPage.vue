@@ -6,9 +6,9 @@
 // 坐标相对世界层），可视区 overflow hidden，按住鼠标中键拖动平移（clamp
 // 到世界边界，边缘不露空白）；右下角小地图实时镜像世界层，左键按住拖动
 // 可把视口中心跳到对应世界坐标。
-// RTS 式交互：左键步兵 = 选中（脚下绿圈；待审批的例外，仍直接开审批弹窗），
+// RTS 式交互：左键步兵 = 选中（图标绿色光环；待审批的例外，仍直接开审批弹窗），
 // 双击步兵 = 开迷你会话窗；左键点地面空白 = 取消选中；有选中步兵时右键地面 =
-// 命令其走过去（行走精灵动画）。右键兵营/步兵出内联菜单（新会话选 Agent +
+// 命令其走过去（平滑移动）。右键兵营/步兵出内联菜单（新会话选 Agent +
 // 权限模式 / 销毁二次确认 / 搁置恢复 / 重命名 / 删除）。
 // Esc/快捷键照 SessionSelectPage 模式。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
@@ -376,7 +376,7 @@ function onFootmanDblclick(s: SessionIndexRow): void {
 }
 
 // ---------------------------------------------------------------------------
-// RTS：选中 + 右键移动 + 行走精灵动画（位置不持久化，重启回栏位）
+// RTS：选中 + 右键移动（位置不持久化，重启回栏位）
 // ---------------------------------------------------------------------------
 
 /** 当前选中的步兵（会话 id）。 */
@@ -390,22 +390,7 @@ function footmanPos(id: string, dir: string, i: number): { x: number; y: number 
   return posOverride.value[id] ?? slotPos(dir, i);
 }
 
-// 行走精灵表 footman_walk.png：4 行 × 8 列，单元格 204×176。
-// 行：0=下（正面）1=上（背面）2=左 3=右；每行 8 帧行走循环，帧 0 兼作站立。
-const SPRITE_W = 204;
-const SPRITE_H = 176;
-
-/** 每个步兵的动画状态：row = 朝向行，frame = 帧，acc = 帧计时（秒）。 */
-const footAnim = ref<Record<string, { row: number; frame: number; acc: number }>>({});
-
-/** 内层精灵 div 的 background-position（响应式数据驱动帧/行切换）。 */
-function spriteStyle(id: string): { backgroundPosition: string } {
-  const a = footAnim.value[id] ?? { row: 0, frame: 0 };
-  return { backgroundPosition: `-${a.frame * SPRITE_W}px -${a.row * SPRITE_H}px` };
-}
-
-const MOVE_SPEED = 90; // 世界像素/秒
-const FRAME_DT = 0.1; // 行走帧 ~10fps
+const MOVE_SPEED = 170; // 世界像素/秒
 
 /** 正在移动的步兵目标（世界坐标，非响应式；rAF 循环消费）。 */
 const moveTargets = new Map<string, { tx: number; ty: number }>();
@@ -417,11 +402,11 @@ function sessionAlive(id: string): boolean {
   return deployedList.value.some((b) => slotsOf(b.dir).some((s) => s.id === id));
 }
 
-/** 右键地面下令：目标点 wx/wy 是"脚"的落点，换算成盒子左上角存入覆盖层。 */
+/** 右键地面下令：目标点 wx/wy 是图标中心落点，换算成盒子左上角存入覆盖层。 */
 function commandMove(id: string, wx: number, wy: number): void {
   if (!sessionAlive(id)) return;
   if (!posOverride.value[id]) posOverride.value[id] = { ...footmanPosCurrent(id) };
-  moveTargets.set(id, { tx: wx - 31, ty: wy - 56 }); // 盒子 62×56，脚在底部中心
+  moveTargets.set(id, { tx: wx - 26, ty: wy - 27 }); // 盒子 52×54
   if (!rafId) {
     lastTs = performance.now();
     rafId = requestAnimationFrame(tick);
@@ -449,27 +434,17 @@ function tick(ts: number): void {
       moveTargets.delete(id);
       continue;
     }
-    const a = footAnim.value[id] ?? (footAnim.value[id] = { row: 0, frame: 0, acc: 0 });
     const dx = t.tx - p.x;
     const dy = t.ty - p.y;
     const dist = Math.hypot(dx, dy);
-    // 朝向行：横向占优 → 左/右（行 2/3），否则上/下（行 1/0）
-    a.row = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? 2 : 3) : (dy < 0 ? 1 : 0);
     const step = MOVE_SPEED * dt;
     if (dist <= step) {
       p.x = t.tx;
       p.y = t.ty;
-      a.frame = 0; // 到位后停在该朝向行的站立帧
-      a.acc = 0;
       moveTargets.delete(id);
     } else {
       p.x += (dx / dist) * step;
       p.y += (dy / dist) * step;
-      a.acc += dt;
-      if (a.acc >= FRAME_DT) {
-        a.acc -= FRAME_DT;
-        a.frame = (a.frame + 1) % 8;
-      }
     }
   }
   rafId = moveTargets.size > 0 ? requestAnimationFrame(tick) : 0;
@@ -493,6 +468,7 @@ const newOpen = ref(false);
 const pickAgent = ref('');
 const pickMode = ref('default');
 const razeArmed = ref(false);
+const shelvedQuery = ref('');
 
 const PERM_MODES: [string, string][] = [
   ['default', '默认'],
@@ -502,6 +478,14 @@ const PERM_MODES: [string, string][] = [
 ];
 
 const usableAgents = computed(() => agents.agents.filter((a) => a.enabled));
+
+const filteredShelved = computed(() => {
+  if (pop.value?.kind !== 'building') return [];
+  const q = shelvedQuery.value.trim().toLowerCase();
+  const all = monitor.shelvedOf(pop.value.dir);
+  if (!q) return all;
+  return all.filter((s) => (s.title ?? '').toLowerCase().includes(q));
+});
 
 function popPos(e: MouseEvent): { x: number; y: number } {
   const r = fieldEl.value?.getBoundingClientRect();
@@ -520,6 +504,7 @@ function openBuildingMenu(dir: string, e: MouseEvent): void {
   pop.value = { kind: 'building', dir, x: p.x, y: p.y };
   newOpen.value = false;
   razeArmed.value = false;
+  shelvedQuery.value = '';
   pickAgent.value =
     agents.defaultAgentId && usableAgents.value.some((a) => a.id === agents.defaultAgentId)
       ? agents.defaultAgentId
@@ -774,6 +759,21 @@ const permDialogRequest = computed(() =>
             transform: `translate(${panX}px, ${panY}px)`,
           }"
         >
+          <!-- 步兵 ↔ 兵营 归属连线（绿色虚线，随步兵移动实时跟随） -->
+          <svg class="mon__links" :width="worldW" :height="worldH">
+            <template v-for="b in deployedList" :key="'ln-' + b.dir">
+              <line
+                v-for="(s, i) in slotsOf(b.dir)"
+                :key="'ln-' + s.id"
+                class="mon__link"
+                :x1="anchorOf(b.dir).x"
+                :y1="anchorOf(b.dir).y - 20"
+                :x2="footmanPos(s.id, b.dir, i).x + 26"
+                :y2="footmanPos(s.id, b.dir, i).y + 27"
+              />
+            </template>
+          </svg>
+
           <!-- 兵营 -->
           <div
             v-for="b in deployedList"
@@ -801,7 +801,7 @@ const permDialogRequest = computed(() =>
               @dblclick.stop="onFootmanDblclick(s)"
               @contextmenu="openFootmanMenu(s, $event)"
             >
-              <div class="mon__fspr" :style="spriteStyle(s.id)"></div>
+              <img src="/assets/ui/monitor/footman.png" draggable="false" />
               <div v-if="isPermPending(s.id)" class="mon__bang" :style="{ fontSize: prefs.fs(13) + 'px' }">!</div>
               <div v-else-if="hasUnread(s.id)" class="mon__unread" :style="{ fontSize: prefs.fs(9) + 'px' }">NEW</div>
               <div v-if="isBusy(s.id)" class="mon__talk">•••</div>
@@ -946,16 +946,30 @@ const permDialogRequest = computed(() =>
               <div class="mon__ptitle" style="margin-top: 6px" :style="{ fontSize: prefs.fs(13) + 'px' }">
                 已搁置（{{ monitor.shelvedOf(pop.dir).length }}）
               </div>
-              <div
-                v-for="s in monitor.shelvedOf(pop.dir)"
-                :key="s.id"
-                class="mon__shelved-row"
+              <input
+                v-model="shelvedQuery"
+                class="mon__search"
+                type="text"
+                placeholder="搜索搁置会话…"
                 :style="{ fontSize: prefs.fs(12) + 'px' }"
-              >
-                🗃 {{ s.title }}
-                <span class="mon__restore" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="restoreShelved(pop.dir, s.id)">
-                  恢复
-                </span>
+                @click.stop
+                @keydown.stop
+              />
+              <div class="mon__shelved-list">
+                <div
+                  v-for="s in filteredShelved"
+                  :key="s.id"
+                  class="mon__shelved-row"
+                  :style="{ fontSize: prefs.fs(12) + 'px' }"
+                >
+                  🗃 {{ s.title }}
+                  <span class="mon__restore" :style="{ fontSize: prefs.fs(11) + 'px' }" @click="restoreShelved(pop.dir, s.id)">
+                    恢复
+                  </span>
+                </div>
+                <div v-if="filteredShelved.length === 0" class="mon__nsub" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                  （无匹配会话）
+                </div>
               </div>
             </template>
           </template>
@@ -1199,6 +1213,22 @@ export default {
   background: url('/assets/ui/monitor/map.webp') center / cover no-repeat;
 }
 
+/* 步兵归属连线（在 DOM 中先于兵营/步兵，绘制在它们之下） */
+.mon__links {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.mon__link {
+  stroke: #7ec97a;
+  stroke-width: 2;
+  stroke-opacity: 0.55;
+  stroke-dasharray: 5 4;
+}
+
 .mon__field::before {
   content: '';
   position: absolute;
@@ -1333,11 +1363,11 @@ export default {
   }
 }
 
-/* ---- 步兵（行走精灵；盒子 62×56，脚在盒子底部中心） ---- */
+/* ---- 步兵（WC3 头像图标；盒子 52×54，图标即盒子） ---- */
 .mon__footman {
   position: absolute;
-  width: 62px;
-  height: 56px;
+  width: 52px;
+  height: 54px;
   animation: mon-spawn 0.35s ease-out;
 }
 
@@ -1347,54 +1377,43 @@ export default {
   }
 }
 
-/* 精灵层：204×176 单元格按 background-position 取帧，scale 缩放到盒子大小 */
-.mon__fspr {
-  position: absolute;
-  left: -3px; /* 缩放后 67×58 相对盒子居中、脚贴盒子底 */
-  top: -2px;
-  width: 204px;
-  height: 176px;
-  background-image: url(/assets/ui/monitor/footman_walk.png);
-  background-repeat: no-repeat;
-  transform: scale(0.33);
-  transform-origin: top left;
-  pointer-events: none;
-  filter: drop-shadow(2px 3px 3px #0009);
+.mon__footman img {
+  width: 100%;
+  height: 100%;
+  border-radius: 4px;
+  border: 2px solid #4a5b75;
+  box-shadow: 2px 3px 6px #000a;
+  box-sizing: border-box;
 }
 
-/* 选中：脚下椭圆光环 */
-.mon__footman.sel::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  bottom: -3px;
-  width: 44px;
-  height: 14px;
-  transform: translateX(-50%);
-  border: 2px solid #7ec97a;
-  border-radius: 50%;
-  box-shadow: 0 0 8px #7ec97a88;
-  pointer-events: none;
+/* 选中：图标外圈绿色光环 */
+.mon__footman.sel img {
+  border-color: #7ec97a;
+  box-shadow:
+    0 0 10px #7ec97acc,
+    2px 3px 6px #000a;
 }
 
-/* 运行中：角色外圈绿光呼吸（不依赖边框） */
-.mon__footman.run .mon__fspr {
+/* 运行中：绿边框呼吸 */
+.mon__footman.run img {
+  border-color: #7ec97a;
+  box-shadow:
+    0 0 10px #7ec97a88,
+    2px 3px 6px #000a;
   animation: mon-run-glow 1.4s infinite;
 }
 
 @keyframes mon-run-glow {
-  0%,
-  100% {
-    filter: drop-shadow(2px 3px 3px #0009) drop-shadow(0 0 4px #7ec97a66);
-  }
   50% {
-    filter: drop-shadow(2px 3px 3px #0009) drop-shadow(0 0 10px #7ec97acc);
+    box-shadow:
+      0 0 18px #7ec97acc,
+      2px 3px 6px #000a;
   }
 }
 
-/* 待审批：角色外圈金光 */
-.mon__footman.perm .mon__fspr {
-  filter: drop-shadow(2px 3px 3px #0009) drop-shadow(0 0 7px var(--war-gold-dim));
+/* 待审批：金边框 */
+.mon__footman.perm img {
+  border-color: var(--war-gold-dim);
 }
 
 .mon__bang {
@@ -1617,6 +1636,35 @@ export default {
 
 .mon__restore:hover {
   background: #7ec97a22;
+}
+
+.mon__search {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 4px 0 6px;
+  padding: 4px 8px;
+  background: #0a0d14;
+  border: 1px solid #2a3344;
+  border-radius: 2px;
+  color: #e8d9a0;
+  outline: none;
+}
+
+.mon__search:focus {
+  border-color: #7ec97a66;
+}
+
+.mon__shelved-list {
+  max-height: 168px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+
+.mon__shelved-list .mon__shelved-row {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 新会话内联面板 */
