@@ -450,22 +450,22 @@ const unsavedOpen = ref(false);
 
 function tryBack(): void {
   if (dirty.value) unsavedOpen.value = true;
-  else void nav.goMain();
+  else void nav.goOverlay('hub');
 }
 
 async function saveAndBack(): Promise<void> {
   unsavedOpen.value = false;
-  if (await saveCurrent()) await nav.goMain();
+  if (await saveCurrent()) await nav.goOverlay('hub');
 }
 
 function discardAndBack(): void {
   unsavedOpen.value = false;
   dirty.value = false;
-  void nav.goMain();
+  void nav.goOverlay('hub');
 }
 
 async function onSaveAndReturn(): Promise<void> {
-  if (await saveCurrent()) await nav.goMain();
+  if (await saveCurrent()) await nav.goOverlay('hub');
 }
 
 // Esc → tryBack (the unsaved dialog capture-stops Esc before this fires).
@@ -837,30 +837,6 @@ const pageKeysOn = computed(() => nav.page === 'config');
         </div>
       </WarFrame>
 
-      <!-- left bottom: usage stats entry -->
-      <WarFrame
-        class="cfg__left-bottom"
-        src="/assets/ui/frames/frame_iron_bar.png"
-        :slice="[62, 110, 70, 108]"
-        :hole="[22, 24, 21, 24]"
-      >
-        <div class="cfg__usage">
-          <div class="cfg__usage-text">
-            <div class="cfg__usage-title" :style="{ fontSize: prefs.fs(14) + 'px' }">用量统计</div>
-            <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              各 Agent / 模型 / 会话的 token 消耗
-            </div>
-          </div>
-          <WarButton
-            skin="dialog"
-            :width="190"
-            :art-aspect="5.34"
-            text="打开统计页"
-            @activated="nav.goOverlay('usage')"
-          />
-        </div>
-      </WarFrame>
-
       <!-- right bottom: action bar -->
       <WarFrame
         class="cfg__right-bottom"
@@ -930,29 +906,6 @@ const pageKeysOn = computed(() => nav.page === 'config');
 .cfg__right-bottom {
   grid-row: 2;
   grid-column: 2;
-}
-
-.cfg__left-bottom {
-  grid-row: 2;
-  grid-column: 1;
-}
-
-.cfg__usage {
-  height: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.cfg__usage-text {
-  min-width: 0;
-}
-
-.cfg__usage-title {
-  color: var(--war-text-dim);
-  font-family: SimSun, serif;
-  font-weight: bold;
 }
 
 .cfg__col {

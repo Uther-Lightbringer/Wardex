@@ -8,7 +8,7 @@
 
 参照 `ui/Main.qml`（1092 行）。
 
-- 五个页面状态：`main | config | sessionSelect | chat | todo`，同一时间只显示一页。
+- 页面状态：`main | hub | config | sessionSelect | chat | todo | usage | monitor`，同一时间只显示一页。`hub`（更多功能）是二级菜单页，收纳配置 / 用量统计 / 待办三个子页（三子页的返回目标均为 hub）。
 - 窗口固定有左右两条"铁轨"边框（`frame_edge_left/right.png`），页面内容区嵌入铁轨之间（见 [../ui-design.md](../ui-design.md)）。
 - 页面切换动画：内容壳三段式下落入场（`ShellFrame.qml`，总时长 **450ms**：prepareEnter → playEnterDrop → snapContentIn；已比原版 750ms 提速）。
 - 音画时序：切页播放 `popUp`/`popDown` 音效；**`popUp` 未放到 950ms 闸门（`DROP_GATE_MS`，原可闻 1280ms）时不允许开始下拉动画**，队列等待（Main.qml 的 popUpGapMs 逻辑，必须保留；闸门已随动画提速调短）。
@@ -20,7 +20,7 @@
 参照 `ui/Main.qml`、`ui/SteelPanel.qml`、`ui/RecentProjectsPanel.qml`（201 行）。
 
 - 视觉：铆钉钢板面板（frame_tall/frame_short + `chain_link.png` 垂直平铺吊链，链条可伸出窗口顶），内衬半透明玻璃 `#A60b0d12`。
-- 中央菜单按钮（WarButton，标准宽 276，中文文案）：打开项目 / 最近项目 / 配置 / 待办 等（以旧版实际按钮为准）。
+- 中央菜单按钮（WarButton，标准宽 276，中文文案）：打开项目 / 新建会话 / 加载会话 / 战场监控 / 更多功能（G，进 hub 二级菜单：配置 / 用量统计 / 待办）；退出在下方 short 面板。
 - 左栏**最近项目面板**（`frame_popup_small.png` 九宫格）：
   - 数据源 `projects.json`（recent 上限 **8**，新者在前；见 [../data-formats.md](../data-formats.md) §6）。
   - 点击项目 → 以该目录为工作区创建新会话并进入聊天页。

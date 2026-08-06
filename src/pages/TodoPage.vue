@@ -10,6 +10,8 @@ import { usePrefsStore } from '../stores/prefs';
 import { useChatStore } from '../stores/chat';
 import { useSessionsStore } from '../stores/sessions';
 import { useTodosStore, type TodoRow, type TodoScope } from '../stores/todos';
+import PageShell from '../components/PageShell.vue';
+import WarFrame from '../components/war/WarFrame.vue';
 import WarButton from '../components/war/WarButton.vue';
 
 const nav = useNavStore();
@@ -120,9 +122,16 @@ function stats(): string {
 </script>
 
 <template>
-  <div class="todo">
-    <div class="todo__frame">
-      <div class="todo__col">
+  <PageShell :embed="52">
+    <div class="todo">
+      <WarFrame
+        class="todo__frame"
+        src="/assets/ui/frames/frame_iron_panel.png"
+        :slice="[96, 110, 69, 108]"
+        :hole="[56, 25, 21, 24]"
+        :content-left-extra="16"
+      >
+        <div class="todo__col">
         <div class="todo__title war-font-title war-outline-black" :style="{ fontSize: prefs.fs(18) + 'px' }">
           待办事项
         </div>
@@ -288,20 +297,21 @@ function stats(): string {
             @activated="todos.clearDone()"
           />
           <span class="todo__spring"></span>
-          <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="返回(B)" shortcut-key="B" :shortcut-active="nav.page === 'todo'" @activated="nav.goMain()" />
+          <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="返回(B)" shortcut-key="B" :shortcut-active="nav.page === 'todo'" @activated="nav.goOverlay('hub')" />
         </div>
       </div>
+      </WarFrame>
     </div>
-  </div>
+  </PageShell>
 </template>
 
 <style scoped>
 .todo {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* 挂耳紧贴窗口顶 */
   justify-content: center;
   height: 100%;
-  padding: 24px;
+  padding: 0 0 8px;
   box-sizing: border-box;
 }
 
@@ -309,11 +319,6 @@ function stats(): string {
   width: calc(62% - 5px); /* same as before: leftW = (w-gap)*0.62, gap 10 */
   max-width: 860px;
   height: 100%;
-  border: 1px solid #6a5a3f;
-  background: #0d1116f0;
-  border-radius: 3px;
-  padding: 14px 18px;
-  box-sizing: border-box;
 }
 
 .todo__col {

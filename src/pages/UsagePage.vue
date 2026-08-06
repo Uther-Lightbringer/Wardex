@@ -70,10 +70,10 @@ async function backfill(): Promise<void> {
   await load();
 }
 
-// Esc returns to the config page (same as the 返回(B) button).
+// Esc returns to the hub page (same as the 返回(B) button).
 function onPageKey(e: KeyboardEvent): void {
   if (nav.page !== 'usage') return;
-  if (e.key === 'Escape') void nav.goOverlay('config');
+  if (e.key === 'Escape') void nav.goOverlay('hub');
 }
 onMounted(() => window.addEventListener('keydown', onPageKey));
 onBeforeUnmount(() => window.removeEventListener('keydown', onPageKey));
@@ -124,8 +124,8 @@ function sessionTitle(id: string): string {
               <div class="usage__row" :class="{ zebra: i % 2 === 1 }" :style="{ fontSize: prefs.fs(14) + 'px' }">
                 <span class="usage__cell usage__cell--name">{{ a.agentName || a.agentId }}</span>
                 <span class="usage__cell">{{ a.turns }} 回合</span>
-                <span class="usage__cell usage__cell--num">↑{{ formatTokens(a.inputTokens) }}</span>
-                <span class="usage__cell usage__cell--num">↓{{ formatTokens(a.outputTokens) }}</span>
+                <span class="usage__cell usage__cell--num">输入 {{ formatTokens(a.inputTokens) }}</span>
+                <span class="usage__cell usage__cell--num">输出 {{ formatTokens(a.outputTokens) }}</span>
                 <span class="usage__cell usage__cell--total">{{ formatTokens(a.totalTokens) }}</span>
               </div>
               <div
@@ -136,8 +136,8 @@ function sessionTitle(id: string): string {
               >
                 <span class="usage__cell usage__cell--name">{{ m.model || '未记录' }}</span>
                 <span class="usage__cell">{{ m.turns }} 回合</span>
-                <span class="usage__cell usage__cell--num">↑{{ formatTokens(m.inputTokens) }}</span>
-                <span class="usage__cell usage__cell--num">↓{{ formatTokens(m.outputTokens) }}</span>
+                <span class="usage__cell usage__cell--num">输入 {{ formatTokens(m.inputTokens) }}</span>
+                <span class="usage__cell usage__cell--num">输出 {{ formatTokens(m.outputTokens) }}</span>
                 <span class="usage__cell usage__cell--total">{{ formatTokens(m.totalTokens) }}</span>
               </div>
             </template>
@@ -159,8 +159,8 @@ function sessionTitle(id: string): string {
               <span class="usage__cell usage__cell--name">{{ sessionTitle(s.sessionId) }}</span>
               <span class="usage__cell usage__cell--agent">{{ s.agentName }}</span>
               <span class="usage__cell">{{ s.turns }} 回合</span>
-              <span class="usage__cell usage__cell--num">↑{{ formatTokens(s.inputTokens) }}</span>
-              <span class="usage__cell usage__cell--num">↓{{ formatTokens(s.outputTokens) }}</span>
+              <span class="usage__cell usage__cell--num">输入 {{ formatTokens(s.inputTokens) }}</span>
+              <span class="usage__cell usage__cell--num">输出 {{ formatTokens(s.outputTokens) }}</span>
               <span class="usage__cell usage__cell--total">{{ formatTokens(s.totalTokens) }}</span>
             </div>
             <div v-if="(report?.sessions.length ?? 0) === 0" class="usage__empty" :style="{ fontSize: prefs.fs(13) + 'px' }">
@@ -182,7 +182,7 @@ function sessionTitle(id: string): string {
               @activated="backfill"
             />
             <span class="usage__spring"></span>
-            <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="返回(B)" shortcut-key="B" :shortcut-active="nav.page === 'usage'" @activated="nav.goOverlay('config')" />
+            <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="返回(B)" shortcut-key="B" :shortcut-active="nav.page === 'usage'" @activated="nav.goOverlay('hub')" />
           </div>
         </div>
       </WarFrame>

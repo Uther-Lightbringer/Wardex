@@ -324,7 +324,7 @@ const ironStyle = {
 - 文字：SimSun bold，居中，宽 = 按钮宽 × 0.88，右省略；
   字号 `max(13, min(19, round(width × 0.075)))`；
   颜色：常态 `#f2cf6b` / 按下 `#ffffff` / 禁用 `#7a8070`；描边 `#241500`。
-- 点击音效 `click`（见 §7）；可配单字母快捷键（主菜单 O/C/L/S/T/A，仅主页可见时生效）。
+- 点击音效 `click`（见 §7）；可配单字母快捷键（主菜单 O/C/L/M/G/A，仅主页可见时生效；hub 页 S/U/T/B）。
 
 ```vue
 <!-- components/WarButton.vue 骨架 -->

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Main menu page (Main.qml menuLayer): right rail = chain-hung SteelPanel
-// menu (打开项目/新建会话/加载会话/配置/待办 + 退出), left rail = recent
+// menu (打开项目/新建会话/加载会话/战场监控/更多功能 + 退出), left rail = recent
 // projects. Both rails ride nav.menuY so they slide in lockstep.
 // The layer is always mounted; interactions are gated unless page===main.
 // Small windows shrink the whole menu via ui.uiScale (transform: scale).
@@ -141,17 +141,10 @@ async function onExit(): Promise<void> {
                 </div>
                 <WarButton
                   :width="250"
-                  text="配置(S)"
-                  shortcut-key="S"
+                  text="更多功能(G)"
+                  shortcut-key="G"
                   :shortcut-active="menuKeysOn"
-                  @activated="nav.goOverlay('config')"
-                />
-                <WarButton
-                  :width="250"
-                  text="待办(T)"
-                  shortcut-key="T"
-                  :shortcut-active="menuKeysOn"
-                  @activated="nav.goOverlay('todo')"
+                  @activated="nav.goOverlay('hub')"
                 />
               </div>
             </SteelPanel>

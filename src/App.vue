@@ -10,6 +10,7 @@ import { onBeforeUnmount, onMounted, ref } from 'vue';
 import { getVersion } from '@tauri-apps/api/app';
 import { isTauri } from './lib/tauri';
 import MainMenuPage from './pages/MainMenuPage.vue';
+import HubPage from './pages/HubPage.vue';
 import ConfigPage from './pages/ConfigPage.vue';
 import SessionSelectPage from './pages/SessionSelectPage.vue';
 import ChatPage from './pages/ChatPage.vue';
@@ -35,6 +36,7 @@ const bg = ref<BgConfig>(DEFAULT_BG);
 const version = ref('0.3');
 
 const overlayPages: { id: PageId; comp: unknown }[] = [
+  { id: 'hub', comp: HubPage },
   { id: 'config', comp: ConfigPage },
   { id: 'sessionSelect', comp: SessionSelectPage },
   { id: 'chat', comp: ChatPage },
