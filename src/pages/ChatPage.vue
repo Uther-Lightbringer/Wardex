@@ -135,27 +135,51 @@ const curAgentId = computed(
   () => chat.meta?.agentId ?? sessions.runtimeStates[chat.sessionId]?.agentId ?? '',
 );
 const curAgent = computed(() => agentsStore.byId(curAgentId.value));
-const thinkingOptions = computed(() => {
-  const opts = thinkingOpt.value?.options ?? [];
+// `thinkingOpts` is the single filtered list the dropdown actually renders,
+// so every index (dropdown emit, highlight, current-value clamp) stays aligned.
+// Without this, WarDropdown emits an index into the FILTERED list while the
+// handler read the UNFILTERED options — selecting "Max" sent "low".
+// Before the ACP handshake reports configOptions, the available levels are the
+// agent's own effortOptions (opencode variants / kimi support_efforts come from
+// them anyway), so the dropdown appears immediately instead of waiting on the
+// CLI. The CURRENT value still syncs from ACP when it arrives.
+const EFFORT_DISPLAY: Record<string, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  max: 'Max',
+};
+const thinkingOpts = computed(() => {
   const effs = curAgent.value?.effortOptions ?? [];
-  if (effs.length === 0) return opts.map((o) => o.name);
-  const allow = new Set(effs);
-  return opts.filter((o) => allow.has(o.value)).map((o) => o.name);
-});
-const thinkingIndex = computed(() => {
+  const reported = chat.configOptions.length > 0;
+  if (!reported) {
+    return effs.length ? effs.map((v) => ({ name: EFFORT_DISPLAY[v] ?? v, value: v })) : [];
+  }
   const opts = thinkingOpt.value?.options ?? [];
+  if (effs.length === 0) return opts;
+  const allow = new Set(effs);
+  return opts.filter((o) => allow.has(o.value));
+});
+const thinkingOptions = computed(() => thinkingOpts.value.map((o) => o.name));
+const thinkingIndex = computed(() => {
   const cur = thinkingOpt.value?.currentValue ?? '';
-  return opts.findIndex((o) => o.value === cur);
+  return thinkingOpts.value.findIndex((o) => o.value === cur);
 });
 const thinkingDisplay = computed(() => {
-  const cur = thinkingOpt.value?.options.find((o) => o.value === thinkingOpt.value?.currentValue);
-  return `思考 ${cur?.name ?? thinkingOpt.value?.currentValue ?? ''}`;
+  const cur = thinkingOpt.value?.currentValue ?? '';
+  const shown = thinkingOpts.value.find((o) => o.value === cur) ?? thinkingOpts.value[0];
+  return `思考 ${shown?.name ?? cur}`;
 });
+// Config-option id before ACP: opencode reports `effort`, others `thinking`.
+const thinkingOptionId = computed(
+  () => thinkingOpt.value?.id ?? (curAgent.value?.provider === 'opencode' ? 'effort' : 'thinking'),
+);
 
 function onThinkingPick(i: number): void {
-  const o = thinkingOpt.value?.options[i];
+  const o = thinkingOpts.value[i];
   if (!o || o.value === thinkingOpt.value?.currentValue) return;
-  void chat.setConfigOption(thinkingOpt.value?.id ?? 'thinking', o.value);
+  void chat.setConfigOption(thinkingOptionId.value, o.value);
 }
 
 // ---- action bay: 刷新工作区 / 停止生成 dual state (§6.4, §8) ----
@@ -177,7 +201,7 @@ const sessionUsage = computed(() => {
     output += r.usage.outputTokens;
   }
   if (input === 0 && output === 0) return '';
-  return `本会话 ↑${formatTokens(input)} ↓${formatTokens(output)}`;
+  return `本会话 输入 ${formatTokens(input)} 输出 ${formatTokens(output)}`;
 });
 
 // ---- 铁框尺寸：输入框高度 / 操作台宽高，鼠标拖拽改 (0 = 响应式默认) ----
@@ -374,7 +398,7 @@ function onBayResizeResetY(): void {
             @update:model-value="onAgentPick"
           />
           <WarDropdown
-            v-if="thinkingOpt && thinkingOptions.length > 0"
+            v-if="thinkingOptions.length > 0"
             class="chat__thinking-dd"
             :options="thinkingOptions"
             :model-value="thinkingIndex"

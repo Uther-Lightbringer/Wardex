@@ -112,15 +112,19 @@ fn parse_message_data(data: &str) -> Option<TurnUsage> {
 }
 
 /// 每会话一个增量读取器：Started 时记累计基线，之后每次 read_new 取差值
-/// = 本回合新增的整会话消耗。
+/// = 本回合新增的整会话消耗。session 表无 usage 迁移列（旧版 opencode）时
+/// 差值恒为 0，此时退到 message 表按本回合新增 assistant 消息求和——
+/// 一条 assistant 消息 = 一次 LLM 调用，同样是整回合全量（含工具循环）。
 #[derive(Debug)]
 pub struct OpencodeReader {
     data_dir: PathBuf,
     session_id: String,
     /// 已定位的 db 文件。
     db: Option<PathBuf>,
-    /// 已定位时的整会话累计值（差值基准）。
+    /// 已定位时的整会话累计值（差值基准；Some 即迁移列有效）。
     baseline: Option<(u64, u64, u64, u64, u64)>,
+    /// 已定位时该会话 message 表最大 rowid（message 求和兜底的基线）。
+    baseline_msg_rowid: Option<i64>,
 }
 
 impl OpencodeReader {
@@ -132,14 +136,17 @@ impl OpencodeReader {
             session_id: session_id.to_string(),
             db: None,
             baseline: None,
+            baseline_msg_rowid: None,
         };
         r.resolve();
         r
     }
 
     /// 定位含该会话的 db；会话行还不存在时记下首个存在的 db 等 read_new。
+    /// 命中即同时记 message 基线（迁移列缺失时 message 兜底用；历史
+    /// 消息在 locate 时就被排除，只算本回合新增）。
     fn resolve(&mut self) -> Option<PathBuf> {
-        if self.db.is_some() && self.baseline.is_some() {
+        if self.db.is_some() && (self.baseline.is_some() || self.baseline_msg_rowid.is_some()) {
             return self.db.clone();
         }
         for p in db_candidates(&self.data_dir) {
@@ -152,6 +159,13 @@ impl OpencodeReader {
             if let Some(t) = session_totals(&conn, &self.session_id) {
                 self.db = Some(p.clone());
                 self.baseline = Some(t);
+                self.baseline_msg_rowid = Some(msg_max_rowid(&conn, &self.session_id));
+                return self.db.clone();
+            }
+            let max = msg_max_rowid(&conn, &self.session_id);
+            if max > 0 {
+                self.db = Some(p.clone());
+                self.baseline_msg_rowid = Some(max);
                 return self.db.clone();
             }
         }
@@ -170,29 +184,98 @@ impl OpencodeReader {
     pub fn read_new(&mut self) -> Option<TurnUsage> {
         let p = self.resolve()?;
         let conn = Connection::open_with_flags(&p, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-        let cur = session_totals(&conn, &self.session_id)?;
-        let base = match self.baseline {
-            Some(b) => b,
-            None => {
-                // 定位时会话行还不存在（极端时序）：把当前值当基线，
-                // 本回合不回补（回退 prompt result），下回合正常。
+        let cur = session_totals(&conn, &self.session_id);
+        match (self.baseline, cur) {
+            // 迁移列有效：累计差值 = 本回合全量（含工具循环）。
+            (Some(base), Some(cur)) => {
+                let diff = (
+                    cur.0.saturating_sub(base.0),
+                    cur.1.saturating_sub(base.1),
+                    cur.2.saturating_sub(base.2),
+                    cur.3.saturating_sub(base.3),
+                    cur.4.saturating_sub(base.4),
+                );
+                self.baseline = Some(cur);
+                if diff.0 + diff.1 + diff.2 + diff.3 + diff.4 == 0 {
+                    return None;
+                }
+                return Some(usage_from_totals(diff.0, diff.1, diff.2, diff.3, diff.4));
+            }
+            // totals 行异常消失：弃用 totals 基线，落 message 兜底。
+            (Some(_), None) => {
+                self.baseline = None;
+                self.baseline_msg_rowid = Some(msg_max_rowid(&conn, &self.session_id));
+                return None;
+            }
+            // 定位时会话行还不存在（极端时序）：首个可见窗口当基线，
+            // 本回合不回补，下回合正常差值。
+            (None, Some(cur)) => {
                 self.baseline = Some(cur);
                 return None;
             }
-        };
-        let diff = (
-            cur.0.saturating_sub(base.0),
-            cur.1.saturating_sub(base.1),
-            cur.2.saturating_sub(base.2),
-            cur.3.saturating_sub(base.3),
-            cur.4.saturating_sub(base.4),
-        );
-        self.baseline = Some(cur);
-        if diff.0 + diff.1 + diff.2 + diff.3 + diff.4 == 0 {
-            return None;
+            // 迁移列缺失（旧版 opencode 无 session_usage 列）：message 表
+            // 按新增 assistant 行求和兜底。
+            (None, None) => self.sum_new_messages(&conn),
         }
-        Some(usage_from_totals(diff.0, diff.1, diff.2, diff.3, diff.4))
     }
+
+    /// message 表兜底：rowid > 基线的 assistant 消息逐条求和（一条消息 =
+    /// 一次 LLM 调用，含工具循环与思考）。零新增时基线不推进，避免
+    /// user 行先落盘、assistant 行后落盘时被窗口跳过。
+    fn sum_new_messages(&mut self, conn: &Connection) -> Option<TurnUsage> {
+        let cur_rowid = msg_max_rowid(conn, &self.session_id);
+        let base = self.baseline_msg_rowid;
+        let mut sum = TurnUsage::default();
+        let mut found = false;
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT data FROM message WHERE session_id = ?1 AND rowid > ?2",
+        ) else {
+            return None;
+        };
+        let Ok(rows) = stmt.query_map(
+            rusqlite::params![self.session_id, base.unwrap_or(0)],
+            |row| row.get::<_, String>(0),
+        ) else {
+            return None;
+        };
+        for row in rows {
+            let Ok(data) = row else { continue };
+            if let Some(u) = parse_message_data(&data) {
+                sum.input_tokens += u.input_tokens;
+                sum.output_tokens += u.output_tokens;
+                sum.total_tokens += u.total_tokens;
+                if let Some(c) = u.cached_read_tokens {
+                    *sum.cached_read_tokens.get_or_insert(0) += c;
+                }
+                if let Some(c) = u.cached_write_tokens {
+                    *sum.cached_write_tokens.get_or_insert(0) += c;
+                }
+                if let Some(c) = u.thought_tokens {
+                    *sum.thought_tokens.get_or_insert(0) += c;
+                }
+                found = true;
+            }
+        }
+        if found {
+            self.baseline_msg_rowid = Some(cur_rowid);
+            return Some(sum);
+        }
+        if base.is_none() {
+            // 首个可见窗口：当前行数为基线，本回合不回补（极端时序）。
+            self.baseline_msg_rowid = Some(cur_rowid);
+        }
+        None
+    }
+}
+
+/// 该会话 message 表最大 rowid（0 = 无行）。
+fn msg_max_rowid(conn: &Connection, session_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM message WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
 }
 
 /// 回填用全量解析：message 表逐条取 assistant 消息（一条 = 一次 LLM
@@ -396,5 +479,79 @@ mod tests {
             "全零不计"
         );
         assert_eq!(parse_message_data("{\"role\":\"assistant\"}"), None);
+    }
+
+    /// 旧版 opencode（无 session_usage 迁移列）：session 表只有 id。
+    fn make_legacy_db(dir: &Path) -> Connection {
+        let conn = Connection::open(dir.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY);
+             CREATE TABLE message (
+                 id TEXT PRIMARY KEY,
+                 session_id TEXT NOT NULL,
+                 time_created INTEGER NOT NULL,
+                 data TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn message_fallback_sums_new_assistant_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = make_legacy_db(tmp.path());
+        conn.execute("INSERT INTO session (id) VALUES ('sid9')", []).unwrap();
+        let ins = |id: &str, sid: &str, ts: i64, data: &str| {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, sid, ts, data],
+            )
+            .unwrap();
+        };
+        // 历史消息（resume）：locate 时就作为基线，不计入。
+        ins("h1", "sid9", 1000, r#"{"role":"assistant","tokens":{"input":500,"output":50}}"#);
+        let mut reader = OpencodeReader::locate(tmp.path().to_path_buf(), "sid9");
+        assert_eq!(reader.read_new(), None, "历史不计入");
+        // 本回合新增：两条 assistant（工具循环两次调用）+ 思考 + 一条 user。
+        ins("u1", "sid9", 2000, r#"{"role":"user"}"#);
+        ins(
+            "a1",
+            "sid9",
+            3000,
+            r#"{"role":"assistant","tokens":{"input":100,"output":20,"reasoning":5,"cache":{"read":4,"write":3}}}"#,
+        );
+        ins("a2", "sid9", 4000, r#"{"role":"assistant","tokens":{"input":60,"output":10}}"#);
+        let u = reader.read_new().expect("usage");
+        assert_eq!(u.input_tokens, 100 + 4 + 3 + 60, "含缓存读写");
+        assert_eq!(u.output_tokens, 30);
+        assert_eq!(u.total_tokens, 100 + 20 + 5 + 4 + 3 + 60 + 10);
+        assert_eq!(u.thought_tokens, Some(5));
+        // 第二次读：无新增 → None。
+        assert_eq!(reader.read_new(), None);
+    }
+
+    #[test]
+    fn message_fallback_waits_for_late_assistant_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let conn = make_legacy_db(tmp.path());
+        conn.execute("INSERT INTO session (id) VALUES ('sid10')", []).unwrap();
+        let ins = |id: &str, sid: &str, ts: i64, data: &str| {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, sid, ts, data],
+            )
+            .unwrap();
+        };
+        let mut reader = OpencodeReader::locate(tmp.path().to_path_buf(), "sid10");
+        // 首次可见：只有 user 行（无 tokens）→ 建基线，不计。
+        ins("u1", "sid10", 1000, r#"{"role":"user"}"#);
+        assert_eq!(reader.read_new(), None);
+        // 同一回合内 user 行之后才落的 assistant 行不能丢。
+        ins("a1", "sid10", 2000, r#"{"role":"assistant","tokens":{"input":80,"output":9}}"#);
+        let u = reader.read_new().expect("usage");
+        assert_eq!(u.input_tokens, 80);
+        assert_eq!(u.output_tokens, 9);
+        assert_eq!(reader.read_new(), None);
     }
 }

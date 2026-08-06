@@ -1387,21 +1387,16 @@ impl Actor {
     async fn on_turn_finished(&mut self, stop: &str, usage: Option<TurnUsage>) {
         self.flush_stream_buffers();
         self.clear_permission();
-        // Usage priority: prompt result > usage_update notifications seen
-        // during the turn > local archive backfill (chat/wire.rs) for
-        // providers whose ACP adapter reports nothing.
-        // opencode 例外：prompt result 只报最后一次 LLM 调用，而 SQLite
-        // 会话累计差值（chat/opencode_usage.rs）覆盖整回合，所以倒序——
-        // SQLite diff > prompt result > usage_update。
-        let usage = if matches!(&self.archive_usage, Some(UsageReader::Opencode(_))) {
-            self.read_archive_usage()
-                .or(usage)
-                .or_else(|| self.turn_usage_live.take())
-        } else {
-            usage
-                .or_else(|| self.turn_usage_live.take())
-                .or_else(|| self.read_archive_usage())
-        };
+        // Usage priority（统一）：用量补源 > prompt result > usage_update。
+        // prompt result 只报回合最后一次 LLM 调用（opencode/kimi 的 ACP
+        // 实现如此），工具循环里前 N-1 次调用（含思考）全部漏掉；而补源
+        // （kimi/claude/codex 档案增量求和 / opencode SQLite 会话累计差值）
+        // 覆盖整回合全部调用，且回合被打断（stop/error）时也能读到已发生
+        // 的消耗，所以永远优先。
+        let usage = self
+            .read_archive_usage()
+            .or(usage)
+            .or_else(|| self.turn_usage_live.take());
         // Phase 4: a rate-limited turn is not final — enter backoff and
         // resend the same prompt instead of closing with an error.
         if stop == "error"

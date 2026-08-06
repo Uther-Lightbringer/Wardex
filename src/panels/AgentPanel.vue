@@ -110,7 +110,10 @@ const usageRows = computed<InfoRow[]>(() => {
   if (!u) return [];
   const rows: InfoRow[] = [];
   if (u.inputTokens > 0 || u.outputTokens > 0)
-    rows.push({ k: 'tokens', v: `↑${formatTokens(u.inputTokens)} ↓${formatTokens(u.outputTokens)}` });
+    rows.push({
+      k: 'tokens',
+      v: `输入 ${formatTokens(u.inputTokens)} · 输出 ${formatTokens(u.outputTokens)}`,
+    });
   if (u.turns > 0) rows.push({ k: '回合', v: `${u.turns}` });
   if (u.cachedReadTokens > 0)
     rows.push({ k: '缓存读', v: `↑${formatTokens(u.cachedReadTokens)}` });

@@ -342,6 +342,20 @@ pub fn render_opencode_config(agent: &Agent) -> String {
     let mut root = Map::new();
     root.insert("provider".to_string(), Value::Object(provider));
     root.insert("model".to_string(), Value::String(format!("{provider_key}/{model_id}")));
+    // Pin opencode's DEFAULT variant to the resolved effort so the ACP effort
+    // picker reports it as the current value. Without this, opencode falls back
+    // to the first of the model's reasoning_options (e.g. `low`) regardless of
+    // the base `options.reasoningEffort` above.
+    root.insert(
+        "agent".to_string(),
+        Value::Object(Map::from_iter([(
+            "build".to_string(),
+            Value::Object(Map::from_iter([(
+                "variant".to_string(),
+                Value::String(default_effort.to_string()),
+            )])),
+        )])),
+    );
     serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default()
 }
 
@@ -476,6 +490,8 @@ mod tests {
         // max is the default (agent.default_effort is empty -> first level)
         let first = variants.keys().next().unwrap();
         assert_eq!(first, "max");
+        // the resolved default is also pinned as opencode's build-agent variant
+        assert_eq!(doc["agent"]["build"]["variant"], "max");
     }
 
     #[test]
