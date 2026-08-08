@@ -159,6 +159,15 @@ const flavorText = computed(() => {
   return i > 0 ? flavor.value.slice(i + 1) : flavor.value;
 });
 
+// ---- 行数据与输入状态（必须早于下方引用 rows 的 computed/watch 声明：
+//      streamStructSegs 的 immediate watch 在 setup 期同步求值，TDZ 会炸挂载） ----
+
+const meta = ref<SessionMeta | null>(null);
+const rows = ref<ChatMessage[]>([]);
+const input = ref('');
+const sending = ref(false);
+const bodyEl = ref<HTMLElement | null>(null);
+
 /** 过程详情弹窗（复用 ProcessDialog）：记录当前打开的行 id，内容随流式实时。 */
 const procRowId = ref('');
 const procOpen = ref(false);
@@ -262,12 +271,6 @@ function onBodyClick(e: MouseEvent): void {
   }
   handleMdLinkClick(e);
 }
-
-const meta = ref<SessionMeta | null>(null);
-const rows = ref<ChatMessage[]>([]);
-const input = ref('');
-const sending = ref(false);
-const bodyEl = ref<HTMLElement | null>(null);
 
 const indexRow = computed(() => sessions.all.find((s) => s.id === props.sessionId));
 const title = computed(() => meta.value?.title ?? indexRow.value?.title ?? '会话');
