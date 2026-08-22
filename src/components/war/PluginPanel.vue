@@ -1,8 +1,8 @@
 <script setup lang="ts">
-// UI-plugin panel host (插件化改造 P2): renders one plugin's panel.html in a
-// sandboxed iframe (asset protocol). The iframe talks to WarDex ONLY through
-// a thin postMessage bridge — it cannot reach the Tauri IPC surface:
-//
+// UI-plugin panel host (插件化改造 P2): renders one plugin's panel.html in an
+// iframe. UNSANDBOXED by design decision — panels share the app origin and
+// may use window.__TAURI__ IPC directly. The postMessage bridge remains as a
+// convenience layer (scoped storage, sendPrompt, log capture).
 //   plugin → host : { source: 'wardex-plugin', type: 'ready' | 'notify'
 //                     | 'sendPrompt', text?: string }
 //   host → plugin : { source: 'wardex-host', type: 'info',
@@ -261,14 +261,16 @@ watch(
     <transition name="plugin-notice">
       <div v-if="notice" class="plugin-panel__notice">{{ notice }}</div>
     </transition>
-    <!-- sandbox WITHOUT allow-same-origin: the plugin runs with a null
-         origin and zero storage/IPC access; postMessage still works. -->
+    <!-- UNSANDBOXED (user decision, single-user personal build): srcdoc
+         inherits the app's origin, so panels get full same-origin access —
+         window.__TAURI__ IPC (withGlobalTauri), parent DOM, storage.
+         The postMessage bridge stays for convenience (storage scopes,
+         sendPrompt, log capture). -->
     <iframe
       ref="frame"
       class="plugin-panel__frame"
       :srcdoc="html"
       :title="title"
-      sandbox="allow-scripts"
       @load="postInfo()"
     ></iframe>
   </div>

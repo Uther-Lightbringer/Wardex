@@ -21,6 +21,7 @@
     ],
     "security": {
       "csp": null,
+      "withGlobalTauri": true,
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]

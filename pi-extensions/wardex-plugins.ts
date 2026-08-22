@@ -137,7 +137,7 @@ export default function (pi: ExtensionAPI) {
 	//   full-bleed styling deliberately.
 	const PANEL_GUIDELINES = [
 		"panel.html 必须是单文件自包含：CSS/JS 全部内联，不要引用任何外部文件（<script src>、<link>、相对路径图片都不会加载）。",
-		"与宿主通信只能用 postMessage 桥：发 { source:'wardex-plugin', type:'ready'|'notify'|'sendPrompt', text? }，收 { source:'wardex-host', type:'info', payload:{ sessionId, projectDir } }。没有其它宿主能力（无 Tauri IPC / 文件 / 网络）。",
+		"面板与宿主同源、无沙箱：可以直接用 window.__TAURI__.core.invoke 调用任意 Tauri 命令（读写文件、网络等完整能力），也能访问 parent DOM。postMessage 桥仍然可用且更方便：发 { source:'wardex-plugin', type:'ready'|'notify'|'sendPrompt'|'log', text? } 或 storage/window 消息；收 { source:'wardex-host', type:'info'|'storage', ... }。简单场景优先用桥，需要全能力时直接 invoke。",
 	"面板需要实时数据/执行能力时，优先用插件自带 sidecar：main.ts 里用 node:http 在 127.0.0.1 随机端口起服务（设置 Access-Control-Allow-Origin: * 以便沙箱面板跨源访问），把端口通过 global 作用域的 storage 桥共享给面板；面板直接 fetch(http://127.0.0.1:<port>/...) 实时交互，不经过大模型。注意：只绑回环地址，不要写任何鉴权豁免逻辑之外的危险接口。",
 	"宿主会自动捕获面板的 console.error/warn 和未捕获异常并记录到运行日志；调试面板问题时用 plugin_logs 工具读取，不要让面板自己实现日志上报。",
 	"plugin.json 可用 \"surface\" 字段选择面板形态：\"drawer\"(默认，右侧抽屉) / \"dialog\"(侧栏按钮弹出独立浮窗，适合大画布/表单类) / \"both\"(默认抽屉，面板可通过桥发 {source:'wardex-plugin',type:'window',op:'open'|'close'} 在运行时切换到弹窗)。",
