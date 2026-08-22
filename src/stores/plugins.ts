@@ -20,6 +20,8 @@ export interface PluginInfo {
   dir: string;
   /** 'drawer' | 'dialog' | 'both' */
   surface: string;
+  /** 'session' | 'project' | 'global' (from plugin.json data.scope) */
+  dataScope: string;
 }
 
 export interface ApplyResult {

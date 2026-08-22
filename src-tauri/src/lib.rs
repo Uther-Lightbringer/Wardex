@@ -326,6 +326,34 @@ fn plugins_root_dir(state: State<'_, AppState>) -> String {
     plugins::ensure_root(&stores.paths).to_string_lossy().into_owned()
 }
 
+/// Plugin data storage (阶段③): read the WHOLE data document for one plugin
+/// at its declared scope. The frontend bridge does per-key get/set on top.
+#[tauri::command]
+fn plugin_data_get(
+    state: State<'_, AppState>,
+    id: String,
+    scope: String,
+    projectDir: String,
+) -> Result<Value, String> {
+    let stores = lock(&state.stores);
+    let path = plugins::data_file(&stores.paths, &id, &scope, &projectDir)?;
+    Ok(plugins::read_data(&stores.paths, &path))
+}
+
+/// Write back the whole document (atomic tmp+rename).
+#[tauri::command]
+fn plugin_data_set(
+    state: State<'_, AppState>,
+    id: String,
+    scope: String,
+    projectDir: String,
+    doc: Value,
+) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    let path = plugins::data_file(&stores.paths, &id, &scope, &projectDir)?;
+    plugins::write_data(&stores.paths, &path, &doc)
+}
+
 /// Read one UI plugin's panel html for the iframe host. The path MUST match
 /// exactly the `ui` field of an ENABLED plugin from the current scan — this
 /// is the whitelist; arbitrary file reads are rejected. Content is served as
@@ -1836,6 +1864,8 @@ pub fn run() {
             plugins_read_panel,
             plugins_pending,
             plugin_log_append,
+            plugin_data_get,
+            plugin_data_set,
             plugins_apply,
             send_prompt,
             cancel,

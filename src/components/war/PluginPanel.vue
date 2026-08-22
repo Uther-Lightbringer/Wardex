@@ -14,6 +14,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { cmd } from '../../lib/tauri';
 import { useChatStore } from '../../stores/chat';
+import { usePluginsStore } from '../../stores/plugins';
 
 const props = defineProps<{
   /** Absolute path of panel.html (from plugins store uiPanels). */
@@ -24,6 +25,7 @@ const props = defineProps<{
 }>();
 
 const chat = useChatStore();
+const plugins = usePluginsStore();
 const frame = ref<HTMLIFrameElement | null>(null);
 const notice = ref('');
 let noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -76,6 +78,10 @@ async function onMessage(e: MessageEvent): Promise<void> {
       await chat.send(text, []);
       break;
     }
+    case 'storage': {
+      void handleStorage(data as StorageMsg);
+      break;
+    }
     case 'window': {
       // surface:'both' panels may promote themselves to a dialog (op open)
       // or ask the dialog container to close (op close). Whitelisted op only.
@@ -100,6 +106,82 @@ onBeforeUnmount(() => window.removeEventListener('message', onMessage));
 // 'log' message. The host keeps a small ring buffer for on-screen notices
 // and persists lines Rust-side so the model's plugin_logs tool can read
 // them and debug its own panels.
+// --- scoped data storage (阶段③) ---------------------------------------
+// The plugin declares ONE scope in plugin.json (data.scope); the host routes
+// get/set/remove ops there. session → in-memory (dies with the session);
+// project → <project>/.wardex/plugin-data/<id>.json; global → data root.
+// The plugin never touches files itself.
+interface StorageMsg {
+  reqId?: number | string;
+  op?: string;
+  key?: string;
+  value?: unknown;
+}
+
+/** Session-scope docs: `${sessionId}:${pluginId}` → object. */
+const sessionStore = new Map<string, Record<string, unknown>>();
+
+async function loadScopeDoc(scope: string): Promise<Record<string, unknown>> {
+  const pid = props.pluginId ?? '';
+  if (!pid) return {};
+  if (scope === 'session') {
+    return sessionStore.get(`${chat.sessionId}:${pid}`) ?? {};
+  }
+  return cmd<Record<string, unknown>>(
+    'plugin_data_get',
+    { id: pid, scope, projectDir: chat.projectDir ?? '' },
+    {},
+  );
+}
+
+async function saveScopeDoc(scope: string, doc: Record<string, unknown>): Promise<void> {
+  const pid = props.pluginId ?? '';
+  if (!pid) return;
+  if (scope === 'session') {
+    sessionStore.set(`${chat.sessionId}:${pid}`, doc);
+    return;
+  }
+  await cmd('plugin_data_set', { id: pid, scope, projectDir: chat.projectDir ?? '', doc });
+}
+
+async function handleStorage(m: StorageMsg): Promise<void> {
+  const reply = (ok: boolean, value?: unknown, error?: string) => {
+    frame.value?.contentWindow?.postMessage(
+      { source: 'wardex-host', type: 'storage', reqId: m.reqId, ok, value, error },
+      '*',
+    );
+  };
+  try {
+    // Scope comes from the REGISTRY declaration, not the message — the
+    // panel cannot choose a different scope at runtime.
+    let scope = plugins.list.find((p) => p.id === props.pluginId)?.dataScope ?? 'project';
+    if (!['session', 'project', 'global'].includes(scope)) scope = 'project';
+    const doc = await loadScopeDoc(scope);
+    switch (m.op) {
+      case 'get':
+        reply(true, m.key === undefined ? doc : doc[String(m.key)]);
+        break;
+      case 'set': {
+        if (typeof m.key !== 'string' || !m.key) return reply(false, undefined, 'key 必须是非空字符串');
+        doc[m.key] = m.value ?? null;
+        await saveScopeDoc(scope, doc);
+        reply(true);
+        break;
+      }
+      case 'remove': {
+        if (typeof m.key === 'string' && m.key in doc) delete doc[m.key];
+        await saveScopeDoc(scope, doc);
+        reply(true);
+        break;
+      }
+      default:
+        reply(false, undefined, `未知操作: ${String(m.op)}`);
+    }
+  } catch (e) {
+    reply(false, undefined, String(e));
+  }
+}
+
 const LOG_RING_MAX = 40;
 const logRing = ref<string[]>([]);
 let logFlushTimer: ReturnType<typeof setTimeout> | null = null;

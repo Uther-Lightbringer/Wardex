@@ -48,6 +48,11 @@ pub struct PluginInfo {
     /// UI panel surface: "drawer" (default) | "dialog" | "both".
     #[serde(default)]
     pub surface: String,
+    /// Data scope declared by the plugin: "session" (in-memory, dies with
+    /// the session) | "project" (<project>/.wardex/) | "global"
+    /// (data-root-wide). Default "project".
+    #[serde(default)]
+    pub data_scope: String,
 }
 
 impl PluginInfo {
@@ -123,6 +128,12 @@ fn read_user_plugin(dir: &Path) -> Option<PluginInfo> {
         _ => "drawer",
     }
     .to_string();
+    let data_scope = match m.get("data").and_then(|d| d.get("scope")).and_then(|v| v.as_str()) {
+        Some("global") => "global",
+        Some("session") => "session",
+        _ => "project", // default
+    }
+    .to_string();
     let entry = if rel_entry.trim().is_empty() {
         String::new()
     } else {
@@ -149,6 +160,7 @@ fn read_user_plugin(dir: &Path) -> Option<PluginInfo> {
         ui,
         dir: dir.to_string_lossy().into_owned(),
         surface,
+        data_scope,
     })
 }
 
@@ -175,6 +187,7 @@ pub fn scan(paths: &Paths) -> Vec<PluginInfo> {
                     ui: String::new(),
                     dir: dir.to_string_lossy().into_owned(),
                     surface: String::new(),
+                    data_scope: String::new(),
                 });
             }
         };
@@ -199,6 +212,7 @@ pub fn scan(paths: &Paths) -> Vec<PluginInfo> {
             ui: String::new(),
             dir: String::new(),
             surface: String::new(),
+            data_scope: String::new(),
         });
     };
     push_native(&mut out, "tasks", "后台任务");
@@ -337,6 +351,61 @@ pub fn append_log(paths: &Paths, id: &str, lines: &[String]) -> Result<(), Strin
     Ok(())
 }
 
+/// Resolve the JSON data file for one plugin's declared scope. Session scope
+/// never hits disk (frontend keeps it in memory); project scope lives under
+/// <projectDir>/.wardex/plugin-data/, global under the plugin data root.
+pub fn data_file(
+    paths: &Paths,
+    id: &str,
+    scope: &str,
+    project_dir: &str,
+) -> Result<PathBuf, String> {
+    let clean = id.trim();
+    if clean.is_empty()
+        || !clean
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || clean.starts_with('.')
+        || !scan(paths).iter().any(|p| p.id == clean)
+    {
+        return Err(format!("非法或未知插件 id: {id}"));
+    }
+    match scope {
+        "global" => {
+            let dir = plugins_root(paths).join(".data");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            Ok(dir.join(format!("{clean}.json")))
+        }
+        "project" => {
+            let proj = PathBuf::from(project_dir.trim());
+            if !proj.is_dir() {
+                return Err("项目目录无效，无法存项目级数据".into());
+            }
+            let dir = proj.join(".wardex").join("plugin-data");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            Ok(dir.join(format!("{clean}.json")))
+        }
+        _ => Err(format!("不支持的存储作用域: {scope}")),
+    }
+}
+
+/// Read a plugin's whole data document (empty object when absent).
+pub fn read_data(paths: &Paths, path: &Path) -> serde_json::Value {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Atomically write a plugin's whole data document.
+pub fn write_data(paths: &Paths, path: &Path, doc: &serde_json::Value) -> Result<(), String> {
+    let _ = paths; // reserved (future per-scope quota/metadata)
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("写插件数据失败: {e}"))?;
+    fs::rename(&tmp, path).map_err(|e| format!("提交插件数据失败: {e}"))
+}
+
 /// True when registry.json or any plugin file is newer than the last apply —
 /// surfaced as a "有未生效的变更" hint in the UI (polling, cheap small tree).
 pub fn pending_changes(paths: &Paths) -> bool {
@@ -433,6 +502,35 @@ mod tests {
         fs::write(plug.join("plugin.json"), "{}").unwrap();
         delete_plugin(&paths, "gone").unwrap();
         assert!(!plug.exists());
+    }
+
+    #[test]
+    fn data_file_scopes_and_validation() {
+        let (_guard, paths) = temp_paths("pdata");
+        let plug = plugins_root(&paths).join("notes");
+        fs::create_dir_all(&plug).unwrap();
+        fs::write(plug.join("plugin.json"), r#"{"name":"N","entry":"main.ts"}"#).unwrap();
+
+        // Unknown / malformed ids rejected.
+        assert!(data_file(&paths, "ghost", "global", "").is_err());
+        assert!(data_file(&paths, "../x", "global", "").is_err());
+        assert!(data_file(&paths, "notes", "bogus", "").is_err());
+
+        // Global scope → <root>/.data/notes.json.
+        let g = data_file(&paths, "notes", "global", "").unwrap();
+        assert!(g.starts_with(plugins_root(&paths).join(".data")));
+
+        // Project scope requires a real directory and lands in .wardex.
+        assert!(data_file(&paths, "notes", "project", "Z:/no/such/dir").is_err());
+        let tmp_proj = std::env::temp_dir().join(format!("wardex-pd-proj-{}", std::process::id()));
+        fs::create_dir_all(&tmp_proj).unwrap();
+        let p = data_file(&paths, "notes", "project", &tmp_proj.to_string_lossy()).unwrap();
+        assert!(p.starts_with(tmp_proj.join(".wardex").join("plugin-data")));
+        let _ = fs::remove_dir_all(&tmp_proj);
+
+        // Round-trip read/write of the whole document.
+        write_data(&paths, &g, &json!({"count": 3})).unwrap();
+        assert_eq!(read_data(&paths, &g), json!({"count": 3}));
     }
 
     #[test]
