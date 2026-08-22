@@ -19,6 +19,8 @@ const props = defineProps<{
   /** Absolute path of panel.html (from plugins store uiPanels). */
   src: string;
   title: string;
+  /** Plugin id — used to route captured runtime logs to .logs/<id>.log. */
+  pluginId?: string;
 }>();
 
 const chat = useChatStore();
@@ -50,7 +52,12 @@ function postInfo(): void {
 
 async function onMessage(e: MessageEvent): Promise<void> {
   if (e.source !== frame.value?.contentWindow) return;
-  const data = e.data as { source?: string; type?: string; text?: string } | null;
+  const data = e.data as {
+    source?: string;
+    type?: string;
+    text?: string;
+    level?: string;
+  } | null;
   if (!data || data.source !== 'wardex-plugin') return;
   switch (data.type) {
     case 'ready':
@@ -58,6 +65,9 @@ async function onMessage(e: MessageEvent): Promise<void> {
       break;
     case 'notify':
       showNotice(String(data.text ?? '').slice(0, 200));
+      break;
+    case 'log':
+      captureLog(data.level ?? 'log', String(data.text ?? ''));
       break;
     case 'sendPrompt': {
       const text = String(data.text ?? '').trim();
@@ -73,6 +83,63 @@ async function onMessage(e: MessageEvent): Promise<void> {
 onMounted(() => window.addEventListener('message', onMessage));
 onBeforeUnmount(() => window.removeEventListener('message', onMessage));
 
+// --- runtime log capture ---------------------------------------------
+// A tiny shim is prepended into the panel's own html (inside its sandbox):
+// it patches console.error/warn and hooks window error/rejection events,
+// forwarding everything over the SAME postMessage whitelist bridge as a
+// 'log' message. The host keeps a small ring buffer for on-screen notices
+// and persists lines Rust-side so the model's plugin_logs tool can read
+// them and debug its own panels.
+const LOG_RING_MAX = 40;
+const logRing = ref<string[]>([]);
+let logFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function injectShim(html: string): string {
+  const shim =
+    '<script>(function(){' +
+    "var send=function(l,t){try{parent.postMessage({source:'wardex-plugin',type:'log',level:l,text:String(t).slice(0,1500)},'*')}catch(_){}};" +
+    "var fmt=function(a){return Array.prototype.map.call(a,function(x){if(typeof x==='string')return x;if(x&&x.stack)return x.stack;if(x&&x.message)return x.message;try{return JSON.stringify(x)}catch(_){return String(x)}}).join(' ')};" +
+    "var oe=console.error,ow=console.warn;console.error=function(){send('error',fmt(arguments));oe.apply(console,arguments)};" +
+    "console.warn=function(){send('warn',fmt(arguments));ow.apply(console,arguments)};" +
+    "window.addEventListener('error',function(e){send('error',(e.message||'script error')+(e.lineno?(' @line '+e.lineno):''))});" +
+    "window.addEventListener('unhandledrejection',function(e){var r=e.reason;send('error','unhandled rejection: '+((r&&(r.stack||r.message))||String(r)))});" +
+    '})();<' + '/script>';
+  const head = html.match(/<head[^>]*>/i);
+  return head ? html.replace(head[0], head[0] + shim) : shim + html;
+}
+
+function captureLog(level: string, text: string): void {
+  const stamp = new Date().toLocaleTimeString('en-GB');
+  logRing.value.push(`[${stamp}] [${level}] ${text}`.slice(0, 1600));
+  if (logRing.value.length > LOG_RING_MAX) logRing.value.shift();
+  if (level === 'error') showNotice(`⚠ 面板报错：${text.slice(0, 120)}`);
+  // Batch + persist so the model can read the trail via plugin_logs.
+  if (!props.pluginId) return;
+  pendingLogLines.push(`[${stamp}] [${level}] ${text}`.slice(0, 1600));
+  if (!logFlushTimer) {
+    logFlushTimer = setTimeout(flushLogs, 800);
+  }
+}
+
+const pendingLogLines: string[] = [];
+
+async function flushLogs(): Promise<void> {
+  logFlushTimer = null;
+  const id = props.pluginId;
+  const lines = pendingLogLines.splice(0);
+  if (!id || !lines.length) return;
+  try {
+    await cmd('plugin_log_append', { id, lines });
+  } catch {
+    /* logging must never break the panel host */
+  }
+}
+
+onBeforeUnmount(() => {
+  if (logFlushTimer) clearTimeout(logFlushTimer);
+  void flushLogs();
+});
+
 // Panel content: fetched Rust-side (whitelisted against enabled plugins) and
 // rendered via srcdoc — asset-protocol URLs break on non-ASCII Windows paths
 // (e.g. wardex-plugins\时钟\panel.html), and srcdoc also lets us drop
@@ -86,7 +153,9 @@ watch(
       return;
     }
     try {
-      html.value = await cmd<string>('plugins_read_panel', { path: src }, '');
+      html.value = injectShim(
+        await cmd<string>('plugins_read_panel', { path: src }, ''),
+      );
     } catch (e) {
       html.value = `<body style="font:13px sans-serif;padding:12px">面板加载失败：${String(e)}</body>`;
     }

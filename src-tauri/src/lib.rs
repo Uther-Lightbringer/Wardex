@@ -362,6 +362,26 @@ fn plugins_pending(state: State<'_, AppState>) -> bool {
     plugins::pending_changes(&stores.paths)
 }
 
+/// Runtime log sink for UI-plugin panels: PluginPanel captures console/
+/// errors inside the sandboxed iframe and forwards them here so the model
+/// can read them back via its plugin_logs tool and debug itself.
+#[tauri::command]
+fn plugin_log_append(
+    state: State<'_, AppState>,
+    id: String,
+    lines: Vec<String>,
+) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    if lines.is_empty() || lines.len() > 50 {
+        return Err("lines 数量必须在 1..=50".into());
+    }
+    let clean: Vec<String> = lines
+        .iter()
+        .map(|l| l.chars().take(2000).collect())
+        .collect();
+    plugins::append_log(&stores.paths, &id, &clean)
+}
+
 /// Per-session toggle for auto-injecting codegraph symbol context into
 /// prompts (会话信息面板的「使用 codegraph 索引」勾选框).
 #[tauri::command]
@@ -1815,6 +1835,7 @@ pub fn run() {
             plugins_root_dir,
             plugins_read_panel,
             plugins_pending,
+            plugin_log_append,
             plugins_apply,
             send_prompt,
             cancel,

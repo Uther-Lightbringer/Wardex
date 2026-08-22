@@ -119,6 +119,7 @@ export default function (pi: ExtensionAPI) {
 	const PANEL_GUIDELINES = [
 		"panel.html 必须是单文件自包含：CSS/JS 全部内联，不要引用任何外部文件（<script src>、<link>、相对路径图片都不会加载）。",
 		"与宿主通信只能用 postMessage 桥：发 { source:'wardex-plugin', type:'ready'|'notify'|'sendPrompt', text? }，收 { source:'wardex-host', type:'info', payload:{ sessionId, projectDir } }。没有其它宿主能力（无 Tauri IPC / 文件 / 网络）。",
+	"宿主会自动捕获面板的 console.error/warn 和未捕获异常并记录到运行日志；调试面板问题时用 plugin_logs 工具读取，不要让面板自己实现日志上报。",
 		"面板背景建议透明（body{background:transparent}）以融入主题；需要自带配色时明确铺满整个 body。",
 	].join("\n");
 	pi.registerTool({
@@ -304,6 +305,53 @@ export default function (pi: ExtensionAPI) {
 			return ok
 				? textResult("用户已允许：插件变更正在应用（空闲会话已重启加载新版本）。")
 				: textResult("用户拒绝了本次生效；变更仍处于待生效状态，用户可稍后在 设置→插件 手动点「生效」。",		);
+		},
+	});
+
+	// Runtime observability: UI panels' console output + uncaught errors are
+	// captured by the host iframe bridge and persisted to .logs/<id>.log.
+	// This tool closes the debug loop — the model can read what its panel
+	// actually printed / threw and fix its own code.
+	pi.registerTool({
+		name: "plugin_logs",
+		label: "Read Plugin Runtime Logs",
+		description:
+			"Read the runtime log of a UI plugin (console.warn/error + uncaught errors captured from its sidebar panel). " +
+			"Without id: list plugins that have logs. Use this FIRST when a user reports a panel misbehaving or showing errors.",
+		promptGuidelines: [
+			"当用户报告面板空白/报错/行为异常时，先调用 plugin_logs 读取运行日志定位问题，再 plugin_read 看代码、plugin_write 修复。",
+		],
+		parameters: Type.Object({
+			id: Type.Optional(Type.String({ description: "Plugin id (= its directory name)" })),
+		}),
+		async execute(_id, params) {
+			const root = pluginsRoot();
+			if (!root) return textResult("WARDEX_PLUGINS_DIR 未设置。");
+			const logsDir = path.join(root, ".logs");
+			try {
+				if (!params.id || !params.id.trim()) {
+					if (!fs.existsSync(logsDir)) return textResult("暂无任何插件运行日志。");
+					const files = fs
+						.readdirSync(logsDir)
+						.filter((f) => f.endsWith(".log"))
+						.map((f) => {
+							const st = fs.statSync(path.join(logsDir, f));
+							return `  ${f.replace(/\.log$/, "")}  (${st.size} bytes, ${st.mtime.toISOString()})`;
+						});
+					return textResult(
+						files.length ? `有运行日志的插件：\n${files.join("\n")}` : "暂无任何插件运行日志。",
+					);
+				}
+				const target = path.join(logsDir, `${path.basename(params.id.trim())}.log`);
+				if (!target.startsWith(path.resolve(logsDir))) return textResult("非法插件 id。");
+				if (!fs.existsSync(target)) return textResult(`插件 ${params.id} 暂无运行日志（面板可能从未报错或未打开过）。`);
+				const stat = fs.statSync(target);
+				let text = fs.readFileSync(target, "utf8");
+				if (stat.size > 16_000) text = "…(仅末尾)\n" + text.slice(-16_000);
+				return textResult(`[plugin_logs ${params.id}]\n${text}`);
+			} catch (e) {
+				return textResult(String(e));
+			}
 		},
 	});
 }

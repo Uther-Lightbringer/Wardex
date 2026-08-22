@@ -261,6 +261,48 @@ pub fn mark_applied(paths: &Paths) {
     let _ = fs::write(last_apply_path(paths), now.to_string());
 }
 
+/// Max size of one plugin runtime log before rotation (<id>.log → <id>.old).
+const PLUGIN_LOG_MAX_BYTES: u64 = 64 * 1024;
+
+/// Validate an id and resolve its runtime log path under .logs/.
+/// Only ids that scan() actually knows about are accepted — the sink cannot
+/// be used to scribble arbitrary files outside the plugin tree.
+pub fn log_file(paths: &Paths, id: &str) -> Result<PathBuf, String> {
+    let clean = id.trim();
+    if clean.is_empty()
+        || !clean
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        || clean.starts_with('.')
+    {
+        return Err(format!("非法插件 id: {id}"));
+    }
+    if !scan(paths).iter().any(|p| p.id == clean) {
+        return Err(format!("未知插件: {clean}"));
+    }
+    let dir = plugins_root(paths).join(".logs");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join(format!("{clean}.log")))
+}
+
+/// Append frontend-captured panel console/error lines to <id>.log.
+pub fn append_log(paths: &Paths, id: &str, lines: &[String]) -> Result<(), String> {
+    use std::io::Write as _;
+    let path = log_file(paths, id)?;
+    if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > PLUGIN_LOG_MAX_BYTES {
+        let _ = fs::rename(&path, path.with_extension("old"));
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    for line in lines {
+        let _ = writeln!(f, "{line}");
+    }
+    Ok(())
+}
+
 /// True when registry.json or any plugin file is newer than the last apply —
 /// surfaced as a "有未生效的变更" hint in the UI (polling, cheap small tree).
 pub fn pending_changes(paths: &Paths) -> bool {
@@ -357,6 +399,24 @@ mod tests {
         fs::write(plug.join("plugin.json"), "{}").unwrap();
         delete_plugin(&paths, "gone").unwrap();
         assert!(!plug.exists());
+    }
+
+    #[test]
+    fn plugin_log_sink_validates_and_appends() {
+        let (_guard, paths) = temp_paths("plog");
+        // Unknown / malformed ids are rejected — no arbitrary file writes.
+        assert!(append_log(&paths, "ghost", &["x".into()]).is_err());
+        assert!(append_log(&paths, "../evil", &["x".into()]).is_err());
+        assert!(append_log(&paths, ".hidden", &["x".into()]).is_err());
+
+        let plug = plugins_root(&paths).join("hello");
+        fs::create_dir_all(&plug).unwrap();
+        fs::write(plug.join("plugin.json"), r#"{"name":"H","entry":"main.ts"}"#).unwrap();
+
+        append_log(&paths, "hello", &["line one".into(), "line two".into()]).unwrap();
+        append_log(&paths, "hello", &["line three".into()]).unwrap();
+        let content = fs::read_to_string(log_file(&paths, "hello").unwrap()).unwrap();
+        assert_eq!(content, "line one\nline two\nline three\n");
     }
 
     #[test]

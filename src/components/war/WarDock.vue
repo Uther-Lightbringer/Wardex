@@ -29,7 +29,7 @@ function pluginPanelComp(p: PluginInfo) {
     defineComponent({
       name: `PluginPanel_${p.id}`,
       render() {
-        return h(PluginPanel, { src: p.ui, title: p.name });
+        return h(PluginPanel, { src: p.ui, title: p.name, pluginId: p.id });
       },
     }),
   );
