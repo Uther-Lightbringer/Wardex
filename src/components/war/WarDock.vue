@@ -10,7 +10,13 @@
 // DRAGGING the width the transition is disabled so the dock tracks the
 // pointer freely (no lag), re-enabled on release.
 import { computed, defineComponent, h, markRaw, onBeforeUnmount, onMounted, ref } from 'vue';
-import { panelRegistry, PANEL_MAX_W, PANEL_DEFAULT_W, type PanelDef } from '../../panels/registry';
+import {
+  panelRegistry,
+  nativePluginPanels,
+  PANEL_MAX_W,
+  PANEL_DEFAULT_W,
+  type PanelDef,
+} from '../../panels/registry';
 import { usePrefsStore } from '../../stores/prefs';
 import { usePluginsStore, type PluginInfo } from '../../stores/plugins';
 import WarPanel from './WarPanel.vue';
@@ -59,10 +65,21 @@ onMounted(() => {
 onBeforeUnmount(() => ro?.disconnect());
 
 const defs = computed<PanelDef[]>(() => {
+  // Static panels: 会话信息/版本控制/工作区文件 (NOT registry-managed).
   const builtin = [...panelRegistry].sort(
     (a, b) =>
       (prefs.panelLayout[a.id]?.order ?? a.order) - (prefs.panelLayout[b.id]?.order ?? b.order),
   );
+  // System plugins (阶段①): 待办/后台任务/数据库 are compiled Vue panels
+  // but managed through the plugin registry — shown only when enabled.
+  const native: PanelDef[] = plugins.list
+    .filter((p) => p.enabled && nativePluginPanels[p.id])
+    .map((p, i) => ({
+      ...nativePluginPanels[p.id],
+      title: p.name || nativePluginPanels[p.id].title,
+      order: (prefs.panelLayout[p.id]?.order ?? nativePluginPanels[p.id].order) + i * 0.01,
+    }))
+    .sort((a, b) => a.order - b.order);
   // UI plugins (插件化改造 P2): each enabled ui-kind plugin becomes a drawer
   // tab hosting its panel.html in a sandboxed iframe (PluginPanel). Loaded
   // after builtins; the list refreshes when the plugins store re-pulls.
@@ -75,7 +92,7 @@ const defs = computed<PanelDef[]>(() => {
     order: 100 + i,
     refreshOn: [],
   }));
-  return [...builtin, ...dynamic];
+  return [...builtin, ...native, ...dynamic];
 });
 
 // Drawer open state — transient, never written to panelLayout.

@@ -171,6 +171,27 @@ pub fn scan(paths: &Paths) -> Vec<PluginInfo> {
         push_builtin(&mut out, "wardex-plugins.ts", "plugins", "插件管理员");
     }
 
+    // Native UI panels shipped with the app (待办/后台任务/数据库) surface in
+    // the SAME registry as default-installed system plugins: toggleable,
+    // undeletable. They have no extension entry / panel.html — the frontend
+    // maps these ids to its compiled Vue components (panels/registry.ts).
+    let push_native = |out: &mut Vec<PluginInfo>, id: &str, name: &str| {
+        out.push(PluginInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            kind: "ui".to_string(),
+            enabled: true,
+            builtin: true,
+            entry: String::new(),
+            ui: String::new(),
+            dir: String::new(),
+        });
+    };
+    push_native(&mut out, "tasks", "后台任务");
+    push_native(&mut out, "todos", "待办");
+    push_native(&mut out, "db", "数据库");
+
     // ---- user plugins ----
     let root = plugins_root(paths);
     if let Ok(entries) = fs::read_dir(&root) {

@@ -43,24 +43,6 @@ export const panelRegistry: PanelDef[] = [
     refreshOn: ['sessionSwitch'],
   },
   {
-    id: 'tasks',
-    title: '后台任务',
-    component: () => import('./TasksPanel.vue'),
-    defaultOpen: false,
-    defaultWidth: 220,
-    order: 12,
-    refreshOn: ['turnEnd', 'sessionSwitch'],
-  },
-  {
-    id: 'todos',
-    title: '待办',
-    component: () => import('./TodosPanel.vue'),
-    defaultOpen: false,
-    defaultWidth: 220,
-    order: 15,
-    refreshOn: ['turnEnd', 'sessionSwitch', 'manual'],
-  },
-  {
     id: 'git',
     title: '版本控制',
     component: () => import('./GitPanel.vue'),
@@ -78,7 +60,34 @@ export const panelRegistry: PanelDef[] = [
     order: 30,
     refreshOn: ['sessionSwitch', 'expand', 'manual'],
   },
-  {
+];
+
+/** Native panels converted to default-installed SYSTEM plugins (插件化改造
+ * 阶段①): they live in the Rust plugin registry (toggleable/undeletable,
+ * settings → 插件) but still render as compiled Vue components — trusted
+ * code, no iframe sandbox. WarDock merges them into the rail when the
+ * registry reports them enabled; ids match the old static entries so
+ * panelLayout prefs survive. */
+export const nativePluginPanels: Record<string, PanelDef> = {
+  tasks: {
+    id: 'tasks',
+    title: '后台任务',
+    component: () => import('./TasksPanel.vue'),
+    defaultOpen: false,
+    defaultWidth: 220,
+    order: 12,
+    refreshOn: ['turnEnd', 'sessionSwitch'],
+  },
+  todos: {
+    id: 'todos',
+    title: '待办',
+    component: () => import('./TodosPanel.vue'),
+    defaultOpen: false,
+    defaultWidth: 220,
+    order: 15,
+    refreshOn: ['turnEnd', 'sessionSwitch', 'manual'],
+  },
+  db: {
     id: 'db',
     title: '数据库',
     component: () => import('./DbPanel.vue'),
@@ -87,4 +96,4 @@ export const panelRegistry: PanelDef[] = [
     order: 35,
     refreshOn: ['sessionSwitch'],
   },
-];
+};
