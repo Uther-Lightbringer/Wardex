@@ -529,6 +529,11 @@ export const useChatStore = defineStore('chat', {
         const next = [...this.rows];
         next[i] = markRaw({ ...r, status: p.status, usage: p.usage ?? r.usage });
         this.rows = next;
+        // Deferred plugin apply (插件化 B): the turn just ended — safe to
+        // restart idle runtimes now.
+        if (p.status !== 'pending' && p.status !== 'streaming') {
+          void import('./plugins').then(({ usePluginsStore }) => usePluginsStore().flushDeferred());
+        }
         return;
       }
     },
@@ -982,11 +987,24 @@ export const useChatStore = defineStore('chat', {
 
     async answerPermission(optionId: string, cancelled: boolean): Promise<void> {
       if (!this.sessionId) return;
+      // Plugin-apply hook (插件化 B): the plugin-manager's plugin_apply tool
+      // surfaces as a confirm dialog flagged params.pluginApply — on approval
+      // the host applies the changes right after the answer reaches pi.
+      const params = this.permission?.params as
+        | { pluginApply?: boolean; options?: { optionId: string; kind?: string }[] }
+        | undefined;
+      const isApplyAsk = params?.pluginApply === true;
+      const chosen = params?.options?.find((o) => o.optionId === optionId);
+      const approved = !cancelled && (!chosen || chosen.kind !== 'reject_once');
       this.permission = null;
       try {
         await cmd('answer_permission', { sessionId: this.sessionId, optionId, cancelled });
       } catch (e) {
         console.warn('[chat] answer_permission failed', e);
+      }
+      if (isApplyAsk && approved) {
+        const { usePluginsStore } = await import('./plugins');
+        usePluginsStore().requestApplyAfterTurn();
       }
     },
 

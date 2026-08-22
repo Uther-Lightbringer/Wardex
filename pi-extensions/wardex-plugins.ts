@@ -279,4 +279,31 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 	});
+
+	pi.registerTool({
+		name: "plugin_apply",
+		label: "Apply Plugin Changes",
+		description:
+			"Ask the user to apply pending plugin changes NOW (restarts idle sessions' pi process; conversation context is preserved). " +
+			"Call this after writing/toggling plugins when the user wants changes live immediately. Shows a confirmation dialog first.",
+		promptGuidelines: [
+			"After plugin_write/plugin_set_enabled/plugin_delete, call plugin_apply if the user asked for the change to take effect immediately; otherwise just remind them about the 生效 button.",
+		],
+		parameters: Type.Object({}),
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
+			if (!ctx.hasUI) {
+				return textResult("当前无 UI 环境，无法弹确认框；请用户在 设置→插件 手动点「生效」。",		);
+			}
+			// Title sentinel "[plugins.apply]" — WarDex intercepts this confirm,
+			// shows its permission dialog, and on approval applies the change
+			// host-side (restarts idle runtimes) right after answering.
+			const ok = await ctx.ui.confirm(
+				"[plugins.apply] 应用插件变更",
+				"将重启空闲会话以加载最新插件（对话上下文保留，忙碌会话跳过）。允许吗？",
+			);
+			return ok
+				? textResult("用户已允许：插件变更正在应用（空闲会话已重启加载新版本）。")
+				: textResult("用户拒绝了本次生效；变更仍处于待生效状态，用户可稍后在 设置→插件 手动点「生效」。",		);
+		},
+	});
 }

@@ -349,7 +349,17 @@ fn plugins_read_panel(state: State<'_, AppState>, path: String) -> Result<String
 #[tauri::command]
 async fn plugins_apply(state: State<'_, AppState>) -> Result<Value, String> {
     let (restarted, skipped) = state.chat.apply_plugins().await;
+    let stores = lock(&state.stores);
+    plugins::mark_applied(&stores.paths);
     Ok(json!({ "restarted": restarted, "skipped": skipped }))
+}
+
+/// True when plugin files changed since the last apply — the frontend shows
+/// a "有未生效的变更" hint bar (polled; the tree is tiny).
+#[tauri::command]
+fn plugins_pending(state: State<'_, AppState>) -> bool {
+    let stores = lock(&state.stores);
+    plugins::pending_changes(&stores.paths)
 }
 
 /// Per-session toggle for auto-injecting codegraph symbol context into
@@ -1804,6 +1814,7 @@ pub fn run() {
             plugins_delete,
             plugins_root_dir,
             plugins_read_panel,
+            plugins_pending,
             plugins_apply,
             send_prompt,
             cancel,

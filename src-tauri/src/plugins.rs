@@ -233,11 +233,69 @@ pub fn extension_files(paths: &Paths, use_codegraph: bool) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Ensure the user plugin root exists (first run) and return it.
+/// Ensure the user plugin tree exists (first run) and return it.
 pub fn ensure_root(paths: &Paths) -> PathBuf {
     let root = plugins_root(paths);
     let _ = fs::create_dir_all(&root);
     root
+}
+
+/// Marker file holding the millis timestamp of the last 「生效」.
+fn last_apply_path(paths: &Paths) -> PathBuf {
+    plugins_root(paths).join(".last_apply")
+}
+
+fn last_apply_ms(paths: &Paths) -> Option<u128> {
+    fs::read_to_string(last_apply_path(paths))
+        .ok()
+        .and_then(|s| s.trim().parse::<u128>().ok())
+}
+
+/// Stamp after a successful apply so pending_changes() resets.
+pub fn mark_applied(paths: &Paths) {
+    let _ = fs::create_dir_all(plugins_root(paths));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = fs::write(last_apply_path(paths), now.to_string());
+}
+
+/// True when registry.json or any plugin file is newer than the last apply —
+/// surfaced as a "有未生效的变更" hint in the UI (polling, cheap small tree).
+pub fn pending_changes(paths: &Paths) -> bool {
+    let Some(applied) = last_apply_ms(paths) else {
+        return false; // never applied → nothing to diff against
+    };
+    let newer = |p: &Path| -> bool {
+        fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() > applied)
+            .unwrap_or(false)
+    };
+    if newer(&registry_path(paths)) {
+        return true;
+    }
+    // Any file under any user plugin dir counts (entry/ui/manifest edits by
+    // hand or via the plugin-manager extension).
+    let root = plugins_root(paths);
+    let mut stack = vec![root];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if newer(&p) && p.file_name().map(|n| n != ".last_apply").unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -299,6 +357,26 @@ mod tests {
         fs::write(plug.join("plugin.json"), "{}").unwrap();
         delete_plugin(&paths, "gone").unwrap();
         assert!(!plug.exists());
+    }
+
+    #[test]
+    fn pending_changes_tracks_apply_stamp() {
+        let (_guard, paths) = temp_paths("pending");
+        // Never applied → nothing pending.
+        assert!(!pending_changes(&paths));
+        let plug = plugins_root(&paths).join("late");
+        fs::create_dir_all(&plug).unwrap();
+        fs::write(plug.join("plugin.json"), "{}").unwrap();
+        // Still nothing pending until the first apply stamps the baseline.
+        assert!(!pending_changes(&paths));
+        mark_applied(&paths);
+        assert!(!pending_changes(&paths));
+        // A newer file write (mtime > stamp) flips it on. Force an old stamp
+        // to avoid filesystem mtime granularity flakes.
+        fs::write(last_apply_path(&paths), "1000").unwrap();
+        assert!(pending_changes(&paths));
+        mark_applied(&paths);
+        assert!(!pending_changes(&paths));
     }
 
     #[test]

@@ -31,6 +31,11 @@ export const usePluginsStore = defineStore('plugins', {
     loaded: false,
     applying: false,
     lastApply: null as ApplyResult | null,
+    /** Plugin files changed since the last 生效 (polled). */
+    pending: false,
+    /** User approved a model-initiated apply while the turn was still busy —
+     * flushed on the next turn end (restarting pi mid-turn would kill it). */
+    deferredApply: false,
   }),
   getters: {
     /** Enabled UI plugins → WarDock drawer tabs. */
@@ -46,6 +51,35 @@ export const usePluginsStore = defineStore('plugins', {
         this.list = [];
       }
       this.loaded = true;
+      this.startPendingPoll();
+    },
+    /** Cheap poll for "有未生效的变更" hint (model edits happen outside the
+     * UI's knowledge — polling is the only way to notice them). */
+    startPendingPoll(): void {
+      if (pollTimer !== null) return;
+      pollTimer = setInterval(() => {
+        void cmd<boolean>('plugins_pending', undefined, false).then((v) => {
+          this.pending = v;
+        });
+      }, 4000);
+    },
+    /** Model-initiated apply (plugin_apply tool approved). If a turn is in
+     * flight, defer — restarting pi mid-turn would kill the response. */
+    requestApplyAfterTurn(): void {
+      void import('./chat').then(({ useChatStore }) => {
+        const chat = useChatStore();
+        if (!chat.sessionId || !chat.status.busy) {
+          void this.apply();
+        } else {
+          this.deferredApply = true;
+        }
+      });
+    },
+    /** Called from chat.onTurn on every turn event; applies once idle. */
+    flushDeferred(): void {
+      if (!this.deferredApply) return;
+      this.deferredApply = false;
+      void this.apply();
     },
     async rescan(): Promise<void> {
       this.list = await cmd<PluginInfo[]>('plugins_rescan', undefined, []);
@@ -72,6 +106,8 @@ export const usePluginsStore = defineStore('plugins', {
       try {
         const r = await cmd<ApplyResult>('plugins_apply', undefined, { restarted: 0, skipped: 0 });
         this.lastApply = r;
+        this.pending = false;
+        await this.load();
         return r;
       } finally {
         this.applying = false;
@@ -79,3 +115,5 @@ export const usePluginsStore = defineStore('plugins', {
     },
   },
 });
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;

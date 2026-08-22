@@ -98,6 +98,9 @@ struct PendingUi {
     pi_id: String,
     method: String,
     prefill: String,
+    /// Sentinel confirm ([plugins.apply] title): approval also applies plugin
+    /// changes (frontend hooks the answer → plugins_apply).
+    plugin_apply: bool,
 }
 
 /// Shape the existing permission dialog understands (toolCall.title + options).
@@ -1020,17 +1023,40 @@ impl PiDriver {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // Plugin-apply sentinel (插件化 B): the plugin-manager extension asks
+        // via ctx.ui.confirm("[plugins.apply] …"). Strip the marker for
+        // display and flag the params so the frontend knows to run
+        // plugins_apply once the user approves.
+        let mut obj = obj.clone();
+        let plugin_apply = obj
+            .get("title")
+            .and_then(Value::as_str)
+            .map(|t| t.starts_with("[plugins.apply]"))
+            .unwrap_or(false);
+        if plugin_apply {
+            if let Some(t) = obj
+                .get_mut("title")
+                .and_then(|v| v.as_str().map(str::to_owned))
+            {
+                obj.insert("title".into(), json!(t.trim_start_matches("[plugins.apply]").trim()));
+            }
+        }
         self.ui_pending.insert(
             request_id,
             PendingUi {
                 pi_id: pi_id.to_string(),
                 method: method.to_string(),
                 prefill,
+                plugin_apply,
             },
         );
+        let mut params = pi_ui_permission_params(method, &obj);
+        if plugin_apply {
+            params["pluginApply"] = json!(true);
+        }
         self.emit(AcpEvent::PermissionRequested {
             request_id,
-            params: pi_ui_permission_params(method, obj),
+            params,
         })
         .await;
     }
@@ -1303,6 +1329,7 @@ mod tests {
             pi_id: "u1".into(),
             method: "confirm".into(),
             prefill: String::new(),
+            plugin_apply: false,
         };
         let yes = pi_ui_response(&pending, "allow", false);
         assert_eq!(yes["confirmed"], true);
@@ -1326,6 +1353,7 @@ mod tests {
             pi_id: "u2".into(),
             method: "select".into(),
             prefill: String::new(),
+            plugin_apply: false,
         };
         let picked = pi_ui_response(&pending, "beta", false);
         assert_eq!(picked["value"], "beta");
