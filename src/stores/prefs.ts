@@ -14,6 +14,11 @@ import { DEFAULT_BG, loadBackground, type BgConfig } from '../lib/background';
 export interface PanelLayoutEntry {
   width?: number;
   order?: number;
+  /** 插件浮窗（surface dialog）记忆：位置 + 尺寸。 */
+  dialogX?: number;
+  dialogY?: number;
+  dialogW?: number;
+  dialogH?: number;
 }
 
 /** 战场监控页兵营落点：projectDir → 沙盘区比例坐标（0..1，窗口缩放安全）。 */
