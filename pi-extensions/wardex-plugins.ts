@@ -120,6 +120,7 @@ export default function (pi: ExtensionAPI) {
 		"panel.html 必须是单文件自包含：CSS/JS 全部内联，不要引用任何外部文件（<script src>、<link>、相对路径图片都不会加载）。",
 		"与宿主通信只能用 postMessage 桥：发 { source:'wardex-plugin', type:'ready'|'notify'|'sendPrompt', text? }，收 { source:'wardex-host', type:'info', payload:{ sessionId, projectDir } }。没有其它宿主能力（无 Tauri IPC / 文件 / 网络）。",
 	"宿主会自动捕获面板的 console.error/warn 和未捕获异常并记录到运行日志；调试面板问题时用 plugin_logs 工具读取，不要让面板自己实现日志上报。",
+	"plugin.json 可用 \"surface\" 字段选择面板形态：\"drawer\"(默认，右侧抽屉) / \"dialog\"(侧栏按钮弹出独立浮窗，适合大画布/表单类) / \"both\"(默认抽屉，面板可通过桥发 {source:'wardex-plugin',type:'window',op:'open'|'close'} 在运行时切换到弹窗)。",
 		"面板背景建议透明（body{background:transparent}）以融入主题；需要自带配色时明确铺满整个 body。",
 	].join("\n");
 	pi.registerTool({

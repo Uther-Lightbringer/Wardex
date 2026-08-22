@@ -30,6 +30,9 @@ export interface PanelDef {
   defaultWidth: number; // px — informational; the SHARED prefs.panelWidth drives rendering
   order: number; // default ordering (v1: fixed, drag-reorder deferred)
   refreshOn: RefreshTrigger[];
+  /** UI-plugin surface (阶段②): 'dialog' opens a floating window instead
+   *  of the drawer; absent = drawer. */
+  surface?: string;
 }
 
 export const panelRegistry: PanelDef[] = [

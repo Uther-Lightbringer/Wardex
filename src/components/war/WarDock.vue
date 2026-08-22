@@ -21,6 +21,7 @@ import { usePrefsStore } from '../../stores/prefs';
 import { usePluginsStore, type PluginInfo } from '../../stores/plugins';
 import WarPanel from './WarPanel.vue';
 import PluginPanel from './PluginPanel.vue';
+import PluginDialog from './PluginDialog.vue';
 
 const RAIL_W = 44;
 const prefs = usePrefsStore();
@@ -167,9 +168,53 @@ function onRailClick(def: PanelDef): void {
     clearTimeout(switchTimer);
     switchTimer = null;
   }
+  // surface 'dialog' plugins open a floating window instead of the drawer.
+  if (def.surface === 'dialog') {
+    toggleDialog({ id: def.id, title: def.title, src: dialogSrcOf(def.id) });
+    return;
+  }
   if (openId.value === def.id) closePanel();
   else openPanel(def);
 }
+
+// ---- floating dialogs (阶段② surface:'dialog'|'both') -------------------
+interface OpenDialog {
+  id: string;
+  title: string;
+  src: string;
+}
+const dialogs = ref<OpenDialog[]>([]);
+
+function dialogSrcOf(pluginId: string): string {
+  const p = plugins.list.find((x) => x.id === pluginId);
+  return p?.ui ?? '';
+}
+
+function toggleDialog(d: OpenDialog): void {
+  const i = dialogs.value.findIndex((x) => x.id === d.id);
+  if (i >= 0) dialogs.value.splice(i, 1);
+  else if (d.src) dialogs.value.push(d);
+}
+
+// 'both' panels promote/demote themselves over the bridge (PluginPanel
+// dispatches a global event; drawer AND dialog instances are mounted, so
+// dedupe by id).
+function onPluginWindow(e: Event): void {
+  const d = (e as CustomEvent).detail as { id: string; title: string; src: string; op: string };
+  if (!d || !String(d.id).startsWith('plugin:')) return;
+  const id = String(d.id).slice('plugin:'.length);
+  if (d.op === 'open') {
+    if (!dialogs.value.some((x) => x.id === id)) {
+      dialogs.value.push({ id, title: d.title, src: d.src });
+      closePanel();
+    }
+  } else {
+    const i = dialogs.value.findIndex((x) => x.id === id);
+    if (i >= 0) dialogs.value.splice(i, 1);
+  }
+}
+onMounted(() => window.addEventListener('wardex-plugin-window', onPluginWindow));
+onBeforeUnmount(() => window.removeEventListener('wardex-plugin-window', onPluginWindow));
 
 // ---- width drag (shared across all panels, persisted on release) ----
 function onResizeStart(): void {
@@ -235,6 +280,17 @@ function onResizeReset(): void {
         <span v-else class="war-dock__btn-text">{{ def.title }}</span>
       </div>
     </div>
+
+    <!-- floating dialogs (surface:'dialog' | promoted 'both' panels) -->
+    <PluginDialog
+      v-for="(d, i) in dialogs"
+      :key="d.id"
+      :plugin-id="d.id"
+      :title="d.title"
+      :src="d.src"
+      :index="i"
+      @close="toggleDialog(d)"
+    />
   </div>
 </template>
 

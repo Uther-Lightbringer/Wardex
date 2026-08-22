@@ -18,6 +18,8 @@ export interface PluginInfo {
   entry: string;
   ui: string;
   dir: string;
+  /** 'drawer' | 'dialog' | 'both' */
+  surface: string;
 }
 
 export interface ApplyResult {
@@ -38,9 +40,17 @@ export const usePluginsStore = defineStore('plugins', {
     deferredApply: false,
   }),
   getters: {
-    /** Enabled UI plugins → WarDock drawer tabs. */
+    /** Enabled UI plugins → WarDock drawer tabs (surface includes drawer). */
     uiPanels(state): PluginInfo[] {
-      return state.list.filter((p) => p.enabled && p.ui && p.kind.includes('ui'));
+      return state.list.filter(
+        (p) => p.enabled && p.ui && p.kind.includes('ui') && p.surface !== 'dialog',
+      );
+    },
+    /** Enabled UI plugins rendered ONLY as floating dialogs (rail button
+     *  opens the window directly). 'both' keeps its drawer tab and can be
+     *  promoted over the bridge at runtime. */
+    dialogPanels(state): PluginInfo[] {
+      return state.list.filter((p) => p.enabled && p.ui && p.kind.includes('ui') && p.surface === 'dialog');
     },
   },
   actions: {

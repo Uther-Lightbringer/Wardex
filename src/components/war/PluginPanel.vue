@@ -57,6 +57,7 @@ async function onMessage(e: MessageEvent): Promise<void> {
     type?: string;
     text?: string;
     level?: string;
+    op?: string;
   } | null;
   if (!data || data.source !== 'wardex-plugin') return;
   switch (data.type) {
@@ -73,6 +74,15 @@ async function onMessage(e: MessageEvent): Promise<void> {
       const text = String(data.text ?? '').trim();
       if (!text) return;
       await chat.send(text, []);
+      break;
+    }
+    case 'window': {
+      // surface:'both' panels may promote themselves to a dialog (op open)
+      // or ask the dialog container to close (op close). Whitelisted op only.
+      const op = data.op === 'close' ? 'close' : 'open';
+      window.dispatchEvent(
+        new CustomEvent('wardex-plugin-window', { detail: { id: props.pluginId, title: props.title, src: props.src, op } }),
+      );
       break;
     }
     default:

@@ -45,6 +45,9 @@ pub struct PluginInfo {
     /// Plugin directory (user plugins only; builtins point at pi-extensions).
     #[serde(default)]
     pub dir: String,
+    /// UI panel surface: "drawer" (default) | "dialog" | "both".
+    #[serde(default)]
+    pub surface: String,
 }
 
 impl PluginInfo {
@@ -113,6 +116,13 @@ fn read_user_plugin(dir: &Path) -> Option<PluginInfo> {
         .to_string();
     let rel_entry = m.get("entry").and_then(|v| v.as_str()).unwrap_or("");
     let rel_ui = m.get("ui").and_then(|v| v.as_str()).unwrap_or("");
+    // Drawer (side dock tab) / dialog (floating window) / both.
+    let surface = match m.get("surface").and_then(|v| v.as_str()) {
+        Some("dialog") => "dialog",
+        Some("both") => "both",
+        _ => "drawer",
+    }
+    .to_string();
     let entry = if rel_entry.trim().is_empty() {
         String::new()
     } else {
@@ -138,6 +148,7 @@ fn read_user_plugin(dir: &Path) -> Option<PluginInfo> {
         entry,
         ui,
         dir: dir.to_string_lossy().into_owned(),
+        surface,
     })
 }
 
@@ -163,6 +174,7 @@ pub fn scan(paths: &Paths) -> Vec<PluginInfo> {
                     entry: p.to_string_lossy().into_owned(),
                     ui: String::new(),
                     dir: dir.to_string_lossy().into_owned(),
+                    surface: String::new(),
                 });
             }
         };
@@ -186,6 +198,7 @@ pub fn scan(paths: &Paths) -> Vec<PluginInfo> {
             entry: String::new(),
             ui: String::new(),
             dir: String::new(),
+            surface: String::new(),
         });
     };
     push_native(&mut out, "tasks", "后台任务");
