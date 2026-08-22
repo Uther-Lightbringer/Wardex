@@ -13,3 +13,6 @@ background.json
 .codegraph/
 pi-runtime/
 
+.tmp-theme-shots/
+db-preview.html
+src-tauri/.cargo/
