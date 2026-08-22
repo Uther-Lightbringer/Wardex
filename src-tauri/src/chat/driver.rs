@@ -36,20 +36,6 @@ pub trait ClientDriver: Send {
         config_id: &'a str,
         value: &'a str,
     ) -> BoxFuture<'a, Result<(), AcpError>>;
-    /// Direct tool invocation (pi extensions only): send the tool call over
-    /// the driver's protocol, stream the result back through `ack`. Default
-    /// rejects — only drivers that speak a shell-capable protocol implement it.
-    fn invoke_tool<'a>(
-        &'a mut self,
-        tool: String,
-        args: serde_json::Value,
-        ack: tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>,
-    ) -> BoxFuture<'a, Result<(), AcpError>> {
-        Box::pin(async move {
-            let _ = ack.send(Err("当前客户端类型不支持面板直接调用工具".to_string()));
-            Ok(())
-        })
-    }
     /// From initialize -> promptCapabilities.image (attachment split rule).
     fn image_supported(&self) -> bool;
     /// Tail of the child CLI's stderr, folded into failure bubbles; empty
