@@ -34,6 +34,7 @@ pub mod db;
 pub mod inspect;
 pub mod mcp_reminder;
 pub mod models;
+pub mod plugins;
 pub mod probe;
 pub mod provider;
 pub mod store;
@@ -286,6 +287,52 @@ fn set_session_perm_mode(
         .sessions
         .set_session_perm_mode(&session_id, mode.as_deref())
         .map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Plugins (插件化改造 P0): registry-backed hot-manageable tool/ui plugins.
+// Files live under <data root>/wardex-plugins/; built-in pi-extensions show
+// up in the same list. "生效" = plugins_apply restarts idle runtimes.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn plugins_list(state: State<'_, AppState>) -> Vec<plugins::PluginInfo> {
+    let stores = lock(&state.stores);
+    plugins::scan(&stores.paths)
+}
+
+#[tauri::command]
+fn plugins_toggle(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    plugins::set_enabled(&stores.paths, &id, enabled)
+}
+
+#[tauri::command]
+fn plugins_rescan(state: State<'_, AppState>) -> Vec<plugins::PluginInfo> {
+    let stores = lock(&state.stores);
+    plugins::ensure_root(&stores.paths);
+    plugins::scan(&stores.paths)
+}
+
+#[tauri::command]
+fn plugins_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    plugins::delete_plugin(&stores.paths, &id)
+}
+
+#[tauri::command]
+fn plugins_root_dir(state: State<'_, AppState>) -> String {
+    let stores = lock(&state.stores);
+    plugins::ensure_root(&stores.paths).to_string_lossy().into_owned()
+}
+
+/// Apply pending plugin changes to LIVE sessions: restart every idle runtime
+/// (pi resumes from its --session-dir so context survives); busy/queued
+/// sessions are skipped and reported back so the UI can tell the user.
+#[tauri::command]
+async fn plugins_apply(state: State<'_, AppState>) -> Result<Value, String> {
+    let (restarted, skipped) = state.chat.apply_plugins().await;
+    Ok(json!({ "restarted": restarted, "skipped": skipped }))
 }
 
 /// Per-session toggle for auto-injecting codegraph symbol context into
@@ -1733,6 +1780,13 @@ pub fn run() {
             shelve_session,
             set_session_perm_mode,
             set_session_use_codegraph,
+            // plugins (插件化)
+            plugins_list,
+            plugins_toggle,
+            plugins_rescan,
+            plugins_delete,
+            plugins_root_dir,
+            plugins_apply,
             send_prompt,
             cancel,
             set_config_option,

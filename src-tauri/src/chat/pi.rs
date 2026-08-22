@@ -319,8 +319,9 @@ pub fn locate_extensions_dir() -> Option<PathBuf> {
     None
 }
 
-/// Absolute paths of WarDex Pi extensions to pass as `--extension`.
-/// Reminders always; codegraph only when the session toggle is on.
+/// Legacy fixed extension list — superseded by crate::plugins::extension_files
+/// (kept for tests/tools that want the builtins only).
+#[allow(dead_code)]
 pub fn wardex_extension_files(use_codegraph: bool) -> Vec<PathBuf> {
     let Some(dir) = locate_extensions_dir() else {
         return Vec::new();
@@ -1337,6 +1338,7 @@ mod tests {
         let dir = root.join("pi-extensions");
         assert!(dir.join("wardex-reminders.ts").is_file(), "missing reminders extension");
         assert!(dir.join("wardex-codegraph.ts").is_file(), "missing codegraph extension");
+        assert!(dir.join("wardex-plugins.ts").is_file(), "missing plugin-manager extension");
     }
 
     #[test]

@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<title>示例面板</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 12px; background: transparent; color: inherit; }
+  button { padding: 6px 14px; cursor: pointer; }
+  #info { font-size: 12px; opacity: .7; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h3>示例 UI 插件</h3>
+  <div id="info">等待 WarDex 信息…</div>
+  <p>
+    <button id="notify">显示通知</button>
+    <button id="send">发送到当前会话</button>
+  </p>
+<script>
+  // WarDex 插件桥 API（postMessage，白名单见 PluginPanel.vue）：
+  //   发 { source:'wardex-plugin', type:'ready' }                    → 收会话信息
+  //   发 { source:'wardex-plugin', type:'notify',   text }           → 面板内提示
+  //   发 { source:'wardex-plugin', type:'sendPrompt', text }         → 送入当前会话
+  window.addEventListener('message', function (e) {
+    var d = e.data || {};
+    if (d.source === 'wardex-host' && d.type === 'info') {
+      document.getElementById('info').textContent =
+        'sessionId: ' + d.payload.sessionId + '\nprojectDir: ' + d.payload.projectDir;
+    }
+  });
+  window.postMessage({ source: 'wardex-plugin', type: 'ready' }, '*');
+  document.getElementById('notify').onclick = function () {
+    window.postMessage({ source: 'wardex-plugin', type: 'notify', text: '来自示例插件的通知' }, '*');
+  };
+  document.getElementById('send').onclick = function () {
+    window.postMessage({ source: 'wardex-plugin', type: 'sendPrompt', text: '你好，来自示例插件！' }, '*');
+  };
+</script>
+</body>
+</html>

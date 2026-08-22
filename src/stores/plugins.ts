@@ -1,0 +1,81 @@
+// Plugin registry store (插件化改造 P0/P2): mirrors the Rust-side scan of
+// <data root>/wardex-plugins/ + builtins. The settings page manages toggles;
+// WarDock derives extra drawer tabs from UI plugins (kind containing "ui").
+// 「生效」(apply) restarts idle pi runtimes so new extension files load; the
+// frontend then re-pulls this list so new UI panels appear/disappear.
+
+import { defineStore } from 'pinia';
+import { cmd } from '../lib/tauri';
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version: string;
+  /** 'tool' | 'ui' | 'tool+ui' */
+  kind: string;
+  enabled: boolean;
+  builtin: boolean;
+  entry: string;
+  ui: string;
+  dir: string;
+}
+
+export interface ApplyResult {
+  restarted: number;
+  skipped: number;
+}
+
+export const usePluginsStore = defineStore('plugins', {
+  state: () => ({
+    list: [] as PluginInfo[],
+    loaded: false,
+    applying: false,
+    lastApply: null as ApplyResult | null,
+  }),
+  getters: {
+    /** Enabled UI plugins → WarDock drawer tabs. */
+    uiPanels(state): PluginInfo[] {
+      return state.list.filter((p) => p.enabled && p.ui && p.kind.includes('ui'));
+    },
+  },
+  actions: {
+    async load(): Promise<void> {
+      try {
+        this.list = await cmd<PluginInfo[]>('plugins_list', undefined, []);
+      } catch {
+        this.list = [];
+      }
+      this.loaded = true;
+    },
+    async rescan(): Promise<void> {
+      this.list = await cmd<PluginInfo[]>('plugins_rescan', undefined, []);
+    },
+    async toggle(id: string, enabled: boolean): Promise<void> {
+      // Optimistic flip; reload on failure to resync.
+      const p = this.list.find((x) => x.id === id);
+      if (p) p.enabled = enabled;
+      try {
+        await cmd('plugins_toggle', { id, enabled });
+      } catch {
+        await this.load();
+      }
+    },
+    async remove(id: string): Promise<void> {
+      await cmd('plugins_delete', { id });
+      await this.rescan();
+    },
+    async rootDir(): Promise<string> {
+      return cmd<string>('plugins_root_dir', undefined, '');
+    },
+    async apply(): Promise<ApplyResult> {
+      this.applying = true;
+      try {
+        const r = await cmd<ApplyResult>('plugins_apply', undefined, { restarted: 0, skipped: 0 });
+        this.lastApply = r;
+        return r;
+      } finally {
+        this.applying = false;
+      }
+    },
+  },
+});

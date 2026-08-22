@@ -9,13 +9,30 @@
 // (420ms ease) in sync with the drawer's translateX; while the user is
 // DRAGGING the width the transition is disabled so the dock tracks the
 // pointer freely (no lag), re-enabled on release.
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref } from 'vue';
 import { panelRegistry, PANEL_MAX_W, PANEL_DEFAULT_W, type PanelDef } from '../../panels/registry';
 import { usePrefsStore } from '../../stores/prefs';
+import { usePluginsStore, type PluginInfo } from '../../stores/plugins';
 import WarPanel from './WarPanel.vue';
+import PluginPanel from './PluginPanel.vue';
 
 const RAIL_W = 44;
 const prefs = usePrefsStore();
+const plugins = usePluginsStore();
+
+/** Wrap one UI plugin's iframe host as a lazily-resolved panel component. */
+function pluginPanelComp(p: PluginInfo) {
+  return defineComponent({
+    name: `PluginPanel_${p.id}`,
+    render() {
+      return h(PluginPanel, { src: p.ui, title: p.name });
+    },
+  });
+}
+
+onMounted(() => {
+  void plugins.load(); // discover UI-plugin drawer tabs
+});
 
 const root = ref<HTMLElement | null>(null);
 const chatWidth = ref(0);
@@ -36,11 +53,25 @@ onMounted(() => {
 });
 onBeforeUnmount(() => ro?.disconnect());
 
-const defs = computed<PanelDef[]>(() =>
-  [...panelRegistry].sort(
-    (a, b) => (prefs.panelLayout[a.id]?.order ?? a.order) - (prefs.panelLayout[b.id]?.order ?? b.order),
-  ),
-);
+const defs = computed<PanelDef[]>(() => {
+  const builtin = [...panelRegistry].sort(
+    (a, b) =>
+      (prefs.panelLayout[a.id]?.order ?? a.order) - (prefs.panelLayout[b.id]?.order ?? b.order),
+  );
+  // UI plugins (插件化改造 P2): each enabled ui-kind plugin becomes a drawer
+  // tab hosting its panel.html in a sandboxed iframe (PluginPanel). Loaded
+  // after builtins; the list refreshes when the plugins store re-pulls.
+  const dynamic: PanelDef[] = plugins.uiPanels.map((p, i) => ({
+    id: `plugin:${p.id}`,
+    title: p.name,
+    component: () => Promise.resolve({ default: pluginPanelComp(p) }),
+    defaultOpen: false,
+    defaultWidth: PANEL_MAX_W,
+    order: 100 + i,
+    refreshOn: [],
+  }));
+  return [...builtin, ...dynamic];
+});
 
 // Drawer open state — transient, never written to panelLayout.
 const openId = ref<string | null>(null);
