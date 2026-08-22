@@ -106,6 +106,21 @@ function listPlugins(root: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Shared authoring rules injected into every tool's description context.
+	// These encode WarDex host constraints so plugins work on the first try:
+	// - panel.html is rendered via iframe srcdoc → it MUST be one
+	//   self-contained file (inline CSS/JS, no <script src>/<link>/images by
+	//   relative path — nothing else resolves).
+	// - The ONLY host capabilities are the postMessage bridge (see below);
+	//   no Tauri IPC, no Node, no fetch to local files.
+	// - Transparent background: the panel sits on the app's theme surface, so
+	//   prefer background: transparent and inherit colors, or provide your own
+	//   full-bleed styling deliberately.
+	const PANEL_GUIDELINES = [
+		"panel.html 必须是单文件自包含：CSS/JS 全部内联，不要引用任何外部文件（<script src>、<link>、相对路径图片都不会加载）。",
+		"与宿主通信只能用 postMessage 桥：发 { source:'wardex-plugin', type:'ready'|'notify'|'sendPrompt', text? }，收 { source:'wardex-host', type:'info', payload:{ sessionId, projectDir } }。没有其它宿主能力（无 Tauri IPC / 文件 / 网络）。",
+		"面板背景建议透明（body{background:transparent}）以融入主题；需要自带配色时明确铺满整个 body。",
+	].join("\n");
 	pi.registerTool({
 		name: "plugins_list",
 		label: "List Plugins",
@@ -150,6 +165,7 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"When asked to add/change a WarDex tool or sidebar panel, use plugin_write to edit the plugin files, then remind the user to press 生效 in 设置→插件.",
 			"Always keep plugin.json in sync: {\"name\", \"version\", \"entry\": \"main.ts\", \"ui\": \"panel.html\"?}. Bump version on every change.",
+			`UI 面板编写规范（必须遵守）：\n${PANEL_GUIDELINES}`,
 		],
 		parameters: Type.Object({
 			id: Type.String({ description: "Plugin id (= directory name, ascii/中文均可但不能含路径分隔符)" }),
@@ -198,8 +214,17 @@ export default function (pi: ExtensionAPI) {
 					writeRegistry(root, reg);
 					written.push(`enabled=${params.enabled}`);
 				}
+				// Lint UI panels: srcdoc rendering means external references
+				// silently 404 — catch it at write time instead of a blank panel.
+				const warnings: string[] = [];
+				for (const f of params.files ?? []) {
+					if (!f.path.endsWith(".html")) continue;
+					const ext = /<(script[^>]+src|link[^>]+href)\s*=\s*["']([^"']+)["']/i.exec(f.content);
+					if (ext) warnings.push(`${f.path} 引用了外部资源 ${ext[2]} —— 面板是 srcdoc 单文件渲染，外部引用不会加载，请内联。`);
+				}
 				return textResult(
 					`已写入 ${params.id}: ${written.join(", ")}。\n` +
+						(warnings.length ? "⚠ 规范警告：\n- " + warnings.join("\n- ") + "\n" : "") +
 						"注意：需要用户在 设置→插件 点击「生效」后，运行中的会话才会加载新版本。",
 				);
 			} catch (e) {
