@@ -69,7 +69,7 @@ const defs = computed<PanelDef[]>(() => {
   const dynamic: PanelDef[] = plugins.uiPanels.map((p, i) => ({
     id: `plugin:${p.id}`,
     title: p.name,
-    component: () => Promise.resolve({ default: pluginPanelComp(p) }),
+    component: () => Promise.resolve(pluginPanelComp(p)),
     defaultOpen: false,
     defaultWidth: PANEL_MAX_W,
     order: 100 + i,

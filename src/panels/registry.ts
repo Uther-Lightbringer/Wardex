@@ -25,7 +25,7 @@ export interface PanelDef {
   id: string; // 'git' | 'files' | 'db' | ... globally unique
   title: string; // Chinese title: 版本控制 / 工作区文件 / 数据库
   icon?: string; // /assets/... icon, optional
-  component: () => Promise<{ default: Component }>; // lazy — not loaded while collapsed
+  component: () => Promise<{ default: Component } | Component>; // lazy — not loaded while collapsed
   defaultOpen: boolean;
   defaultWidth: number; // px — informational; the SHARED prefs.panelWidth drives rendering
   order: number; // default ordering (v1: fixed, drag-reorder deferred)
