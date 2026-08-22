@@ -326,6 +326,23 @@ fn plugins_root_dir(state: State<'_, AppState>) -> String {
     plugins::ensure_root(&stores.paths).to_string_lossy().into_owned()
 }
 
+/// Read one UI plugin's panel html for the iframe host. The path MUST match
+/// exactly the `ui` field of an ENABLED plugin from the current scan — this
+/// is the whitelist; arbitrary file reads are rejected. Content is served as
+/// srcdoc (avoids asset-protocol issues with non-ASCII paths and drops the
+/// need for allow-same-origin in the sandbox).
+#[tauri::command]
+fn plugins_read_panel(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let stores = lock(&state.stores);
+    let allowed = plugins::scan(&stores.paths)
+        .into_iter()
+        .any(|p| p.enabled && !p.ui.is_empty() && p.ui == path);
+    if !allowed {
+        return Err(format!("面板路径不在启用插件白名单内: {path}"));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("读面板失败: {e}"))
+}
+
 /// Apply pending plugin changes to LIVE sessions: restart every idle runtime
 /// (pi resumes from its --session-dir so context survives); busy/queued
 /// sessions are skipped and reported back so the UI can tell the user.
@@ -1786,6 +1803,7 @@ pub fn run() {
             plugins_rescan,
             plugins_delete,
             plugins_root_dir,
+            plugins_read_panel,
             plugins_apply,
             send_prompt,
             cancel,

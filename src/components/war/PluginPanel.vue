@@ -11,8 +11,8 @@
 // sendPrompt forwards text into the ACTIVE session's composer pipeline
 // (chat.send). Anything else is ignored — the whitelist IS the security
 // boundary; extend deliberately.
-import { onBeforeUnmount, onMounted, ref } from 'vue';
-import { fileSrc } from '../../lib/tauri';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { cmd } from '../../lib/tauri';
 import { useChatStore } from '../../stores/chat';
 
 const props = defineProps<{
@@ -73,7 +73,26 @@ async function onMessage(e: MessageEvent): Promise<void> {
 onMounted(() => window.addEventListener('message', onMessage));
 onBeforeUnmount(() => window.removeEventListener('message', onMessage));
 
-const url = (): string => fileSrc(props.src);
+// Panel content: fetched Rust-side (whitelisted against enabled plugins) and
+// rendered via srcdoc — asset-protocol URLs break on non-ASCII Windows paths
+// (e.g. wardex-plugins\时钟\panel.html), and srcdoc also lets us drop
+// allow-same-origin from the sandbox.
+const html = ref('');
+watch(
+  () => props.src,
+  async (src) => {
+    if (!src) {
+      html.value = '';
+      return;
+    }
+    try {
+      html.value = await cmd<string>('plugins_read_panel', { path: src }, '');
+    } catch (e) {
+      html.value = `<body style="font:13px sans-serif;padding:12px">面板加载失败：${String(e)}</body>`;
+    }
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -81,14 +100,14 @@ const url = (): string => fileSrc(props.src);
     <transition name="plugin-notice">
       <div v-if="notice" class="plugin-panel__notice">{{ notice }}</div>
     </transition>
-    <!-- sandbox: scripts + same-origin allow-same-origin are needed for
-         asset-protocol pages to run and postMessage; storage/forms denied. -->
+    <!-- sandbox WITHOUT allow-same-origin: the plugin runs with a null
+         origin and zero storage/IPC access; postMessage still works. -->
     <iframe
       ref="frame"
       class="plugin-panel__frame"
-      :src="url()"
+      :srcdoc="html"
       :title="title"
-      sandbox="allow-scripts allow-same-origin"
+      sandbox="allow-scripts"
       @load="postInfo()"
     ></iframe>
   </div>
