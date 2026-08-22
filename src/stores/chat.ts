@@ -224,6 +224,8 @@ const unlisteners: UnlistenFn[] = [];
 export const useChatStore = defineStore('chat', {
   state: () => ({
     sessionId: '',
+    /** Session to return to when leaving a 插件工坊 session ('' = none). */
+    preWorkshopId: '',
     projectDir: '',
     meta: null as SessionMeta | null,
     rows: [] as ChatMessage[],
@@ -277,6 +279,11 @@ export const useChatStore = defineStore('chat', {
     previewLine: 0,
   }),
   getters: {
+    /** True while the active session is a 插件工坊 session. */
+    inWorkshop(): boolean {
+      const sessions = useSessionsStore();
+      return sessions.all.some((m) => m.id === this.sessionId && m.workshop);
+    },
     /** Slash commands of the active session (composer `/` completion). */
     commands(): SlashCommand[] {
       return this.commandsBySession[this.sessionId] ?? [];
@@ -677,6 +684,17 @@ export const useChatStore = defineStore('chat', {
      * the 无法打开会话 banner). */
     async openSession(id: string): Promise<boolean> {
       if (id === this.sessionId) return true;
+      // 插件工坊 navigation: entering a workshop session stashes the current
+      // (non-workshop) session so the workshop banner's 返回主对话 can
+      // switch straight back; leaving a workshop session clears the stash.
+      if (useSessionsStore().all.some((m) => m.id === id && m.workshop)) {
+        const cur = useSessionsStore();
+        if (this.sessionId && !cur.all.some((m) => m.id === this.sessionId && m.workshop)) {
+          this.preWorkshopId = this.sessionId;
+        }
+      } else {
+        this.preWorkshopId = '';
+      }
       // Switch-cost instrumentation (temporary): per-step + total timing.
       let t = performance.now();
       const t0 = t;

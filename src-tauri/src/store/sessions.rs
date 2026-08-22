@@ -369,6 +369,9 @@ pub struct SessionIndexRow {
     /// Per-session permission-mode override (null = global prefs default).
     #[serde(rename = "permMode")]
     pub perm_mode: Option<String>,
+    /// 插件工坊 session flag (workshop runtime: plugin-manager extension only).
+    #[serde(rename = "workshop")]
+    pub workshop: bool,
     /// Latest user/assistant message snippet (null before the first write).
     #[serde(rename = "lastMessage")]
     pub last_message: Option<String>,
@@ -525,6 +528,7 @@ impl SessionStore {
                     pinned,
                     shelved,
                     perm_mode: meta.perm_mode,
+                    workshop: meta.workshop.unwrap_or(false),
                     last_message: meta.last_message,
                     parent_id: meta.parent_id.unwrap_or_default(),
                     group_id: meta.group_id.unwrap_or_default(),

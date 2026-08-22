@@ -51,6 +51,13 @@ async function onApplyPlugins(): Promise<void> {
   await plugins.apply();
 }
 
+/** 插件工坊横幅的返回：优先回进入工坊前的会话，否则第一个非工坊会话。 */
+async function onExitWorkshop(): Promise<void> {
+  const target =
+    chat.preWorkshopId || sessions.all.find((m) => !m.workshop && !m.shelved)?.id || '';
+  if (target) await chat.openSession(target);
+}
+
 // Coming BACK to the chat page (kept-alive): re-pull the rail + agents so
 // config-page edits (avatar/name/default) and background turn activity show
 // up immediately (the old agentStore.revision bump equivalent).
@@ -438,6 +445,17 @@ function onBayResizeResetY(): void {
                 {{ sessionUsage }}
               </span>
             </div>
+            <!-- 插件工坊横幅（阶段⑤）：当前会话是工坊时，提供一键返回主对话 -->
+            <div
+              v-if="chat.inWorkshop"
+              class="chat__plug-hint chat__workshop-bar"
+              :style="{ fontSize: prefs.fs(11) + 'px' }"
+            >
+              <span>🛠 插件工坊 — 专属插件开发会话，描述你想要的工具/面板即可</span>
+              <button class="chat__workshop-back" title="切换回之前的主对话" @click="onExitWorkshop">
+                返回主对话 ←
+              </button>
+            </div>
             <!-- 插件待生效提示条（插件化 A）：模型或手动改过插件文件后出现 -->
             <transition name="plug-hint">
               <button
@@ -818,6 +836,30 @@ function onBayResizeResetY(): void {
 
 .chat__plug-hint:hover {
   filter: brightness(1.25);
+}
+
+/* 插件工坊横幅: flex row with a back button on the right. */
+.chat__workshop-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: default;
+}
+.chat__workshop-bar:hover {
+  filter: none;
+}
+.chat__workshop-back {
+  flex: none;
+  border: 1px solid var(--war-gold-dim, #a9882f);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--war-gold, #e8c56a);
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.chat__workshop-back:hover {
+  background: rgba(169, 136, 47, 0.2);
 }
 
 .plug-hint-enter-active,
