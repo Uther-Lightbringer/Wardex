@@ -8,6 +8,12 @@
 // The component's box IS the frame; chains overflow above it — callers leave
 // chainHeight (+ extras) of headroom via margin/padding.
 import { computed } from 'vue';
+import { usePrefsStore } from '../../stores/prefs';
+import { themeOf } from '../../lib/themes';
+
+const prefs = usePrefsStore();
+/** pure 风格：不贴图，浅色 CSS 面板 + 标题。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
 
 const props = withDefaults(
   defineProps<{
@@ -50,23 +56,31 @@ const innerStyle = computed(() => ({
 </script>
 
 <template>
-  <div class="steel">
-    <!-- two chains, x-centers match the anchor plates in the frame art -->
-    <div v-if="chainHeight > 0" class="steel__chains" :style="chainsStyle">
-      <div class="steel__chain" style="left: calc(23.05% - 9.3%)"></div>
-      <div class="steel__chain" style="left: calc(65.8% - 9.3%)"></div>
-    </div>
+  <div class="steel" :class="{ 'is-plain': plain }">
+    <template v-if="plain">
+      <div class="steel__plain">
+        <div v-if="title" class="steel__plain-title war-font-title">{{ title }}</div>
+        <div class="steel__plain-body"><slot /></div>
+      </div>
+    </template>
+    <template v-else>
+      <!-- two chains, x-centers match the anchor plates in the frame art -->
+      <div v-if="chainHeight > 0" class="steel__chains" :style="chainsStyle">
+        <div class="steel__chain" style="left: calc(23.05% - 9.3%)"></div>
+        <div class="steel__chain" style="left: calc(65.8% - 9.3%)"></div>
+      </div>
 
-    <img class="steel__frame" :src="frameSrc" :style="{ aspectRatio: String(1 / ratio) }" draggable="false" />
+      <img class="steel__frame" :src="frameSrc" :style="{ aspectRatio: String(1 / ratio) }" draggable="false" />
 
-    <!-- dark recessed glass (frame interior is transparent) -->
-    <div class="steel__glass" :style="glassStyle"></div>
+      <!-- dark recessed glass (frame interior is transparent) -->
+      <div class="steel__glass" :style="glassStyle"></div>
 
-    <div v-if="title" class="steel__title war-font-title war-outline-black">{{ title }}</div>
+      <div v-if="title" class="steel__title war-font-title war-outline-black">{{ title }}</div>
 
-    <div class="steel__inner" :class="{ 'steel__inner--center': !title }" :style="innerStyle">
-      <slot />
-    </div>
+      <div class="steel__inner" :class="{ 'steel__inner--center': !title }" :style="innerStyle">
+        <slot />
+      </div>
+    </template>
   </div>
 </template>
 
@@ -124,5 +138,35 @@ const innerStyle = computed(() => ({
 
 .steel__inner--center {
   justify-content: center;
+}
+
+/* ---- pure 风格：浅色 CSS 面板（不贴图、无吊链） ---- */
+.steel.is-plain {
+  background: var(--war-panel-bg, #ffffff);
+  border: 1px solid var(--war-panel-border, #d4dae2);
+  border-radius: 10px;
+  box-shadow: 0 2px 10px var(--war-panel-shadow, rgba(15, 23, 42, 0.06));
+  padding: 18px 22px;
+}
+
+.steel__plain {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: center;
+}
+
+.steel__plain-title {
+  color: var(--war-text, #1f242c);
+  font-size: 17px;
+  letter-spacing: 1px;
+  text-shadow: none;
+}
+
+.steel__plain-body {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 </style>

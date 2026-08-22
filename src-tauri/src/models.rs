@@ -101,7 +101,7 @@ pub fn effective_efforts(effort_options: &[String]) -> Vec<&str> {
 
 /// Default level for a declared model: the agent's default when it is among
 /// the allowed levels, else the first allowed one.
-fn pick_default_effort<'a>(efforts: &'a [&'a str], default: &'a str) -> &'a str {
+pub(crate) fn pick_default_effort<'a>(efforts: &'a [&'a str], default: &'a str) -> &'a str {
     let d = default.trim();
     if !d.is_empty() && efforts.contains(&d) {
         d
@@ -380,6 +380,104 @@ pub fn write_opencode_config(
         std::fs::write(&path, &rendered).map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
     }
     Ok(Some(path))
+}
+
+/// Render a pi custom provider (provider "pi") into the models.json body.
+/// pi's baseUrl does NOT ride an env var — it lives in `~/.pi/agent/models.json`
+/// as a custom provider keyed by the endpoint host. Returns `""` when the agent
+/// has no baseUrl/model to render (pi then uses its own ~/.pi config).
+pub fn render_pi_provider(agent: &Agent) -> String {
+    let base_url = agent.base_url.trim();
+    let model = agent.model.trim();
+    if base_url.is_empty() || model.is_empty() {
+        return String::new();
+    }
+    let host = api_root(base_url)
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let slug: String = host
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let key = format!(
+        "wardex-pi-{}",
+        if slug.is_empty() { "local".to_string() } else { slug }
+    );
+    let mut provider = Map::new();
+    provider.insert("baseUrl".to_string(), Value::String(api_root(base_url)));
+    provider.insert("api".to_string(), Value::String("openai-completions".to_string()));
+    if !agent.api_key.trim().is_empty() {
+        provider.insert("apiKey".to_string(), Value::String(agent.api_key.trim().to_string()));
+    }
+    provider.insert(
+        "models".to_string(),
+        Value::Array(vec![Value::Object(Map::from_iter([
+            ("id".to_string(), Value::String(model.to_string())),
+            // pi exposes thinking levels only for reasoning-capable models
+            // (ai/src/models.ts getSupportedThinkingLevels).
+            ("reasoning".to_string(), Value::Bool(true)),
+        ]))]),
+    );
+    let mut providers = Map::new();
+    providers.insert(key, Value::Object(provider));
+    let mut root = Map::new();
+    root.insert("providers".to_string(), Value::Object(providers));
+    serde_json::to_string_pretty(&Value::Object(root)).unwrap_or_default()
+}
+
+/// Write the rendered pi provider into `~/.pi/agent/models.json`. Merges into
+/// any existing user file (pi's other providers survive); removes only the
+/// wardex-pi-* keys Wardex owns. Returns the provider key, or None when the
+/// agent has nothing to render.
+pub fn write_pi_models(agent: &Agent) -> Result<Option<String>, String> {
+    let rendered = render_pi_provider(agent);
+    let Some(home) = dirs::home_dir() else {
+        return Err("无法定位用户主目录".to_string());
+    };
+    let path = home.join(".pi").join("agent").join("models.json");
+    if rendered.is_empty() {
+        return Ok(None);
+    }
+    let mut root: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let providers = root
+        .as_object_mut()
+        .expect("object")
+        .entry("providers".to_string())
+        .or_insert(Value::Object(Map::new()))
+        .as_object_mut()
+        .expect("object");
+    // Strip stale wardex-pi-* keys, then insert the fresh one.
+    let old_keys: Vec<String> = providers
+        .keys()
+        .filter(|k| k.starts_with("wardex-pi-"))
+        .cloned()
+        .collect();
+    for k in old_keys {
+        providers.remove(&k);
+    }
+    let fresh: Value = serde_json::from_str(&rendered).map_err(|e| e.to_string())?;
+    let fresh_key = fresh["providers"]
+        .as_object()
+        .and_then(|o| o.keys().next())
+        .cloned()
+        .ok_or("渲染失败")?;
+    let fresh_providers = fresh["providers"].as_object().cloned().unwrap_or_default();
+    for (k, v) in fresh_providers {
+        providers.insert(k, v);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap_or_default())
+        .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    Ok(Some(fresh_key))
 }
 
 #[cfg(test)]

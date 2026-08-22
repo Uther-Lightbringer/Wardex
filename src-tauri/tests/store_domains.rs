@@ -177,7 +177,8 @@ fn agents_default_transitions() {
     let mut store = AgentStore::load(&paths);
     let a1 = store.create_agent(&paths, "").unwrap();
     assert_eq!(store.get(&a1).unwrap().name, "新 Agent");
-    assert_eq!(store.get(&a1).unwrap().model, "moonshot-v1-auto");
+    assert_eq!(store.get(&a1).unwrap().provider, "pi");
+    assert_eq!(store.get(&a1).unwrap().model, "");
     assert_eq!(store.get(&a1).unwrap().cli_path, "", "new agent cliPath is empty in memory");
     assert_eq!(store.default_agent_id(), a1, "first agent becomes default");
 

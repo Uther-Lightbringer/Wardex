@@ -246,7 +246,7 @@ watch(
   flex: 1;
   min-height: 0;
   display: flex;
-  border: 1px solid #1a2230;
+  border: 1px solid var(--war-panel-2);
   background: #10141dcc;
 }
 
@@ -270,7 +270,7 @@ watch(
 }
 
 .pd__step--tool {
-  background: #12151c44;
+  background: var(--war-glass-2);
   border: 1px solid #3a4a40;
 }
 
@@ -280,7 +280,7 @@ watch(
 }
 
 .pd__step-head {
-  color: #d0d6e0;
+  color: var(--war-text-light);
   user-select: none;
 }
 

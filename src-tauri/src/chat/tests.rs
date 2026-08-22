@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::acp::{AcpClient, MockTransport};
-use crate::chat::driver::{ClientDriver, SessionLaunch, Spawner};
+use crate::chat::driver::{ClientDriver, Launch, Spawner};
 use crate::chat::manager::{ChatManager, SpawnerFactory};
 use crate::chat::runtime::{lock_ok, EventSink};
 use crate::store::{AgentPatch, Paths, StoreRegistry};
@@ -43,9 +43,12 @@ type Mocks = Arc<Mutex<Vec<MockTransport>>>;
 fn mock_factory(mocks: Mocks) -> SpawnerFactory {
     Arc::new(move |_session_id: &str| {
         let mocks = mocks.clone();
-        let spawner: Spawner = Box::new(move |launch: SessionLaunch, tx| {
+        let spawner: Spawner = Box::new(move |launch: Launch, tx| {
             let mocks = mocks.clone();
             Box::pin(async move {
+                let Launch::Acp(launch) = launch else {
+                    panic!("mock spawner only supports ACP launches");
+                };
                 let mock = MockTransport::new();
                 lock_ok(&mocks).push(mock.clone());
                 let mut client = AcpClient::new(mock, tx);
@@ -74,6 +77,18 @@ fn harness() -> Harness {
         .agents
         .create_agent(&paths, "Kimi")
         .expect("create agent");
+    stores
+        .agents
+        .update_agent(
+            &paths,
+            &default_agent,
+            &AgentPatch {
+                provider: Some("kimi".to_string()),
+                model: Some("moonshot-v1-auto".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("patch harness agent to kimi (ACP mock)");
     let _ = default_agent;
     let stores = Arc::new(Mutex::new(stores));
     let sink = Arc::new(RecordSink::default());
@@ -363,6 +378,17 @@ async fn switch_agent_keeps_acp_session_same_provider_drops_cross_provider() {
         let paths = h.stores_paths();
         let mut stores = lock_ok(&h.stores);
         let kimi2 = stores.agents.create_agent(&paths, "Kimi2").expect("kimi2");
+        stores
+            .agents
+            .update_agent(
+                &paths,
+                &kimi2,
+                &AgentPatch {
+                    provider: Some("kimi".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("patch kimi2");
         let claude = stores.agents.create_agent(&paths, "Claude").expect("claude");
         stores
             .agents

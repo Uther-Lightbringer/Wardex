@@ -6,6 +6,8 @@
 // (ChatPage 34, Config/SessionSelect/Todo 52, default 50).
 import { computed } from 'vue';
 import { useNavStore } from '../stores/nav';
+import { usePrefsStore } from '../stores/prefs';
+import { themeOf } from '../lib/themes';
 
 const props = withDefaults(defineProps<{ embed?: number; edgeW?: number }>(), {
   embed: 50,
@@ -13,7 +15,10 @@ const props = withDefaults(defineProps<{ embed?: number; edgeW?: number }>(), {
 });
 
 const nav = useNavStore();
-const contentLeft = computed(() => Math.max(0, props.edgeW - props.embed));
+const prefs = usePrefsStore();
+// 铁轨宽度与 App.vue 的 .rails img 同步（AGENTS.md 约定）：pure 风格无铁轨 → 0。
+const edgeW = computed(() => (themeOf(prefs.uiStyle).kind === 'plain' ? 0 : props.edgeW));
+const contentLeft = computed(() => Math.max(0, edgeW.value - props.embed));
 </script>
 
 <template>
@@ -24,6 +29,7 @@ const contentLeft = computed(() => Math.max(0, props.edgeW - props.embed));
         left: contentLeft + 'px',
         right: contentLeft + 'px',
         transform: `translateY(${nav.contentY}px)`,
+        opacity: nav.contentOpacity,
       }"
     >
       <slot />

@@ -478,15 +478,21 @@ SubagentPanel：26px 折叠头（`#f2cf6b` 12px）+ 列表；状态点 8px 圆�
 - 右轨：400 宽缩放容器，内放 menuPanel + exitPanel（见 §4.6）。
 - 左下角版本文字：`#5a6472` 12px。
 
-### 5.6 页面切换三段式动画（核心体验，务必复刻）
+### 5.6 页面切换动画（war 三段式 / pure 淡入淡出，主题感知）
 
-所有导航都是同一套「上拉 → 等音效 → 下拉」。**已提速**（比原版 WC3 时序 770/510/770 更快）：
+**war**（贴图风，保持原版）：所有导航都是同一套「上拉 → 等音效 → 下拉」。**已提速**（比原版 WC3 时序 770/510/770 更快）：
 
 1. **上拉（450ms）**：当前页 `y: 0 → −2400`，`ease-in-quad`，同时播 `popUp` 音效。
 2. **等音效闸门（500ms）**：`dropGateMs(950) − popUpDur(450) = 500ms`——上拉动画结束后等下落到 950ms 闸门（popUp 原可闻长度 1280ms，950ms 已覆盖主体，剩余尾部由 popDown 单声道截断；改慢可恢复 `DROP_GATE_MS = 1280`）。
 3. **下拉（450ms）**：新页面从 `y = −height`（停靠在视口上方）落到 `y = 0`，`ease-out-quad`，动画开始同时播 `popDown` 音效。
 
-补充规则：
+**pure**（现代风）：不做位移三段式，改为淡入淡出（`stores/nav.ts` 按 `themeOf(uiStyle).kind` 分派，war 恒用三段式）：
+
+1. **淡出（200ms）**：当前层 `opacity: 1 → 0`，`ease-in-quad`，无音效。
+2. **换页**：新内容预置 `opacity 0` + `translateY(14px)`（防闪现一帧）。
+3. **淡入（240ms）**：`opacity: 0 → 1` 同时 `translateY: 14px → 0`，`ease-out-quad`——轻上浮灵动感，总耗时 ~440ms（无 950ms 音效闸门）。
+
+补充规则（war 专属）：
 - 全程 `uiBusy = true`：所有 WarButton 变灰禁用、快捷键失效，直到下落结束。
 - 新页面在变得可见**之前**必须先停靠到视口上方（prepareEnter），防止闪一帧最终位置。
 - 永久铁轨不动；主菜单 ↔ 覆盖页是「菜单上拉/大框下拉」，覆盖页 ↔ 覆盖页是「当前上拉/换下拉」。
@@ -633,6 +639,52 @@ export function play(name: keyof typeof files) {
   相机位置 `(0, 60, 260)`，俯角 `x = −12°`，`clipFar = 10000`。
 - 灯光：DirectionalLight `(-35°, −30°)` 强度 1.4；PointLight 位置 `(0, 120, 0)` 色 `#3d7bff` 强度 0.6。
 - 用 GLTFLoader 加载 `source` 指向的 glTF/GLB。
+
+### 8.5 界面风格（theme registry：war | pure）
+
+`src/lib/themes.ts` 是主题注册表，`user_prefs.json` 的 `uiStyle` 字段持久化（
+Rust `get_prefs` / `set_ui_style` 命令，照 `set_font_scale` 模式；白名单 `war|pure`，
+非法值回落 `war`）。前端 `prefs.uiStyle` 变化时 `App.vue` 把 `data-theme` 挂到
+`<html>` 上，全局 CSS 与各组件据此切换（立即生效 + 落盘，设置页「个性 →
+界面风格」下拉）。设置页分**共性/个性**两组，专属项由 `ThemeDef.settings`
+注册表驱动（war=[]，pure=['chatAlpha','pageColor']）。
+
+**war（默认）**：贴图风不变。**pure（纯净风）**：
+
+- `App.vue`：不渲染铁轨（`theme.rails=false`）；背景默认纯白（`bg-base.is-pure`），
+  但**用户自定义上传的背景图片/视频与 background.json 覆盖仍然显示**（决策：
+  纯洁模式不挡自定义背景，默认才是白色）。
+- `PageShell`：`edgeW` 由主题决定（pure=0，天然满足 AGENTS.md 铁轨宽度同步约定）。
+- 组件库 plain 路径（不贴图）：`WarFrame` → 浅色圆角卡片；`WarButton` → 常规
+  紧凑按钮（高 ~32px）；`WarDropdown`/`WarMenu` → 浅色下拉；`WarDialog` → 浅色
+  弹窗；`SteelPanel` → 浅色面板（无吊链）。所有调用点零改动。
+- `warTheme.css` `html[data-theme='pure']`：整体覆盖 `--war-*` 为浅色系、取消
+  剑形光标、换系统 sans 字体、`.war-highlight` 去 screen 混合改浅蓝底、滚动条
+  贴图换浅色 CSS。**对话页内容为半透明**（`.chat` 上覆写 `--war-panel-bg` /
+  `--war-panel` = `rgba(var(--war-page-rgb),var(--war-chat-alpha,.8))`，气泡同、
+  输入区 `calc(... - .08)`），自定义背景（图/视频）从卡片下透出。
+- **透明度与页面颜色**（pure 专属设置项，设置页「个性」组）：
+  - `chatAlpha`（0.5~1.0，默认 .8，Rust `set_chat_alpha`）= 对话页内容半透明
+    程度；UI = 下拉六档 + 手动输入框（50~100%，任意整数，如 77 → 0.77），
+    `App.vue` 写成 `<html>` 的 `--war-chat-alpha` CSS 变量。
+  - `pageColor`（hex #rrggbb，默认纯白，Rust `set_page_color`）= **表面层底色**
+    （对话页卡片/菜单铁框/监控面板等 UI 表面，在背景之上）；预置色板 6 色点选。
+    `App.vue` 挂 `--war-page-color`（hex）与 `--war-page-rgb`（"r, g, b"）两个
+    变量；pure 块的 `--war-panel*`/`--war-glass*`/气泡/监控兜底全部从固定白改为
+    `rgb(var(--war-page-rgb))` / `rgba(var(--war-page-rgb), a)`。背景图/视频在
+    最底层，半透明表面透出它，二者不冲突。
+  - `bgBrightness`（0.5~1.5，默认 1.0，Rust `set_bg_brightness`）= **背景亮度**；
+    UI = 下拉五档（50/75/100/125/150%）+ 手动输入框，`App.vue` 挂
+    `--war-bg-brightness` 到 `<html>`，`.bg-img`/`.bg-video` 加
+    `filter: brightness(var(--war-bg-brightness, 1))`（war 下变量缺省=1 无影响；
+    底部 dim 暗角渐变不受 filter 影响）。
+- 主流程页面硬编码色做了机械替换（`#2a3344`→`var(--war-border)` 等语义变量，
+  war 值与原色一致、pure 覆盖为浅色）。
+- **战场监控页是 phase 2**：pure 下先给浅色半透明 CSS 兜底（`mon__world` 去地图、
+  小窗窗框去深蓝贴图改半透明白）。
+
+扩展性：加主题 = 注册表加一项（art 主题自带素材 + 配色变量，或纯 CSS 主题）+ 可选
+CSS 覆盖，不动组件库。
 
 ---
 

@@ -406,10 +406,16 @@ const agentIndex = computed(() => usableAgents.value.findIndex((a) => a.id === c
 const agentDisplay = computed(() =>
   agentIndex.value < 0 && currentAgentId.value ? (meta.value?.agentName ?? '当前') : undefined,
 );
+/** 已有对话的会话禁止切换 Agent（跨 provider 会静默丢失 agent 侧上下文；
+ * 后端 switch_agent 同样硬性拒绝）。indexRow 随 store://sessions 实时刷新。 */
+const agentLocked = computed(
+  () => (meta.value?.messageCount ?? indexRow.value?.messageCount ?? 0) > 0,
+);
 
 async function onAgentPick(i: number): Promise<void> {
   const a = usableAgents.value[i];
   if (!a || a.id === currentAgentId.value || switchingAgent.value) return;
+  if (agentLocked.value) return;
   switchingAgent.value = true;
   try {
     const ok = await monitor.switchAgent(props.sessionId, a.id);
@@ -785,6 +791,8 @@ async function openFull(): Promise<void> {
             :display-text="agentDisplay"
             :text-size="prefs.fs(12)"
             :row-height="26"
+            :disabled="agentLocked"
+            :title="agentLocked ? '已有对话的会话不能切换 Agent，请新建会话' : ''"
             drop-up
             @activated="onAgentPick"
           />

@@ -4,6 +4,8 @@
 // Click the bar to toggle; selecting an option closes and emits.
 // dropUp opens the list above the bar (for bars near the window bottom).
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { usePrefsStore } from '../../stores/prefs';
+import { themeOf } from '../../lib/themes';
 
 const props = withDefaults(
   defineProps<{
@@ -15,14 +17,20 @@ const props = withDefaults(
     textSize?: number;
     /** Show a filter input at the top of the popup (long lists, e.g. models). */
     filterable?: boolean;
+    /** Non-interactive (grayed bar, no popup). */
+    disabled?: boolean;
   }>(),
-  { modelValue: -1, displayText: undefined, dropUp: false, rowHeight: 28, textSize: 13, filterable: false },
+  { modelValue: -1, displayText: undefined, dropUp: false, rowHeight: 28, textSize: 13, filterable: false, disabled: false },
 );
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: number): void;
   (e: 'activated', index: number): void;
 }>();
+
+const prefs = usePrefsStore();
+/** pure 风格：下拉条/列表换浅色 CSS 渲染（不贴图）。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
 
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
@@ -50,6 +58,7 @@ const shownText = computed(() => {
 });
 
 function toggle(): void {
+  if (props.disabled) return;
   open.value = !open.value;
 }
 
@@ -123,19 +132,20 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="war-dd">
+  <div ref="root" class="war-dd" :class="{ 'is-plain': plain, 'is-disabled': disabled }">
     <!-- closed-state bar (border layer + label that spans the full width) -->
     <div class="war-dd__bar" @click="toggle">
-      <div class="war-dd__bar-frame"></div>
+      <div v-if="!plain" class="war-dd__bar-frame"></div>
       <span class="war-dd__bar-text" :style="{ fontSize: textSize + 'px' }" :title="shownText">{{ shownText }}</span>
       <!-- gold arrow as a separate element: baked-in arrows get mangled by
            border-image edge stretching (double-arrow artifact in WebView2) -->
-      <img class="war-dd__arrow" src="/assets/ui/dropdown/dropdown_arrow.png" alt="" />
+      <span v-if="plain" class="war-dd__plain-arrow">▾</span>
+      <img v-else class="war-dd__arrow" src="/assets/ui/dropdown/dropdown_arrow.png" alt="" />
     </div>
 
     <!-- expanded list (teleported: fixed coords from the bar's rect) -->
     <Teleport to="body">
-      <div v-if="open" ref="pop" class="war-dd__pop" :style="popStyle">
+      <div v-if="open" ref="pop" class="war-dd__pop" :class="{ 'is-plain': plain }" :style="popStyle">
         <div v-if="filterable" class="war-dd__filter">
           <input
             ref="filterInput"
@@ -156,7 +166,7 @@ onBeforeUnmount(() => {
             :style="{ height: rowHeight + 'px' }"
             @click="select(row.index)"
           >
-            <span class="war-highlight war-dd__row-glow"></span>
+            <span class="war-highlight war-dd__row-glow" :class="{ 'is-plain': plain }"></span>
             <span
               class="war-dd__row-text"
               :class="{ current: row.index === modelValue }"
@@ -181,6 +191,11 @@ onBeforeUnmount(() => {
 .war-dd__bar {
   position: absolute;
   inset: 0;
+}
+
+.war-dd.is-disabled .war-dd__bar {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .war-dd__bar-frame {
@@ -220,6 +235,66 @@ onBeforeUnmount(() => {
   transform: translateY(-50%);
   height: 12px;
   pointer-events: none;
+}
+
+/* ---- pure 风格：浅色 CSS 下拉（不贴图） ---- */
+.war-dd.is-plain .war-dd__bar {
+  background: var(--war-dd-bg, #ffffff);
+  border: 1px solid var(--war-dd-border, #c8cfd9);
+  border-radius: 6px;
+}
+
+.war-dd.is-plain .war-dd__bar-text {
+  color: var(--war-dd-text, #2a313c);
+  font-weight: 500;
+}
+
+.war-dd__plain-arrow {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--war-dd-text, #6b7484);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.war-dd__pop.is-plain {
+  background: var(--war-dd-pop-bg, #ffffff);
+  border: 1px solid var(--war-dd-border, #c8cfd9);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.12);
+}
+
+.war-dd__pop.is-plain .war-dd__pop-inner {
+  padding: 6px;
+}
+
+.war-dd__pop.is-plain .war-dd__row {
+  border-radius: 4px;
+}
+
+.war-dd__pop.is-plain .war-dd__row:hover {
+  background: var(--war-row-hover, #eef2f7);
+}
+
+.war-dd__pop.is-plain .war-dd__row-text {
+  color: var(--war-dd-text, #2a313c);
+}
+
+.war-dd__pop.is-plain .war-dd__row-text.current {
+  color: var(--war-gold);
+  font-weight: bold;
+}
+
+.war-dd__pop.is-plain .war-dd__row-glow.is-plain {
+  background: var(--war-highlight-bg, rgba(59, 130, 246, 0.14));
+  mix-blend-mode: normal;
+  border-radius: 4px;
+}
+
+.war-dd__pop.is-plain .war-dd__empty {
+  color: var(--war-text-faint);
 }
 
 .war-dd__pop {

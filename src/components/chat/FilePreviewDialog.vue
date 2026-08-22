@@ -195,7 +195,7 @@ async function buildEditor(): Promise<void> {
       '.cm-gutters': {
         backgroundColor: '#00000040',
         border: 'none',
-        borderRight: '1px solid #2a3344',
+        borderRight: '1px solid var(--war-border)',
         fontFamily: 'Consolas, monospace',
       },
       '.cm-scroller': {
@@ -798,8 +798,8 @@ function onAnyDown(e: MouseEvent): void {
   flex: 1;
   min-height: 0;
   display: flex;
-  border: 1px solid #2a3344;
-  background: #0b0d12;
+  border: 1px solid var(--war-border);
+  background: var(--war-input-bg);
 }
 
 .pv__cm {
@@ -865,7 +865,7 @@ function onAnyDown(e: MouseEvent): void {
   z-index: 95;
   min-width: 220px;
   max-width: 420px;
-  background: #0b0d12f2;
+  background: var(--war-input-bg);
   border: 1px solid var(--war-gold);
   padding: 4px 0;
   font-family: SimSun, serif;

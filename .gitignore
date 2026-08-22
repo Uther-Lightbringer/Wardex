@@ -11,4 +11,5 @@ background.json
 *.local.json
 .claude/
 .codegraph/
+pi-runtime/
 

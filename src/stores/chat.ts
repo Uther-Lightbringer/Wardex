@@ -31,6 +31,15 @@ export interface ChatSegment {
   [key: string]: unknown;
 }
 
+/** Acknowledged @ file reference chip (§3.3): path is project-relative;
+ * from/to ≤ 0 → whole file. Populated only by explicit pick/exact-match/
+ * insertRef/drop, never by scanning raw text. */
+export interface RefInsert {
+  path: string;
+  from: number;
+  to: number;
+}
+
 /** Token usage of one finished turn (chat://turn payload / messages.jsonl row). */
 export interface TurnUsage {
   inputTokens: number;
@@ -166,6 +175,8 @@ export interface SessionMeta {
   /** 子会话的分支点消息 id（从父会话哪条消息 fork 出来的）。 */
   sourceMessageId?: string;
   summary: string;
+  /** 本会话是否向 prompt 自动注入 codegraph 相关符号上下文（缺省=开启）。 */
+  useCodegraph?: boolean;
 }
 
 const IDLE_STATUS: ChatStatus = {
@@ -181,7 +192,7 @@ const IDLE_STATUS: ChatStatus = {
   imageSupported: false,
 };
 
-/** 引用块长度上限：超出截断并提示（对齐 @文件 的 REF_INJECT_NOTE）。 */
+/** 引用块长度上限：超出截断并提示（对齐 @文件 引用的行数语义）。 */
 const SELECTION_QUOTE_MAX = 8000;
 
 /** 子会话层级上限（与后端 MAX_SUB_DEPTH 一致）：顶层=1，最多 3 级。 */
@@ -241,10 +252,18 @@ export const useChatStore = defineStore('chat', {
     /** Pending <selection>…</selection> quote bodies — the quote bar floats
      * above the composer; on send they are wrapped back into tags. */
     composerQuotes: [] as string[],
-    /** Per-session composer drafts (text + quotes + attachments), in-memory
-     * only — switching sessions saves the old draft and restores the
-     * target's. */
-    drafts: {} as Record<string, { text: string; quotes: string[]; attachments: string[] }>,
+    /** Composer ref chips: only explicitly acknowledged @ references (picker
+     * pick / exact-match / insertRef / drop) are expanded at send — raw text is
+     * sent verbatim, so a bare @ (git@github…, emails, @handles) is never
+     * mistaken for a file reference. */
+    composerRefs: [] as RefInsert[],
+    /** Per-session composer drafts (text + quotes + attachments + refs),
+     * in-memory only — switching sessions saves the old draft and restores
+     * the target's. */
+    drafts: {} as Record<
+      string,
+      { text: string; quotes: string[]; attachments: string[]; refs: RefInsert[] }
+    >,
     /** Live DOM node of the streaming segment (R1 incremental append). */
     streamTarget: null as StreamTarget | null,
     /** Live DOM node of a streaming command row's output (term://output). */
@@ -256,10 +275,6 @@ export const useChatStore = defineStore('chat', {
     previewPath: '',
     /** Line to jump to after the preview opens (0 = top of file). */
     previewLine: 0,
-    /** Preview right-click → composer insert queue (@token). The Composer
-     * watches seq/token and appends it to its draft; seq makes a repeated
-     * identical token fire the watcher again. */
-    pendingRefInsert: { seq: 0, token: '' } as { seq: number; token: string },
   }),
   getters: {
     /** Slash commands of the active session (composer `/` completion). */
@@ -575,6 +590,17 @@ export const useChatStore = defineStore('chat', {
       }
     },
 
+    /** Toggle this session's codegraph symbol-context auto-injection. */
+    async setUseCodegraph(value: boolean): Promise<void> {
+      if (!this.sessionId || !isTauri) return;
+      try {
+        await cmd('set_session_use_codegraph', { sessionId: this.sessionId, value });
+        await this.refreshMeta();
+      } catch (e) {
+        console.warn('[chat] set_session_use_codegraph failed', e);
+      }
+    },
+
     /** Bind/rebind the current session to a project directory (option B):
      * meta.projectDir/workDir updated Rust-side; recents touched; panels
      * refresh via workspaceRefreshSeq (git/files watch it). */
@@ -742,6 +768,20 @@ export const useChatStore = defineStore('chat', {
     async startProjectSession(dir: string): Promise<boolean> {
       this.projectDir = dir;
       return this.newSession();
+    },
+
+    /** Rail 关闭会话（保留记录）：后端 close_session 杀进程但保留全部记录
+     * （pi 会话已持久化，重开秒恢复上下文）。关闭当前会话后页面停留在该
+     * 会话（记录还在），状态点变灰，点击铁轨行即重新拉起。 */
+    async closeSession(id: string): Promise<void> {
+      const sessions = useSessionsStore();
+      try {
+        await cmd('close_session', { sessionId: id });
+      } catch (e) {
+        console.warn('[chat] close_session failed', e);
+        return;
+      }
+      await sessions.refresh(this.projectDir);
     },
 
     /** Rail 删除会话: backend closes the runtime first, then deletes. */
@@ -997,18 +1037,20 @@ export const useChatStore = defineStore('chat', {
       this.previewLine = 0;
     },
 
-    /** Queue an @reference token for the composer (§3.3 syntax, e.g.
-     * @src/App.java:12-30; from/to ≤ 0 → whole file @src/App.java). The
+    /** Queue an @reference chip for the composer (§3.3): a structured
+     * {path, from, to} entry rendered by RefBar and expanded at send. The
      * preview dialog context menu calls this with the project-relative path
-     * and the selected line range. */
+     * and the selected line range. from/to ≤ 0 → whole file. */
     insertRef(path: string, from: number, to: number): void {
-      const token =
-        from <= 0 && to <= 0
-          ? `@${path}`
-          : from === to
-            ? `@${path}:${from}`
-            : `@${path}:${from}-${to}`;
-      this.pendingRefInsert = { seq: this.pendingRefInsert.seq + 1, token };
+      this.composerRefs = [...this.composerRefs, { path, from, to }];
+    },
+
+    removeRef(i: number): void {
+      this.composerRefs = this.composerRefs.filter((_, x) => x !== i);
+    },
+
+    clearRefs(): void {
+      this.composerRefs = [];
     },
 
     /** Attachment bar rules (§3.5): ≤6, deduped case-insensitively. */
@@ -1050,11 +1092,19 @@ export const useChatStore = defineStore('chat', {
       text: string,
       attachments: string[],
       quotes: string[] = [],
+      refs: RefInsert[] = [],
     ): void {
       if (!sessionId) return;
       const rest = { ...this.drafts };
-      if (!text && attachments.length === 0 && quotes.length === 0) delete rest[sessionId];
-      else rest[sessionId] = { text, quotes: [...quotes], attachments: [...attachments] };
+      if (!text && attachments.length === 0 && quotes.length === 0 && refs.length === 0)
+        delete rest[sessionId];
+      else
+        rest[sessionId] = {
+          text,
+          quotes: [...quotes],
+          attachments: [...attachments],
+          refs: [...refs],
+        };
       this.drafts = rest;
     },
   },

@@ -38,8 +38,8 @@ function elideName(p: string): string {
   display: flex;
   gap: 8px;
   padding: 6px 8px;
-  background: #0d1116f0;
-  border: 1px solid #6a5a3f;
+  background: var(--war-panel-dark);
+  border: 1px solid var(--war-border-brown);
   border-radius: 3px;
   width: fit-content;
   max-width: 100%;
@@ -51,7 +51,7 @@ function elideName(p: string): string {
   height: 56px;
   border: 1px solid #2c4a7a;
   border-radius: 2px;
-  background: #1a2334;
+  background: var(--war-panel-2);
   overflow: visible;
 }
 
@@ -80,7 +80,7 @@ function elideName(p: string): string {
 }
 
 .atts__name {
-  color: #c0d0ec;
+  color: var(--war-text-light-3);
   max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
@@ -94,8 +94,8 @@ function elideName(p: string): string {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #0d1116;
-  border: 1px solid #6a5a3f;
+  background: var(--war-panel-dark-solid);
+  border: 1px solid var(--war-border-brown);
   color: var(--war-error);
   font-size: 9px;
   display: flex;

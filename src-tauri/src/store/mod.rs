@@ -19,6 +19,7 @@
 
 pub mod agents;
 pub mod browse;
+pub mod collab;
 pub mod db;
 pub mod json;
 pub mod media;
@@ -32,6 +33,7 @@ pub mod usage;
 pub mod workspace;
 
 pub use agents::{mask_key, Agent, AgentPatch, AgentStore, AgentsError};
+pub use collab::{CollabChange, CollabCursor, CollabStore};
 pub use db::{DbConnStore, DbConnsError, NamedConn, ProjectDbConns};
 pub use paths::{canonical_dir, Paths};
 pub use prefs::{PanelLayoutEntry, PrefsError, UserPrefs};
@@ -55,6 +57,8 @@ pub struct StoreRegistry {
     pub projects: ProjectStore,
     pub prefs: UserPrefs,
     pub todos: TodoStore,
+    pub collab: CollabStore,
+    pub collab_watch: crate::collab_watch::CollabWatcher,
     pub prompts: PromptStore,
     pub usage: UsageStore,
     pub db_conns: DbConnStore,
@@ -71,6 +75,8 @@ impl StoreRegistry {
             projects: ProjectStore::load(&paths),
             prefs: UserPrefs::load(&paths),
             todos: TodoStore::load(&paths),
+            collab: CollabStore::load(&paths),
+            collab_watch: crate::collab_watch::CollabWatcher::new(),
             prompts: PromptStore::load(&paths),
             usage: UsageStore::load(&paths),
             db_conns: DbConnStore::load(&paths),

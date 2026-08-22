@@ -6,6 +6,8 @@
 // Mask: full-screen #000000b0. Esc closes. Web CSS cursor covers the old
 // per-item cursor re-stamping automatically.
 import { computed, onBeforeUnmount, watch } from 'vue';
+import { usePrefsStore } from '../../stores/prefs';
+import { themeOf } from '../../lib/themes';
 
 const props = withDefaults(
   defineProps<{
@@ -22,6 +24,10 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>();
+
+const prefs = usePrefsStore();
+/** pure 风格：浅色 CSS 弹窗（不贴图），标题/正文深色，按钮区正常流布局。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
 
 const FRAME_ASPECT = 863 / 602; // ≈1.4333
 
@@ -65,23 +71,33 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true));
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="war-dialog-mask">
-      <div class="war-dialog" :style="dlgStyle">
-        <div class="war-dialog__frame"></div>
-
-        <!-- Upper: title + message inside the art's black gold plate -->
-        <div class="war-dialog__plate" :style="plateVars">
-          <div class="war-dialog__plate-col">
+    <div v-if="open" class="war-dialog-mask" :class="{ 'is-plain': plain }">
+      <div class="war-dialog" :class="{ 'is-plain': plain }" :style="plain ? undefined : dlgStyle">
+        <template v-if="plain">
+          <div class="war-dialog__plain-body">
             <div v-if="titleText" class="war-dialog__title">{{ titleText }}</div>
             <div v-if="messageText" class="war-dialog__msg">{{ messageText }}</div>
             <slot name="plate" />
+            <div class="war-dialog__plain-zone"><slot /></div>
           </div>
-        </div>
+        </template>
+        <template v-else>
+          <div class="war-dialog__frame"></div>
 
-        <!-- Lower: action buttons -->
-        <div class="war-dialog__zone" :style="zoneStyle">
-          <div class="war-dialog__zone-row"><slot /></div>
-        </div>
+          <!-- Upper: title + message inside the art's black gold plate -->
+          <div class="war-dialog__plate" :style="plateVars">
+            <div class="war-dialog__plate-col">
+              <div v-if="titleText" class="war-dialog__title">{{ titleText }}</div>
+              <div v-if="messageText" class="war-dialog__msg">{{ messageText }}</div>
+              <slot name="plate" />
+            </div>
+          </div>
+
+          <!-- Lower: action buttons -->
+          <div class="war-dialog__zone" :style="zoneStyle">
+            <div class="war-dialog__zone-row"><slot /></div>
+          </div>
+        </template>
       </div>
     </div>
   </Teleport>
@@ -170,5 +186,47 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true));
   justify-content: center;
   gap: 16px;
   max-width: 100%;
+}
+
+/* ---- pure 风格：浅色半透明 CSS 弹窗 ---- */
+.war-dialog-mask.is-plain {
+  background: rgba(18, 26, 38, 0.45);
+}
+
+.war-dialog.is-plain {
+  width: min(560px, 90vw);
+  background: var(--war-dialog-bg, #ffffff);
+  border: 1px solid var(--war-panel-border, #d4dae2);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(15, 23, 42, 0.22);
+  padding: 24px 26px;
+}
+
+.war-dialog__plain-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: center;
+}
+
+.war-dialog__plain-zone {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.war-dialog.is-plain .war-dialog__title {
+  color: var(--war-text, #1f242c);
+  font-size: 17px;
+  text-shadow: none;
+}
+
+.war-dialog.is-plain .war-dialog__msg {
+  color: var(--war-text-dim, #3d4554);
+  font-size: 14px;
+  text-align: center;
 }
 </style>

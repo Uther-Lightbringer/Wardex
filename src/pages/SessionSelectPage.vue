@@ -845,8 +845,8 @@ export default {
   max-height: 150px;
   display: flex;
   flex-direction: column;
-  border: 1px solid #2a3344;
-  background: #10141f99;
+  border: 1px solid var(--war-border);
+  background: var(--war-panel-glass);
 }
 
 .sel__results-head {
@@ -854,7 +854,7 @@ export default {
   padding: 4px 8px;
   color: var(--war-text-muted);
   font-family: SimSun, serif;
-  border-bottom: 1px solid #2a3344;
+  border-bottom: 1px solid var(--war-border);
 }
 
 .sel__results-list {
@@ -870,7 +870,7 @@ export default {
 }
 
 .sel__hit:hover {
-  background: #32509640;
+  background: var(--war-blue-row-2);
 }
 
 .sel__hit-top {
@@ -938,7 +938,7 @@ export default {
 }
 
 .sel__group:hover {
-  background: #32509633;
+  background: var(--war-blue-row);
 }
 
 .sel__arrow {
@@ -980,9 +980,9 @@ export default {
   padding: 1px 6px;
   color: var(--war-gold);
   font-family: SimSun, serif;
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   border-radius: 2px;
-  background: #10141f;
+  background: var(--war-panel);
 }
 
 .sel__group-new:hover {
@@ -1006,7 +1006,7 @@ export default {
 }
 
 .sel__row:hover {
-  background: #32509633;
+  background: var(--war-blue-row);
 }
 
 .sel__row.selected {
@@ -1044,7 +1044,7 @@ export default {
   border: 1px solid var(--war-gold-dim);
   border-radius: 8px;
   color: var(--war-gold);
-  background: #0d1116;
+  background: var(--war-panel-dark-solid);
   user-select: none;
 }
 
@@ -1060,7 +1060,7 @@ export default {
 .sel__row-title {
   flex: 1;
   min-width: 0;
-  color: #e8ecf4;
+  color: var(--war-text);
   font-family: SimSun, serif;
   white-space: nowrap;
   overflow: hidden;

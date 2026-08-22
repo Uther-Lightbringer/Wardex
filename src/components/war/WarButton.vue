@@ -10,6 +10,8 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { play } from '../../lib/sfx';
 import { useUiStore } from '../../stores/ui';
+import { usePrefsStore } from '../../stores/prefs';
+import { themeOf } from '../../lib/themes';
 
 const props = withDefaults(
   defineProps<{
@@ -29,11 +31,16 @@ const props = withDefaults(
 const emit = defineEmits<{ (e: 'activated'): void }>();
 
 const ui = useUiStore();
+const prefs = usePrefsStore();
 const hover = ref(false);
 const pressed = ref(false);
 
-const height = computed(() => Math.round(props.width / props.artAspect));
-const labelSize = computed(() => Math.max(13, Math.min(19, Math.round(props.width * 0.075))));
+/** pure 风格：常规紧凑 CSS 按钮（高 ~32px，决策 2），不再由宽高比推导。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
+const height = computed(() => (plain.value ? 30 : Math.round(props.width / props.artAspect)));
+const labelSize = computed(() =>
+  plain.value ? 13 : Math.max(13, Math.min(19, Math.round(props.width * 0.075))),
+);
 const disabled = computed(() => !props.enabled || ui.busy);
 
 const srcPrefix = computed(() =>
@@ -69,7 +76,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
 <template>
   <div
     class="war-btn"
-    :class="{ disabled }"
+    :class="{ disabled, 'is-plain': plain }"
     :style="{ width: width + 'px', height: height + 'px' }"
     @click="trigger"
     @mouseenter="hover = true"
@@ -79,12 +86,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
   >
     <!-- blue skin: fill (not contain) so the strip can match an exact
          width×height box (e.g. the composer's 150x30 dropdown row) -->
-    <img
-      :src="currentSrc"
-      :alt="text"
-      draggable="false"
-      :style="{ objectFit: skin === 'blue' ? 'fill' : 'contain' }"
-    />
+    <template v-if="!plain">
+      <img
+        :src="currentSrc"
+        :alt="text"
+        draggable="false"
+        :style="{ objectFit: skin === 'blue' ? 'fill' : 'contain' }"
+      />
+    </template>
     <span class="war-btn__label" :style="{ fontSize: labelSize + 'px' }">{{ text }}</span>
   </div>
 </template>
@@ -124,6 +133,39 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.war-btn.is-plain {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--war-btn-bg, #ffffff);
+  border: 1px solid var(--war-btn-border, #c8cfd9);
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(20, 30, 50, 0.06);
+  transition: background 120ms, border-color 120ms;
+}
+
+.war-btn.is-plain:hover:not(.disabled) {
+  background: var(--war-btn-bg-hover, #eef2f7);
+  border-color: var(--war-btn-border-hover, #aeb8c6);
+}
+
+.war-btn.is-plain:active:not(.disabled) {
+  background: var(--war-btn-bg-active, #e0e6ee);
+}
+
+.war-btn.is-plain .war-btn__label {
+  position: static;
+  padding: 0 10px;
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--war-btn-text, #2a313c);
+  text-shadow: none;
+}
+
+.war-btn.is-plain.disabled .war-btn__label {
+  color: #a8b0bc;
 }
 
 .war-btn:active .war-btn__label {

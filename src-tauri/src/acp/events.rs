@@ -38,6 +38,37 @@ impl TurnUsage {
         }
         Some(usage)
     }
+
+    /// Tolerant parse of pi's `get_session_stats` cumulative `tokens` object
+    /// ({input, output, total, cacheRead?, cacheWrite?}). Numeric fields
+    /// default to 0, total falls back to input+output. A wholly empty object
+    /// (or a non-object) yields None so a missing/broken payload never invents
+    /// usage.
+    pub fn from_pi(value: &Value) -> Option<Self> {
+        let obj = value.as_object()?;
+        let num = |k: &str| obj.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let input = num("input");
+        let output = num("output");
+        let mut total = num("total");
+        if total == 0 {
+            total = input + output;
+        }
+        let usage = Self {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: total,
+            cached_read_tokens: obj.get("cacheRead").and_then(Value::as_u64),
+            cached_write_tokens: obj.get("cacheWrite").and_then(Value::as_u64),
+            thought_tokens: None,
+        };
+        if usage.total_tokens == 0
+            && usage.cached_read_tokens.is_none()
+            && usage.cached_write_tokens.is_none()
+        {
+            return None;
+        }
+        Some(usage)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,6 +125,9 @@ pub enum AcpEvent {
     /// Process died at any point; chat does resume/interrupt bookkeeping.
     /// -1 = exit code unavailable (e.g. killed, or a mock transport).
     ProcessExited { code: i32 },
+    /// Pi extension `notify` (fire-and-forget). Chat layer shows a desktop
+    /// notification; no answer is expected.
+    Notify { title: String, body: String },
 }
 
 #[cfg(test)]
@@ -172,5 +206,30 @@ mod tests {
         // No usage key / broken shapes → None, never an error.
         assert_eq!(TurnUsage::from_acp(&json!("oops")), None);
         assert_eq!(TurnUsage::from_acp(&Value::Null), None);
+    }
+
+    #[test]
+    fn turn_usage_from_pi_tolerant() {
+        // Full pi get_session_stats tokens payload.
+        let u = TurnUsage::from_pi(&json!({
+            "input": 50000, "output": 10000, "total": 105000,
+            "cacheRead": 40000, "cacheWrite": 5000,
+        }))
+        .expect("usage");
+        assert_eq!(u.input_tokens, 50000);
+        assert_eq!(u.output_tokens, 10000);
+        assert_eq!(u.total_tokens, 105000);
+        assert_eq!(u.cached_read_tokens, Some(40000));
+        assert_eq!(u.cached_write_tokens, Some(5000));
+        assert_eq!(u.thought_tokens, None);
+
+        // Missing total falls back to input + output.
+        let u = TurnUsage::from_pi(&json!({ "input": 7, "output": 3 })).expect("usage");
+        assert_eq!(u.total_tokens, 10);
+
+        // Broken / empty shapes → None, never an error.
+        assert_eq!(TurnUsage::from_pi(&json!("oops")), None);
+        assert_eq!(TurnUsage::from_pi(&Value::Null), None);
+        assert_eq!(TurnUsage::from_pi(&json!({ "other": 1 })), None);
     }
 }

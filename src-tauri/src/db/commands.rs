@@ -32,7 +32,7 @@ pub struct ExecuteOutcome {
 
 /// Saved connections + aliases + which connections are currently open.
 #[tauri::command]
-pub fn db_conns(state: State<'_, crate::AppState>, project_dir: String) -> Value {
+pub(crate) fn db_conns(state: State<'_, crate::AppState>, project_dir: String) -> Value {
     let stores = crate::lock(&state.stores);
     json!({
         "connections": stores.db_conns.connections(&project_dir),
@@ -42,7 +42,7 @@ pub fn db_conns(state: State<'_, crate::AppState>, project_dir: String) -> Value
 }
 
 #[tauri::command]
-pub fn db_save_conns(
+pub(crate) fn db_save_conns(
     state: State<'_, crate::AppState>,
     project_dir: String,
     connections: Vec<NamedConnInput>,
@@ -60,7 +60,7 @@ pub fn db_save_conns(
 }
 
 #[tauri::command]
-pub fn db_set_alias(
+pub(crate) fn db_set_alias(
     state: State<'_, crate::AppState>,
     project_dir: String,
     key: String,
@@ -75,7 +75,7 @@ pub fn db_set_alias(
 }
 
 #[tauri::command]
-pub async fn db_open(
+pub(crate) async fn db_open(
     state: State<'_, crate::AppState>,
     project_dir: String,
     name: String,
@@ -85,17 +85,17 @@ pub async fn db_open(
 }
 
 #[tauri::command]
-pub fn db_close(state: State<'_, crate::AppState>, project_dir: String, name: String) {
+pub(crate) fn db_close(state: State<'_, crate::AppState>, project_dir: String, name: String) {
     state.db.close(&project_dir, &name);
 }
 
 #[tauri::command]
-pub fn db_close_all(state: State<'_, crate::AppState>, project_dir: String) {
+pub(crate) fn db_close_all(state: State<'_, crate::AppState>, project_dir: String) {
     state.db.close_project(&project_dir);
 }
 
 #[tauri::command]
-pub async fn db_tables(
+pub(crate) async fn db_tables(
     state: State<'_, crate::AppState>,
     project_dir: String,
     name: String,
@@ -110,7 +110,7 @@ pub async fn db_tables(
 }
 
 #[tauri::command]
-pub async fn db_columns(
+pub(crate) async fn db_columns(
     state: State<'_, crate::AppState>,
     project_dir: String,
     name: String,
@@ -122,7 +122,7 @@ pub async fn db_columns(
 
 /// Execute a batch through the gate. See module doc for the confirm dance.
 #[tauri::command]
-pub async fn db_execute(
+pub(crate) async fn db_execute(
     state: State<'_, crate::AppState>,
     project_dir: String,
     name: String,

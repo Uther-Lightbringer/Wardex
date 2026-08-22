@@ -47,8 +47,8 @@ function preview(t: string): string {
 
 <style scoped>
 .queue {
-  background: #0d1116f0;
-  border: 1px solid #6a5a3f;
+  background: var(--war-panel-dark);
+  border: 1px solid var(--war-border-brown);
   border-radius: 3px;
   font-family: SimSun, serif;
 }

@@ -26,14 +26,6 @@ fn tokenize(sql: &str) -> Vec<Token> {
         .unwrap_or_default()
 }
 
-/// Significant tokens (all whitespace/comments removed).
-fn significant(sql: &str) -> Vec<Token> {
-    tokenize(sql)
-        .into_iter()
-        .filter(|t| !matches!(t, Token::Whitespace(_)))
-        .collect()
-}
-
 /// Rejoin tokens into SQL text: a space between tokens except around `.`
 /// (periods must hug so `public.orders` stays valid).
 fn join_tokens(tokens: &[Token]) -> String {

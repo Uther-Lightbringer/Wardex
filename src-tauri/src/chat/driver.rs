@@ -4,11 +4,13 @@
 // (spawned per ensureAcp via `stdio_spawner`).
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use tokio::sync::mpsc;
 
 use crate::acp::{AcpClient, AcpError, AcpEvent, SpawnConfig, StartParams, Transport};
+use crate::provider::EnvOverrides;
 
 /// Boxed future alias for the object-safe trait (no async-trait dependency).
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -92,20 +94,69 @@ pub struct SessionLaunch {
     pub start: StartParams,
 }
 
+/// Launch parameters for the embedded Pi agent (provider "pi"): no ACP
+/// handshake — spawn `<binary> --mode rpc --no-session` and speak the Pi RPC
+/// JSONL protocol over stdin/stdout (chat/pi.rs). The binary is a bun-compiled
+/// self-contained executable (bundle-pi.mjs); Node is not required. Env
+/// overrides use the same None-deletes semantics as ACP.
+#[derive(Clone)]
+pub struct PiLaunch {
+    /// Absolute path to the compiled pi binary (pi.exe on Windows).
+    pub binary: PathBuf,
+    /// Custom-provider key written into ~/.pi/agent/models.json ("" = none,
+    /// pi uses its own config).
+    pub provider_key: String,
+    /// Model id passed via `--model` ("" = pi default).
+    pub model: String,
+    /// Allowed thinking levels (models.rs EFFORT_LEVELS); empty = every level.
+    /// Drives the thinking picker and the initial `set_thinking_level`.
+    pub effort_options: Vec<String>,
+    /// Default thinking level ("" = the first allowed one). Sent to pi at
+    /// spawn so thinking is ON by default.
+    pub default_effort: String,
+    pub env: EnvOverrides,
+    /// Child working directory (the session's project dir).
+    pub cwd: String,
+    /// Pi session persistence: --session-dir (isolated per-Wardex-session
+    /// dir) + --session-id (Wardex session uuid; pi creates-if-missing /
+    /// resumes-if-exists). Empty = keep --no-session (ephemeral fallback).
+    pub session_dir: String,
+    /// Wardex session id, passed as pi --session-id when session_dir is set.
+    pub session_id: String,
+    /// Absolute paths to WarDex-bundled Pi extensions (`--extension`, repeatable).
+    pub extensions: Vec<String>,
+}
+
+/// Everything a spawn needs: an ACP subprocess or the embedded pi agent.
+pub enum Launch {
+    Acp(SessionLaunch),
+    Pi(PiLaunch),
+}
+
 /// Factory producing a started client bound to a fresh event channel. The
 /// event receiver side stays with the actor across respawns.
 pub type Spawner = Box<
-    dyn FnMut(SessionLaunch, mpsc::Sender<AcpEvent>) -> BoxFuture<'static, Result<Box<dyn ClientDriver>, AcpError>>
+    dyn FnMut(Launch, mpsc::Sender<AcpEvent>) -> BoxFuture<'static, Result<Box<dyn ClientDriver>, AcpError>>
         + Send,
 >;
 
-/// Production spawner: real stdio subprocess (kill-on-drop replaces the old
-/// stop() kill+waitForFinished).
-pub fn stdio_spawner() -> Spawner {
+/// Production spawner: dispatches on the launch kind. ACP agents become a
+/// real stdio subprocess (kill-on-drop replaces the old stop()
+/// kill+waitForFinished); the pi agent becomes a node rpc-entry subprocess
+/// driven through PiDriver.
+pub fn production_spawner() -> Spawner {
     Box::new(|launch, tx| {
         Box::pin(async move {
-            let client = AcpClient::spawn(launch.spawn, launch.start, tx).await?;
-            Ok(Box::new(client) as Box<dyn ClientDriver>)
+            match launch {
+                Launch::Acp(l) => {
+                    let client = AcpClient::spawn(l.spawn, l.start, tx).await?;
+                    Ok(Box::new(client) as Box<dyn ClientDriver>)
+                }
+                Launch::Pi(p) => {
+                    let client = crate::chat::pi::PiDriver::spawn(p, tx).await?;
+                    Ok(Box::new(client) as Box<dyn ClientDriver>)
+                }
+            }
         })
     })
 }

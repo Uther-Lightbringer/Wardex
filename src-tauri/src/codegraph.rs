@@ -12,12 +12,13 @@
 //   codegraph plot -d <db>     -> writes a temp HTML + opens the browser, exits
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
+use tauri::Manager;
 use tauri::{AppHandle, Emitter};
 
 use crate::probe;
@@ -124,6 +125,41 @@ impl CodegraphRunner {
             .is_file()
     }
 
+    /// Build the MCP server command to register for an ACP session
+    /// (`node <cli.js> mcp -d <db>`). Returns None when codegraph isn't
+    /// installed. The db path is pinned via `-d` (not cwd-dependent); a
+    /// missing index is fine — tool calls then return a clear
+    /// "run codegraph build" error the agent can recover from in-session.
+    pub fn mcp_command(project_dir: &str) -> Option<(String, Vec<String>)> {
+        let shim = probe::which_on_expanded_path("codegraph")?;
+        let dir = shim.parent()?;
+        let db = std::path::Path::new(project_dir)
+            .join(".codegraph")
+            .join("graph.db")
+            .to_string_lossy()
+            .into_owned();
+        // Prefer launching node directly (node.exe spawns cleanly; the .cmd
+        // shim does not). cli.js lives under the npm global bin's
+        // node_modules/@optave/codegraph.
+        let cli = dir
+            .join("node_modules")
+            .join("@optave")
+            .join("codegraph")
+            .join("dist")
+            .join("cli.js");
+        if cli.is_file() {
+            return Some((
+                "node".to_string(),
+                vec![cli.to_string_lossy().into_owned(), "mcp".to_string(), "-d".to_string(), db],
+            ));
+        }
+        // Fallback: run the shim through cmd (relies on PATH + shim).
+        Some((
+            "cmd".to_string(),
+            vec!["/c".to_string(), "codegraph".to_string(), "mcp".to_string(), "-d".to_string(), db],
+        ))
+    }
+
     /// Status payload for the Ctrl+\ overlay (installed flag is set by the
     /// command layer from the prefs-cached probe).
     pub fn status(&self, project_dir: &str) -> serde_json::Value {
@@ -155,9 +191,8 @@ impl CodegraphRunner {
         };
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            let args = format!("{} build \"{}\"", path.to_string_lossy(), project_dir);
             log::info!("[codegraph] build start: {project_dir}");
-            let status = match run_cli_capture(&args).await {
+            let status = match run_cli_capture(&path, &["build", project_dir.as_str()]).await {
                 Ok(out) => {
                     log::info!(
                         "[codegraph] build ok: {project_dir} ({})",
@@ -196,16 +231,14 @@ impl CodegraphRunner {
             return Err("empty".to_string());
         }
         let db = std::path::Path::new(project_dir).join(".codegraph").join("graph.db");
-        let args = format!(
-            "{} query {} --kind interface --json -n 60 -d \"{}\"",
-            path.to_string_lossy(),
-            quote_arg(q),
-            db.to_string_lossy(),
-        );
-        let stdout = run_cli_capture(&args)
-            .await
-            .map_err(|e| format!("codegraph 查询失败：{e}"))?
-            .stdout;
+        let db_str = db.to_string_lossy();
+        let stdout = run_cli_capture(
+            &path,
+            &["query", q, "--kind", "interface", "--json", "-n", "60", "-d", db_str.as_ref()],
+        )
+        .await
+        .map_err(|e| format!("codegraph 查询失败：{e}"))?
+        .stdout;
         #[derive(serde::Deserialize)]
         struct Raw {
             results: Vec<RawHit>,
@@ -229,48 +262,68 @@ impl CodegraphRunner {
             .collect())
     }
 
-    /// Fire-and-forget `codegraph plot -d <db>`: it writes a temp HTML,
-    /// opens the default browser and exits on its own.
-    pub fn plot(&self, project_dir: &str) -> Result<(), String> {
+    /// Render the dependency graph: `codegraph plot -d <db> -o <html> --no-open`
+    /// writes an HTML file, then opens it in an in-app Tauri window (asset
+    /// protocol) instead of the external browser. Reuses the same window on
+    /// repeat views.
+    pub fn plot(&self, app: &tauri::AppHandle, project_dir: &str) -> Result<(), String> {
         let path = self.resolve().ok_or_else(|| "codegraph 未安装".to_string())?;
         if !Self::index_exists(project_dir) {
             return Err("尚未构建索引".to_string());
         }
         let db = std::path::Path::new(project_dir).join(".codegraph").join("graph.db");
-        let args = format!(
-            "{} plot -d \"{}\"",
-            path.to_string_lossy(),
-            db.to_string_lossy()
-        );
+        let db_str = db.to_string_lossy().into_owned();
+        let html = std::env::temp_dir().join("wardex-codegraph-graph.html");
+        let html_str = html.to_string_lossy().into_owned();
+        let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            let mut c = tokio::process::Command::new("cmd.exe");
-            c.args(["/d", "/s", "/c"])
-                .arg(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            #[cfg(windows)]
+            match run_cli_capture(
+                &path,
+                &["plot", "-d", db_str.as_str(), "-o", html_str.as_str(), "--no-open"],
+            )
+            .await
             {
-                c.creation_flags(0x08000000); // CREATE_NO_WINDOW
-            }
-            if let Ok(mut ch) = c.spawn() {
-                let _ = ch.wait().await;
+                Ok(_) => open_plot_window(&app, &html),
+                Err(e) => log::warn!("[codegraph] plot failed: {e}"),
             }
         });
         Ok(())
     }
 }
 
-/// Wrap a shell argument in double quotes, escaping embedded quotes.
-fn quote_arg(s: &str) -> String {
-    let escaped = s.replace('"', "\\\"");
-    format!("\"{escaped}\"")
+/// Open `codegraph-graph` in an in-app Tauri window via the asset protocol.
+/// On Windows the asset URL is `http://asset.localhost/<path>` (what the JS
+/// `convertFileSrc` produces), with the absolute path fully percent-encoded;
+/// the asset handler percent-decodes it back and serves the file. Creates the
+/// window on first use; reuses + navigates it afterwards.
+fn open_plot_window(app: &tauri::AppHandle, html: &std::path::Path) {
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+    let abs = html.canonicalize().unwrap_or_else(|_| html.to_path_buf());
+    let encoded = utf8_percent_encode(&abs.to_string_lossy(), NON_ALPHANUMERIC).to_string();
+    let url = tauri::Url::parse(&format!("http://asset.localhost/{encoded}"))
+        .expect("valid asset url");
+    if let Some(win) = app.get_webview_window("codegraph-graph") {
+        let _ = win.navigate(url);
+        let _ = win.show();
+        let _ = win.set_focus();
+        return;
+    }
+    if let Err(e) = tauri::WebviewWindowBuilder::new(
+        app,
+        "codegraph-graph",
+        tauri::WebviewUrl::External(url),
+    )
+    .title("Codegraph 图谱")
+    .inner_size(1000.0, 720.0)
+    .build()
+    {
+        log::warn!("[codegraph] open window failed: {e}");
+    }
 }
 
 /// Captured CLI output; the query path parses `stdout` only (JSON), the
 /// build path shows `combined()` so progress lines land in the overlay.
-struct CaptureOut {
-    stdout: String,
+struct CaptureOut {    stdout: String,
     stderr: String,
 }
 
@@ -286,13 +339,18 @@ impl CaptureOut {
     }
 }
 
-/// Run a cmd.exe-wrapped codegraph command; returns captured output on
-/// success, stderr (fallback stdout) on failure. 600s ceiling so a hung
-/// build can never wedge the app.
-async fn run_cli_capture(args: &str) -> Result<CaptureOut, String> {
+/// Run a codegraph CLI command by wrapping its (possibly `.cmd`/`.bat`) shim
+/// in `cmd.exe`. The shim path and each argument are passed as SEPARATE argv
+/// entries so CreateProcess quotes them — the same pattern the ACP transport
+/// uses (acp/transport.rs). Concatenating them into a single `/c` string makes
+/// cmd.exe re-parse the quotes and mangle paths (e.g. a quoted dir becomes
+/// garbage and codegraph's mkdir fails), which is why builds used to fail.
+/// 600s ceiling so a hung build can never wedge the app.
+async fn run_cli_capture(program: &Path, args: &[&str]) -> Result<CaptureOut, String> {
     let mut c = tokio::process::Command::new("cmd.exe");
     c.args(["/d", "/s", "/c"])
-        .arg(args)
+        .arg(program)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

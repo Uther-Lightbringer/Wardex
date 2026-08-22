@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
-use crate::chat::driver::{stdio_spawner, Spawner};
+use crate::chat::driver::{production_spawner, Spawner};
 use crate::chat::runtime::{
     enforce_process_cap, is_image_path, lock_ok, spawn_actor, EventSink, ManagerShared,
     RuntimeCmd, RuntimeEntry, RuntimeSnap, SendOutcome, SharedRegistry,
@@ -64,7 +64,7 @@ fn snapshot_of(agent: &Agent) -> AgentSnapshot {
 
 impl ChatManager {
     pub fn new(stores: Arc<Mutex<StoreRegistry>>, sink: Arc<dyn EventSink>) -> Self {
-        Self::with_factory(stores, sink, Arc::new(|_| stdio_spawner()))
+        Self::with_factory(stores, sink, Arc::new(|_| production_spawner()))
     }
 
     pub fn with_factory(
@@ -106,8 +106,20 @@ impl ChatManager {
             .collect()
     }
 
+    /// Live command sender for a session. A dead actor (e.g. killed by a
+    /// panic) leaves its registry entry behind; is_closed() detects that —
+    /// prune the stale entry and report None so callers take the recreate
+    /// path instead of failing every send with "会话已关闭".
     fn entry_tx(&self, session_id: &str) -> Option<tokio::sync::mpsc::Sender<RuntimeCmd>> {
-        lock_ok(&self.registry).get(session_id).map(|e| e.tx.clone())
+        let mut reg = lock_ok(&self.registry);
+        if let Some(e) = reg.get(session_id) {
+            if !e.tx.is_closed() {
+                return Some(e.tx.clone());
+            }
+            log::warn!("chat[{session_id}] runtime actor is gone; pruning dead registry entry");
+            reg.remove(session_id);
+        }
+        None
     }
 
     async fn send(&self, session_id: &str, cmd: RuntimeCmd) -> Result<(), ChatError> {
@@ -160,15 +172,60 @@ impl ChatManager {
             snap.clone(),
         );
         lock_ok(&self.registry).insert(session_id.to_string(), RuntimeEntry { tx, snap });
+        self.ensure_collab_watch(session_id);
+    }
+
+    /// 会话 runtime 创建：确保该项目 watcher 已启动（幂等）。没有项目绑定
+    /// 的会话（空工作区）不监听。
+    fn ensure_collab_watch(&self, session_id: &str) {
+        let project = {
+            let mut stores = lock_ok(&self.stores);
+            stores.sessions.project_dir_of(session_id)
+        };
+        if !project.is_empty() {
+            let stores = Arc::clone(&self.stores);
+            lock_ok(&self.stores).collab_watch.start(&project, stores);
+        }
     }
 
     /// destroyRuntime (ChatController.cpp:238-256): stop the actor (which
     /// settles a busy turn and releases the resident model), drop the entry.
+    /// Also clears the session's collab-broadcast residual asynchronously
+    /// (cursor + touch), so it never blocks the teardown; when no other
+    /// runtime of the same project remains, stops its watcher and drops the
+    /// project's whole change log.
     pub fn destroy_runtime(&self, session_id: &str) {
         let entry = lock_ok(&self.registry).remove(session_id);
         if let Some(entry) = entry {
             let _ = entry.tx.try_send(RuntimeCmd::Shutdown);
         }
+        let stores = Arc::clone(&self.stores);
+        let registry = Arc::clone(&self.registry);
+        let sid = session_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            let project = {
+                let mut s = lock_ok(&stores);
+                s.collab.clear_session(&sid);
+                s.sessions.project_dir_of(&sid)
+            };
+            if project.is_empty() {
+                return;
+            }
+            // 该项目是否还有其他活跃 runtime？
+            let ids: Vec<String> = {
+                let reg = lock_ok(&registry);
+                reg.keys().cloned().collect()
+            };
+            let remaining = {
+                let mut s = lock_ok(&stores);
+                ids.iter().filter(|id| s.sessions.project_dir_of(id) == project).count()
+            };
+            if remaining == 0 {
+                let mut s = lock_ok(&stores);
+                s.collab_watch.stop(&project);
+                s.collab.clear_project(&project);
+            }
+        });
     }
 
     /// Teardown runtimes for sessions the store just removed wholesale
@@ -227,7 +284,7 @@ impl ChatManager {
             return Err(ChatError::Message(if agent_id.is_some() {
                 "Agent 不可用，请在配置页检查".to_string()
             } else {
-                "请先在配置中创建 Kimi Agent 并设为默认".to_string()
+                "请先在配置中创建 Pi Agent 并设为默认".to_string()
             }));
         };
         let id = {
@@ -306,6 +363,10 @@ impl ChatManager {
             shared.active_id.clear();
         }
         shared.unread.remove(session_id);
+        // The runtime entry is gone from the registry — tell every page to
+        // re-pull (runtime_states drops the session → rail dot / chat status
+        // flip to "no process").
+        self.sink.emit("store://sessions", json!({}));
     }
 
     /// Rail 删除会话: closeRuntime first, then delete from disk.
@@ -382,8 +443,23 @@ impl ChatManager {
         attachments: &[String],
         kind: &str,
     ) -> Result<SendOutcome, ChatError> {
-        let Some(tx) = self.entry_tx(session_id) else {
-            return Err(ChatError::NoSession);
+        let tx = match self.entry_tx(session_id) {
+            Some(tx) => tx,
+            None => {
+                // Self-heal: the actor died (panic) or was never created.
+                // Recreate the runtime (same as open_session's path) and send
+                // through it; only sessions unknown to the store are rejected.
+                let known = lock_ok(&self.stores)
+                    .sessions
+                    .meta_for(session_id)
+                    .is_some();
+                if !known {
+                    return Err(ChatError::NoSession);
+                }
+                let agent = self.resolve_agent_for(session_id);
+                self.create_runtime(session_id, agent);
+                self.entry_tx(session_id).ok_or(ChatError::NoSession)?
+            }
         };
 
         // Attachment split (ChatController.cpp:961-1004): image + agent
@@ -581,10 +657,28 @@ impl ChatManager {
     /// switchAgent (ChatController.cpp:741-808): validation + no-op check
     /// here; the provider-comparison and acpSessionId rule run in the actor
     /// (it owns the old agent snapshot).
+    ///
+    /// Hard rule: a session that already has messages cannot switch agent.
+    /// Same-provider switches could resume, but cross-provider ones silently
+    /// restart agent-side context — banning the switch outright keeps the
+    /// mental model simple: 会话一旦开聊，Agent 就固定了。
     pub async fn switch_agent(&self, session_id: &str, agent_id: &str) -> Result<(), ChatError> {
         let Some(entry) = lock_ok(&self.registry).get(session_id).map(|e| e.tx.clone()) else {
             return Err(ChatError::NoSession);
         };
+        {
+            let mut stores = lock_ok(&self.stores);
+            let count = stores
+                .sessions
+                .meta_for(session_id)
+                .map(|m| m.message_count)
+                .unwrap_or(0);
+            if count > 0 {
+                return Err(ChatError::Message(
+                    "已有对话的会话不能切换 Agent，请新建会话".to_string(),
+                ));
+            }
+        }
         let agent = {
             let stores = lock_ok(&self.stores);
             stores.agents.get(agent_id).cloned()

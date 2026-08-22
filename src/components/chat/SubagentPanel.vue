@@ -137,8 +137,8 @@ function isStuck(s: Subagent): boolean {
 
 <style scoped>
 .subagent {
-  background: #0d1116f0;
-  border: 1px solid #6a5a3f;
+  background: var(--war-panel-dark);
+  border: 1px solid var(--war-border-brown);
   border-radius: 3px;
   font-family: SimSun, serif;
 }
@@ -172,7 +172,7 @@ function isStuck(s: Subagent): boolean {
 }
 
 .subagent__row:hover {
-  background: #1a2334;
+  background: var(--war-panel-2);
 }
 
 .subagent__row:hover .subagent__title {
@@ -218,7 +218,7 @@ function isStuck(s: Subagent): boolean {
 .subagent__title {
   flex: 1;
   min-width: 0;
-  color: #d0d6e0;
+  color: var(--war-text-light);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

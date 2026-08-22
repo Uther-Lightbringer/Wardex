@@ -48,7 +48,7 @@ function onNewSession(): void {
     if (ok) {
       void nav.goOverlay('chat');
     } else {
-      ui.showBanner(chat.status.lastError || '请先配置默认 Kimi Agent');
+      ui.showBanner(chat.status.lastError || '请先配置默认 Pi Agent');
       void nav.goOverlay('config');
     }
   });
@@ -90,7 +90,7 @@ async function onExit(): Promise<void> {
 
 <template>
   <div class="menu-layer" :class="{ inactive: nav.page !== 'main' }">
-    <div class="menu-band" :style="{ transform: `translateY(${nav.menuY}px)` }">
+    <div class="menu-band" :style="{ transform: `translateY(${nav.menuY}px)`, opacity: nav.menuOpacity }">
       <!-- left rail: recent projects (scaled coordinate system 460x900) -->
       <div class="menu-left" :style="{ width: 460 * ui.uiScale + 'px' }">
         <div class="menu-left__inner" :style="{ transform: `scale(${ui.uiScale})` }">

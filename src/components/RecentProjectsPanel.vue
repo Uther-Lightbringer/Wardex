@@ -144,12 +144,12 @@ function formatDate(ms: number): string {
   flex: none;
   height: 52px;
   background: #10141dcc;
-  border: 1px solid #1a2230;
+  border: 1px solid var(--war-panel-2);
   box-sizing: border-box;
 }
 
 .recent__item:hover {
-  background: #1a2334;
+  background: var(--war-panel-2);
   border-color: #2c4a7a;
 }
 

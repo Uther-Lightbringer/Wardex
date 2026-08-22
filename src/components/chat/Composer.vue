@@ -10,14 +10,16 @@
 // (chat.composerQuotes, full bodies) — the textarea here holds plain text
 // only; on send the quotes are re-wrapped into tags and prepended.
 //
-// Send path: the draft keeps short @tokens; only at send time each token is
-// expanded through read_file_range into a 【引用文件：…】 block (§3.3) and the
-// expanded text + attachment paths go to send_prompt. The draft and
+// Send path: acknowledged @ refs live as chips (chat.composerRefs, RefBar
+// above the input) — not in the draft text. At send time each chip is
+// validated through read_file_range (content discarded) and expanded into a
+// 【引用文件：…】 marker + a read instruction telling the model to read the file
+// itself (§3.3); the raw draft text is sent verbatim. The draft, refs and
 // attachments are cleared ONLY when the backend accepts (§3.2).
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { cmd, isTauri } from '../../lib/tauri';
-import { useChatStore } from '../../stores/chat';
+import { useChatStore, type RefInsert } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
 import WarDropdown from '../war/WarDropdown.vue';
 import WarButton from '../war/WarButton.vue';
@@ -25,7 +27,6 @@ import WarScrollBar from '../war/WarScrollBar.vue';
 import ComposerExpandDialog from './ComposerExpandDialog.vue';
 
 const MAX_LEN = 64000;
-const REF_INJECT_NOTE = '…（文件超过 200KB，已截断）';
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
@@ -96,35 +97,23 @@ watch(
   () => chat.sessionId,
   (id, prev) => {
     if (prev && prev !== id) {
-      chat.saveDraft(prev, text.value, chat.attachments, chat.composerQuotes);
+      chat.saveDraft(prev, text.value, chat.attachments, chat.composerQuotes, chat.composerRefs);
     }
     const d = id ? chat.drafts[id] : undefined;
     text.value = d?.text ?? '';
     chat.composerQuotes = [...(d?.quotes ?? [])];
     chat.attachments = [...(d?.attachments ?? [])];
+    chat.composerRefs = [...(d?.refs ?? [])];
     pickerOpen.value = false;
     slashOpen.value = false;
   },
 );
 
-// ---- external ref insert (preview context menu → @token) ----
-// The preview dialog queues a token through chat.pendingRefInsert; append it
-// to the draft at the end and park the cursor after it. The existing @-picker
-// machinery then resolves the path normally (exact match closes the picker).
-watch(
-  () => [chat.pendingRefInsert.seq, chat.pendingRefInsert.token] as const,
-  ([seq, token]) => {
-    if (!seq || !token) return;
-    const sep = text.value && !text.value.endsWith('\n') ? ' ' : '';
-    text.value += sep + token;
-    void Promise.resolve().then(() => {
-      if (inputEl.value) {
-        inputEl.value.selectionStart = inputEl.value.selectionEnd = text.value.length;
-        inputEl.value.focus();
-      }
-    });
-  },
-);
+// ---- external ref insert (preview context menu → ref chip) ----
+// The preview dialog calls chat.insertRef() directly, which pushes a
+// {path, from, to} chip into chat.composerRefs (rendered by RefBar above the
+// input). The @ picker below funnels picks and exact matches into the same
+// array, so the draft text itself never holds @tokens.
 
 // ---- popup anchoring ----
 // Popups (slash / @ pickers) float ABOVE the composer, but the composer lives
@@ -304,7 +293,7 @@ function onDropPaths(paths: string[]): void {
       snippet += (snippet ? '\n' : '') + mdImageFor(p);
     } else {
       const rel = relUnderProject(p);
-      if (rel) snippet += (snippet ? '\n' : '') + '@' + rel;
+      if (rel) chat.insertRef(rel, 0, 0);
       else showNotice(`「${fileNameOf(p)}」不在项目目录内，无法 @ 引用（图片可直接拖入）`);
     }
   }
@@ -383,7 +372,6 @@ async function onPaste(e: ClipboardEvent): Promise<void> {
 interface RefToken {
   start: number; // index of '@' in the draft
   end: number; // cursor
-  segmentStart: number; // start of the current comma-segment
   filter: string; // current segment minus the :from-to suffix
   suffix: string; // typed ":from" / ":from-to" to preserve on select
   exact: boolean; // filter already equals a listed path (picker closes)
@@ -405,6 +393,13 @@ function currentToken(): RefToken | null {
   const before = text.value.slice(0, pos);
   const at = before.lastIndexOf('@');
   if (at < 0) return null;
+  // Only treat '@' as a reference trigger when it starts a token (line start,
+  // after whitespace, or after a comma) — a bare @ mid-word (git@github…,
+  // emails) must not open the picker or become a reference.
+  if (at > 0) {
+    const c = text.value[at - 1];
+    if (/\S/.test(c) && c !== ',') return null;
+  }
   const frag = before.slice(at + 1);
   if (!TOKEN_RE.test(frag)) return null;
   const segStart = Math.max(frag.lastIndexOf(',') + 1, 0);
@@ -414,7 +409,6 @@ function currentToken(): RefToken | null {
   return {
     start: at,
     end: pos,
-    segmentStart: at + 1 + segStart + (frag.slice(segStart).length - frag.slice(segStart).trimStart().length),
     filter,
     suffix: m ? m[0] : '',
     exact: false,
@@ -447,6 +441,83 @@ onBeforeUnmount(() => {
   if (pickerDebounce) clearTimeout(pickerDebounce);
 });
 
+/** Parse a ":from" / ":from-to" suffix into {from,to} (both ≤ 0 → whole file). */
+function suffixToRange(suffix: string): { from: number; to: number } {
+  const m = suffix.match(SUFFIX_RE);
+  if (!m) return { from: 0, to: 0 };
+  const [a, b] = m[1].split('-');
+  return { from: Number(a), to: b === undefined ? 0 : Number(b) };
+}
+
+interface RefSeg {
+  start: number;
+  end: number;
+  text: string;
+}
+
+/** Scan backward from `end` to collect a whole `@a, @b, …` comma-chain into
+ * individual segments (restores §3.3 multi-file references). Returns null if
+ * any segment is malformed, so callers fall back to the active token alone. */
+function refChainOf(end: number): RefSeg[] | null {
+  const segs: RefSeg[] = [];
+  let pos = end;
+  for (;;) {
+    const a = text.value.lastIndexOf('@', pos - 1);
+    if (a < 0) return null;
+    const rest = text.value.slice(a + 1, pos);
+    const comma = rest.indexOf(',');
+    const segEnd = comma >= 0 ? a + 1 + comma : pos;
+    const body = text.value.slice(a + 1, segEnd);
+    if (!/^[^\s@,]+(?::\d+(?:-\d+)?)?$/.test(body)) return null;
+    segs.push({ start: a, end: segEnd, text: text.value.slice(a, segEnd) });
+    // The chain continues only if a comma (with optional spaces) sits right
+    // before this @; otherwise it's the chain start (must be a token start).
+    let i = a - 1;
+    while (i >= 0 && /\s/.test(text.value[i])) i--;
+    if (i < 0 || text.value[i] !== ',') {
+      if (a > 0) {
+        const c = text.value[a - 1];
+        if (/\S/.test(c) && c !== ',') return null;
+      }
+      return segs.reverse();
+    }
+    pos = a;
+  }
+}
+
+/** Replace the typed @token (and any comma-joined siblings) with ref chips and
+ * drop them from the draft text — the chips, not raw text, drive expansion.
+ * `pickPath` overrides the last segment's path when the user picked a
+ * suggestion for it. */
+function commitTokenAsRef(token: RefToken, pickPath?: string): void {
+  const chain = refChainOf(token.end);
+  const segs: RefSeg[] =
+    chain && chain.length > 0
+      ? chain
+      : [{ start: token.start, end: token.end, text: text.value.slice(token.start, token.end) }];
+  const firstStart = segs[0].start;
+  text.value = text.value.slice(0, firstStart) + text.value.slice(token.end);
+  segs.forEach((s, idx) => {
+    const isLast = idx === segs.length - 1;
+    if (isLast && pickPath) {
+      const { from, to } = suffixToRange(token.suffix);
+      chat.insertRef(pickPath, from, to);
+      return;
+    }
+    const m = s.text.match(/^@([^\s@,:]+)(?::(\d+)(?:-(\d+))?)?$/);
+    if (!m) return;
+    chat.insertRef(m[1], m[2] ? Number(m[2]) : 0, m[3] ? Number(m[3]) : 0);
+  });
+  pickerOpen.value = false;
+  activeToken.value = null;
+  void Promise.resolve().then(() => {
+    if (inputEl.value) {
+      inputEl.value.selectionStart = inputEl.value.selectionEnd = firstStart;
+      inputEl.value.focus();
+    }
+  });
+}
+
 async function fetchPickerItems(token: RefToken): Promise<void> {
   const seq = ++pickerSeq;
   try {
@@ -456,9 +527,14 @@ async function fetchPickerItems(token: RefToken): Promise<void> {
       [],
     );
     if (seq !== pickerSeq) return; // superseded by a newer keystroke
-    // Exact (case-insensitive) match = reference complete → close (§3.3).
-    if (items.some((p) => p.toLowerCase() === token.filter.toLowerCase() && token.filter.length > 0)) {
-      pickerOpen.value = false;
+    // Exact (case-insensitive) match = reference complete → turn it (and any
+    // comma-joined siblings) into chips and close (§3.3).
+    if (
+      items.some(
+        (p) => p.toLowerCase() === token.filter.toLowerCase() && token.filter.length > 0,
+      )
+    ) {
+      commitTokenAsRef(token);
       return;
     }
     if (items.length === 0) {
@@ -474,7 +550,8 @@ async function fetchPickerItems(token: RefToken): Promise<void> {
   }
 }
 
-/** Replace only the current path segment; keep comma-prefix and :from-to. */
+/** Acknowledge the picked path as a ref chip (replacing the typed @token and
+ * any comma-joined siblings). */
 function pickPicker(i: number): void {
   const token = activeToken.value;
   const path = pickerItems.value[i];
@@ -482,19 +559,8 @@ function pickPicker(i: number): void {
     pickerOpen.value = false;
     return;
   }
-  const before = text.value.slice(0, token.segmentStart);
-  const after = text.value.slice(token.end);
-  text.value = before + path + token.suffix + after;
-  pickerOpen.value = false;
-  const pos = before.length + path.length + token.suffix.length;
-  void Promise.resolve().then(() => {
-    if (inputEl.value) {
-      inputEl.value.selectionStart = inputEl.value.selectionEnd = pos;
-      inputEl.value.focus();
-    }
-  });
+  commitTokenAsRef(token, path);
 }
-
 watch(text, () => {
   if (!composing.value) updatePicker();
 });
@@ -537,7 +603,15 @@ function pickSlash(i: number): void {
 }
 
 // ---- @ expansion at send time (§3.3 refBlock) ----
-const EXPAND_RE = /@([^\s@]+(?:, ?[^\s@,]+)*)/g;
+// Only acknowledged chips (chat.composerRefs) expand; raw draft text is sent
+// verbatim. A bare @ in prose (git@github…, emails, @handles) is never
+// treated as a reference.
+//
+// We do NOT inject file content at send time: each chip becomes a
+// 【引用文件：path：行号】 marker plus a one-shot instruction telling the model
+// to read those files itself via its read tool. The agent runs with cwd =
+// project root, so relative paths resolve; reading at inference time means it
+// sees the latest on-disk content rather than a send-time snapshot.
 
 interface RangeOk {
   ok: boolean;
@@ -551,67 +625,69 @@ interface RangeErr {
   totalLines?: number;
 }
 
-function parseRefPart(part: string): { path: string; from: number; to: number } {
-  const m = part.match(SUFFIX_RE);
-  if (!m) return { path: part, from: 0, to: 0 };
-  const [a, b] = m[1].split('-');
-  return {
-    path: part.slice(0, part.length - m[0].length),
-    from: Number(a),
-    to: b === undefined ? 0 : Number(b),
-  };
+/** Validate the ref (existence / workspace containment / line range) WITHOUT
+ * injecting content, and emit its marker. A bad ref still surfaces as the
+ * failure placeholder so it is never silently sent to the model. */
+async function expandRefMarker(r: RefInsert): Promise<string> {
+  const res = await readRangeFor(r);
+  if (!res.ok) return expandRefFailure(r, res as RangeErr);
+  return `【引用文件：${r.path}：${expandRefLabel(r)}】`;
 }
 
-async function expandOne(part: string): Promise<string> {
-  const { path, from, to } = parseRefPart(part.trim());
-  if (!path) return '';
-  const label =
-    from <= 0 ? '全文' : to <= 0 ? `第 ${from} 行` : `第 ${from}-${to} 行`;
-  let res: RangeOk | RangeErr;
+/** Inject the file content (send-time snapshot) into the message. */
+async function expandRefInject(r: RefInsert): Promise<string> {
+  const res = await readRangeFor(r);
+  if (!res.ok) return expandRefFailure(r, res as RangeErr);
+  const ok = res as RangeOk;
+  const label = expandRefLabel(r);
+  const lines = ok.lines.map((l) => `  ${l.n}  ${l.text}`).join('\n');
+  const trunc = ok.truncated ? '\n  …（文件超过 200KB，已截断）' : '';
+  return `【引用文件：${r.path}，${label}】\n${lines}${trunc}\n【引用结束】`;
+}
+
+async function readRangeFor(r: RefInsert): Promise<RangeOk | RangeErr> {
   try {
-    res = await cmd<RangeOk | RangeErr>('read_file_range', {
+    return await cmd<RangeOk | RangeErr>('read_file_range', {
       root: chat.projectDir,
-      relPath: path,
-      from,
-      to,
+      relPath: r.path,
+      from: r.from,
+      to: r.to,
     });
   } catch {
-    res = { ok: false, error: 'unreadable' };
+    return { ok: false, error: 'unreadable' };
   }
-  if (!res.ok) {
-    const err = res as RangeErr;
-    const why =
-      err.error === 'escape'
-        ? '路径超出工作区，已拒绝'
-        : err.error === 'binary'
-          ? '二进制文件，已跳过'
-          : err.error === 'range'
-            ? `行范围超出文件（共 ${err.totalLines ?? 0} 行）`
-            : '文件不存在或不可读';
-    return `【引用文件：${path}：${why}】`;
-  }
-  const ok = res as RangeOk;
-  const lines = ok.lines.map((l) => `  ${l.n}  ${l.text}`).join('\n');
-  const trunc = ok.truncated ? `\n  ${REF_INJECT_NOTE}` : '';
-  return `【引用文件：${path}，${label}】\n${lines}${trunc}\n【引用结束】`;
 }
 
-async function expandReferences(input: string): Promise<string> {
-  const matches = [...input.matchAll(EXPAND_RE)];
-  if (matches.length === 0) return input;
-  let out = '';
-  let last = 0;
-  for (const m of matches) {
-    const idx = m.index ?? 0;
-    out += input.slice(last, idx);
-    const parts = m[1].split(/, ?/);
-    const blocks: string[] = [];
-    for (const p of parts) blocks.push(await expandOne(p));
-    out += blocks.filter(Boolean).join('\n');
-    last = idx + m[0].length;
+function expandRefLabel(r: RefInsert): string {
+  return r.from <= 0 ? '全文' : r.to <= 0 ? `第 ${r.from} 行` : `第 ${r.from}-${r.to} 行`;
+}
+
+function expandRefFailure(r: RefInsert, err: RangeErr): string {
+  const why =
+    err.error === 'escape'
+      ? '路径超出工作区，已拒绝'
+      : err.error === 'binary'
+        ? '二进制文件，已跳过'
+        : err.error === 'range'
+          ? `行范围超出文件（共 ${err.totalLines ?? 0} 行）`
+          : '文件不存在或不可读';
+  return `【引用文件：${r.path}：${why}】`;
+}
+
+/** One-shot instruction appended after the markers, asking the model to read
+ * the referenced files itself (latest content) before answering. */
+const REF_READ_INSTRUCTION =
+  '请先使用你的 read / read_file 工具读取上方列出的【引用文件】（路径相对于项目根目录，即你当前的工作目录），并基于文件的最新内容继续。请勿凭记忆中的旧内容作答。';
+
+async function expandRefs(refs: RefInsert[]): Promise<string> {
+  if (refs.length === 0) return '';
+  if (prefs.refExpandMode === 'inject') {
+    const blocks = (await Promise.all(refs.map((r) => expandRefInject(r)))).filter(Boolean);
+    return blocks.join('\n');
   }
-  out += input.slice(last);
-  return out;
+  const markers = (await Promise.all(refs.map((r) => expandRefMarker(r)))).filter(Boolean);
+  if (markers.length === 0) return '';
+  return markers.join('\n') + '\n\n' + REF_READ_INSTRUCTION;
 }
 
 // ---- permission mode (§3.7) ----
@@ -657,6 +733,7 @@ const sendEnabled = computed(() => {
   return (
     text.value.trim().length > 0 ||
     chat.composerQuotes.length > 0 ||
+    chat.composerRefs.length > 0 ||
     chat.attachments.length > 0
   );
 });
@@ -699,16 +776,17 @@ async function send(): Promise<void> {
   if (!chat.sessionId) return;
   const quoted = quotesToTags(chat.composerQuotes);
   const draft = text.value.trim();
-  if (!quoted && !draft && chat.attachments.length === 0) return;
-  // Only the typed text undergoes @reference expansion — quote bodies are
-  // user-selected content and must not be treated as tokens.
-  const expanded = draft ? await expandReferences(draft) : draft;
-  const full = [quoted, expanded].filter(Boolean).join('\n');
+  if (!quoted && !draft && chat.attachments.length === 0 && chat.composerRefs.length === 0) return;
+  // Only acknowledged ref chips expand into 【引用文件：…】 blocks; quote
+  // bodies and the raw draft text are sent verbatim (never tokenized).
+  const expanded = await expandRefs(chat.composerRefs);
+  const full = [quoted, expanded, draft].filter(Boolean).join('\n');
   const ok = await chat.send(full, [...chat.attachments]);
   if (ok) {
     text.value = '';
     chat.clearComposerQuotes();
     chat.clearAttachments();
+    chat.clearRefs();
     chat.saveDraft(chat.sessionId, '', []); // sent → drop any stored draft
     pickerOpen.value = false;
   }
@@ -790,7 +868,7 @@ function onExpandConfirm(v: string): void {
         {{ item }}
       </div>
       <div class="composer__picker-hint" :style="{ fontSize: prefs.fs(10) + 'px' }">
-        ↑↓ 选择 · Enter 确认 · Esc 关闭 · 选中后可直接补 :起-止 行号，逗号可连引多个
+        ↑↓ 选择 · Enter 确认 · Esc 关闭 · 确认后成为上方引用条，可补 :起-止 行号，逗号可连引多个
       </div>
     </div>
 
@@ -867,8 +945,8 @@ function onExpandConfirm(v: string): void {
   top: -22px;
   z-index: 40;
   color: var(--war-gold);
-  background: #0d1116f0;
-  border: 1px solid #6a5a3f;
+  background: var(--war-panel-dark);
+  border: 1px solid var(--war-border-brown);
   border-radius: 3px;
   padding: 2px 8px;
   white-space: nowrap;
@@ -886,7 +964,7 @@ function onExpandConfirm(v: string): void {
 }
 
 .composer__counter.full {
-  color: #ff8a70;
+  color: var(--war-warn);
 }
 
 .composer__picker {
@@ -901,7 +979,7 @@ function onExpandConfirm(v: string): void {
   border-width: 13px 14px 12px 14px;
   border-image: url('/assets/ui/dropdown/dropdown_panel2.png') 21 23 20 23 fill stretch;
   box-sizing: border-box;
-  background: #0d1116f0 padding-box;
+  background: var(--war-panel-dark) padding-box;
   padding: 8px;
 }
 
@@ -917,13 +995,13 @@ function onExpandConfirm(v: string): void {
 
 .composer__picker-row.active {
   color: var(--war-gold);
-  background: #32509633;
+  background: var(--war-blue-row);
 }
 
 .composer__picker-hint {
   color: var(--war-text-faint);
   padding: 6px 8px 2px;
-  border-top: 1px solid #2a3344;
+  border-top: 1px solid var(--war-border);
   margin-top: 4px;
   font-family: SimSun, serif;
 }
@@ -944,7 +1022,7 @@ function onExpandConfirm(v: string): void {
   display: flex;
   gap: 4px;
   overflow: hidden;
-  background: #10141f;
+  background: var(--war-panel);
   border-radius: 2px;
 }
 
@@ -955,7 +1033,7 @@ function onExpandConfirm(v: string): void {
   min-width: 0;
   resize: none;
   background: transparent;
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   color: var(--war-text);
   caret-color: var(--war-text);
@@ -972,12 +1050,12 @@ function onExpandConfirm(v: string): void {
 
 /* terminal mode: green border + caret so the mode reads at a glance */
 .composer__field.term {
-  border-color: #3f7a52;
-  caret-color: #5cb380;
+  border-color: var(--war-term-border);
+  caret-color: var(--war-term-accent);
 }
 
 .composer__field.term:focus {
-  border-color: #5cb380;
+  border-color: var(--war-term-accent);
 }
 
 .composer__field::placeholder {
@@ -1008,7 +1086,7 @@ function onExpandConfirm(v: string): void {
   user-select: none;
   line-height: 1;
   padding: 4px 6px; /* generous invisible hit area in the corner */
-  background: #10141fcc; /* keep the glyph readable over typed text */
+  background: var(--war-panel-glass); /* keep the glyph readable over typed text */
   border-radius: 3px;
   opacity: 0; /* reveal only when the cursor reaches the corner itself */
   transition: opacity 0.15s ease;

@@ -1,11 +1,13 @@
 {
   "name": "wardex-tauri",
   "private": true,
-  "version": "0.0.2",
+  "version": "0.0.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "bundle:pi": "node scripts/bundle-pi.mjs",
+    "build:with-pi": "npm run bundle:pi && npm run tauri build",
     "tauri": "tauri"
   },
   "dependencies": {

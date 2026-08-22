@@ -30,6 +30,8 @@ use crate::store::paths::Paths;
 
 pub const DEFAULT_USER_NAME: &str = "阿尔萨斯";
 pub const PERMISSION_MODES: [&str; 4] = ["default", "plan", "auto", "yolo"];
+/// 界面风格（themes.ts 注册表）：war = 魔兽贴图风（默认）；pure = 纯净风。
+pub const UI_STYLES: [&str; 2] = ["war", "pure"];
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrefsError {
@@ -61,6 +63,14 @@ pub struct UserPrefs {
     action_bay_height: Option<i64>,
     #[serde(rename = "actionBayWidth", skip_serializing_if = "Option::is_none")]
     action_bay_width: Option<i64>,
+    #[serde(rename = "backgroundPath")]
+    background_path: String,
+    #[serde(rename = "backgroundType")]
+    background_type: String,
+    #[serde(rename = "bgBrightness")]
+    bg_brightness: f64,
+    #[serde(rename = "chatAlpha")]
+    chat_alpha: f64,
     #[serde(rename = "codegraphInstalled", skip_serializing_if = "Option::is_none")]
     codegraph_installed: Option<bool>,
     #[serde(rename = "composerHeight", skip_serializing_if = "Option::is_none")]
@@ -71,20 +81,32 @@ pub struct UserPrefs {
     monitor_chat_height: Option<i64>,
     #[serde(rename = "monitorChatWidth", skip_serializing_if = "Option::is_none")]
     monitor_chat_width: Option<i64>,
+    #[serde(rename = "monitorFootmen")]
+    monitor_footmen: Map<String, Value>,
     #[serde(rename = "monitorLayout")]
     monitor_layout: Map<String, Value>,
+    #[serde(rename = "monitorZones")]
+    monitor_zones: Vec<Value>,
+    #[serde(rename = "monitorZonesOn")]
+    monitor_zones_on: bool,
     #[serde(rename = "panelLayout")]
     panel_layout: Map<String, Value>,
     #[serde(rename = "panelWidth", skip_serializing_if = "Option::is_none")]
     panel_width: Option<i64>,
     #[serde(rename = "permissionMode")]
     permission_mode: String,
+    #[serde(rename = "pageColor")]
+    page_color: String,
     #[serde(rename = "previewHeight")]
     preview_height: i64,
     #[serde(rename = "previewWidth")]
     preview_width: i64,
     #[serde(rename = "railWidth", skip_serializing_if = "Option::is_none")]
     rail_width: Option<i64>,
+    #[serde(rename = "taskDoneNotify")]
+    task_done_notify: bool,
+    #[serde(rename = "uiStyle")]
+    ui_style: String,
     #[serde(rename = "userAvatarPath")]
     user_avatar_path: String,
     #[serde(rename = "userName")]
@@ -98,12 +120,22 @@ struct PrefsFile {
     action_bay_height: Option<i64>,
     #[serde(rename = "actionBayWidth")]
     action_bay_width: Option<i64>,
+    #[serde(rename = "backgroundPath")]
+    background_path: String,
+    #[serde(rename = "backgroundType")]
+    background_type: String,
+    #[serde(rename = "bgBrightness", default = "default_bg_brightness")]
+    bg_brightness: f64,
+    #[serde(rename = "chatAlpha", default = "default_chat_alpha")]
+    chat_alpha: f64,
     #[serde(rename = "codegraphInstalled")]
     codegraph_installed: Option<bool>,
     #[serde(rename = "composerHeight")]
     composer_height: Option<i64>,
     #[serde(rename = "permissionMode", default = "default_permission_mode")]
     permission_mode: String,
+    #[serde(rename = "pageColor", default = "default_page_color")]
+    page_color: String,
     #[serde(rename = "userAvatarPath")]
     user_avatar_path: String,
     #[serde(rename = "userName")]
@@ -114,14 +146,24 @@ struct PrefsFile {
     preview_height: i64,
     #[serde(rename = "railWidth")]
     rail_width: Option<i64>,
+    #[serde(rename = "taskDoneNotify", default = "default_task_done_notify")]
+    task_done_notify: bool,
+    #[serde(rename = "uiStyle", default = "default_ui_style")]
+    ui_style: String,
     #[serde(rename = "fontScale", default = "default_font_scale")]
     font_scale: f64,
     #[serde(rename = "monitorChatHeight")]
     monitor_chat_height: Option<i64>,
     #[serde(rename = "monitorChatWidth")]
     monitor_chat_width: Option<i64>,
+    #[serde(rename = "monitorFootmen")]
+    monitor_footmen: Map<String, Value>,
     #[serde(rename = "monitorLayout")]
     monitor_layout: Map<String, Value>,
+    #[serde(rename = "monitorZones")]
+    monitor_zones: Vec<Value>,
+    #[serde(rename = "monitorZonesOn", default = "default_monitor_zones_on")]
+    monitor_zones_on: bool,
     #[serde(rename = "panelLayout")]
     panel_layout: Map<String, Value>,
     #[serde(rename = "panelWidth")]
@@ -133,6 +175,11 @@ impl Default for PrefsFile {
         Self {
             action_bay_height: None,
             action_bay_width: None,
+            background_path: String::new(),
+            background_type: String::new(),
+            bg_brightness: default_bg_brightness(),
+            chat_alpha: default_chat_alpha(),
+            page_color: default_page_color(),
             codegraph_installed: None,
             composer_height: None,
             permission_mode: default_permission_mode(),
@@ -141,18 +188,50 @@ impl Default for PrefsFile {
             preview_width: 0,
             preview_height: 0,
             rail_width: None,
+            task_done_notify: default_task_done_notify(),
+            ui_style: default_ui_style(),
             font_scale: default_font_scale(),
             monitor_chat_height: None,
             monitor_chat_width: None,
+            monitor_footmen: Map::new(),
             monitor_layout: Map::new(),
+            monitor_zones: Vec::new(),
+            monitor_zones_on: default_monitor_zones_on(),
             panel_layout: Map::new(),
             panel_width: None,
         }
     }
 }
 
+fn default_monitor_zones_on() -> bool {
+    true
+}
+
 fn default_permission_mode() -> String {
     "default".to_string()
+}
+
+fn default_ui_style() -> String {
+    "war".to_string()
+}
+
+/// 对话页内容透明度（纯净风格，0.5~1.0，默认 0.8）。
+fn default_chat_alpha() -> f64 {
+    0.8
+}
+
+/// 背景亮度（纯净风格，0.5~1.5，默认 1.0）。
+fn default_bg_brightness() -> f64 {
+    1.0
+}
+
+/// 页面颜色（纯净风格表面层底色，hex #rrggbb，默认纯白）。
+fn default_page_color() -> String {
+    "#ffffff".to_string()
+}
+
+fn default_task_done_notify() -> bool {
+    true
 }
 
 fn default_font_scale() -> f64 {
@@ -164,6 +243,11 @@ impl Default for UserPrefs {
         Self {
             action_bay_height: None,
             action_bay_width: None,
+            background_path: String::new(),
+            background_type: String::new(),
+            bg_brightness: default_bg_brightness(),
+            chat_alpha: default_chat_alpha(),
+            page_color: default_page_color(),
             codegraph_installed: None,
             composer_height: None,
             permission_mode: default_permission_mode(),
@@ -172,10 +256,15 @@ impl Default for UserPrefs {
             preview_width: 0,
             preview_height: 0,
             rail_width: None,
+            task_done_notify: default_task_done_notify(),
+            ui_style: default_ui_style(),
             font_scale: 1.0,
             monitor_chat_height: None,
             monitor_chat_width: None,
+            monitor_footmen: Map::new(),
             monitor_layout: Map::new(),
+            monitor_zones: Vec::new(),
+            monitor_zones_on: default_monitor_zones_on(),
             panel_layout: Map::new(),
             panel_width: None,
         }
@@ -263,12 +352,50 @@ fn clamp_font_scale(v: f64) -> f64 {
     v.clamp(0.85, 1.30)
 }
 
+/// 对话页透明度：0.5（半透明）~ 1.0（不透明）。
+pub const CHAT_ALPHA_MIN: f64 = 0.5;
+pub const CHAT_ALPHA_MAX: f64 = 1.0;
+pub const BG_BRIGHTNESS_MIN: f64 = 0.5;
+pub const BG_BRIGHTNESS_MAX: f64 = 1.5;
+
+fn clamp_chat_alpha(v: f64) -> f64 {
+    if !v.is_finite() {
+        return 0.8;
+    }
+    v.clamp(CHAT_ALPHA_MIN, CHAT_ALPHA_MAX)
+}
+
+fn clamp_bg_brightness(v: f64) -> f64 {
+    if !v.is_finite() {
+        return 1.0;
+    }
+    v.clamp(BG_BRIGHTNESS_MIN, BG_BRIGHTNESS_MAX)
+}
+
+/// 页面颜色：必须是 #rrggbb，否则回默认纯白。
+fn clamp_page_color(v: &str) -> String {
+    let hex = v.trim().to_lowercase();
+    if hex.len() == 7
+        && hex.starts_with('#')
+        && hex[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        hex
+    } else {
+        default_page_color()
+    }
+}
+
 impl UserPrefs {
     pub fn load(paths: &Paths) -> Self {
         let file: PrefsFile = fs::read(paths.user_prefs_path())
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        let ui_style = if UI_STYLES.contains(&file.ui_style.as_str()) {
+            file.ui_style.clone()
+        } else {
+            default_ui_style()
+        };
         // Old files only had per-panel widths → migrate the widest one
         // into the shared panelWidth so the tuned width is preserved.
         let legacy_width = legacy_panel_width(&file.panel_layout);
@@ -277,6 +404,11 @@ impl UserPrefs {
             permission_mode: file.permission_mode,
             action_bay_height: file.action_bay_height.map(clamp_action_bay_height),
             action_bay_width: file.action_bay_width.map(clamp_action_bay_width),
+            background_path: file.background_path,
+            background_type: file.background_type,
+            chat_alpha: clamp_chat_alpha(file.chat_alpha),
+            bg_brightness: clamp_bg_brightness(file.bg_brightness),
+            page_color: clamp_page_color(&file.page_color),
             codegraph_installed: file.codegraph_installed,
             composer_height: file.composer_height.map(clamp_composer_height),
             user_avatar_path: String::new(),
@@ -284,10 +416,15 @@ impl UserPrefs {
             preview_width: clamp_preview_size(file.preview_width),
             preview_height: clamp_preview_size(file.preview_height),
             rail_width: file.rail_width.map(clamp_rail_width),
+            task_done_notify: file.task_done_notify,
+            ui_style,
             font_scale: clamp_font_scale(file.font_scale),
             monitor_chat_height: file.monitor_chat_height.map(clamp_monitor_chat_height),
             monitor_chat_width: file.monitor_chat_width.map(clamp_monitor_chat_width),
+            monitor_footmen: file.monitor_footmen,
             monitor_layout: file.monitor_layout,
+            monitor_zones: file.monitor_zones,
+            monitor_zones_on: file.monitor_zones_on,
             panel_layout: file.panel_layout,
             panel_width: file.panel_width.map(clamp_panel_width).or(legacy_width),
         };
@@ -404,6 +541,21 @@ impl UserPrefs {
         self.save(paths)
     }
 
+    // ---- taskDoneNotify (desktop notification when a background session's
+    // turn completes — the monitor "步兵" finishing) ----
+
+    pub fn task_done_notify(&self) -> bool {
+        self.task_done_notify
+    }
+
+    pub fn set_task_done_notify(&mut self, paths: &Paths, v: bool) -> Result<(), PrefsError> {
+        if self.task_done_notify == v {
+            return Ok(());
+        }
+        self.task_done_notify = v;
+        self.save(paths)
+    }
+
     // ---- shared dock panel width (dragged once, applies to all tabs) ----
 
     pub fn panel_width(&self) -> i64 {
@@ -479,6 +631,74 @@ impl UserPrefs {
         self.save(paths)
     }
 
+    // ---- uiStyle (界面风格: war | pure) ----
+
+    pub fn ui_style(&self) -> &str {
+        &self.ui_style
+    }
+
+    /// 白名单 war|pure，非法值回落默认 war；立即落盘。
+    pub fn set_ui_style(&mut self, paths: &Paths, style: &str) -> Result<(), PrefsError> {
+        let style = if UI_STYLES.contains(&style) {
+            style.to_string()
+        } else {
+            default_ui_style()
+        };
+        if self.ui_style == style {
+            return Ok(());
+        }
+        self.ui_style = style;
+        self.save(paths)
+    }
+
+    // ---- chatAlpha (对话页透明度: 0.5~1.0) ----
+
+    pub fn chat_alpha(&self) -> f64 {
+        self.chat_alpha
+    }
+
+    /// 立即落盘；非法值 clamp 到 [0.5, 1.0]。
+    pub fn set_chat_alpha(&mut self, paths: &Paths, alpha: f64) -> Result<(), PrefsError> {
+        let alpha = clamp_chat_alpha(alpha);
+        if (self.chat_alpha - alpha).abs() < f64::EPSILON {
+            return Ok(());
+        }
+        self.chat_alpha = alpha;
+        self.save(paths)
+    }
+
+    // ---- pageColor (纯净风格表面层底色, hex #rrggbb) ----
+
+    pub fn page_color(&self) -> String {
+        self.page_color.clone()
+    }
+
+    /// 立即落盘；非法 hex 回默认纯白。
+    pub fn set_page_color(&mut self, paths: &Paths, hex: String) -> Result<(), PrefsError> {
+        let hex = clamp_page_color(&hex);
+        if self.page_color == hex {
+            return Ok(());
+        }
+        self.page_color = hex;
+        self.save(paths)
+    }
+
+    // ---- bgBrightness (纯净风格背景亮度: 0.5~1.5, 默认 1.0) ----
+
+    pub fn bg_brightness(&self) -> f64 {
+        self.bg_brightness
+    }
+
+    /// 立即落盘；非法值 clamp 到 [0.5, 1.5]。
+    pub fn set_bg_brightness(&mut self, paths: &Paths, v: f64) -> Result<(), PrefsError> {
+        let v = clamp_bg_brightness(v);
+        if (self.bg_brightness - v).abs() < f64::EPSILON {
+            return Ok(());
+        }
+        self.bg_brightness = v;
+        self.save(paths)
+    }
+
     // ---- avatar (§7.2) ----
 
     pub fn user_avatar_path(&self) -> &str {
@@ -526,6 +746,83 @@ impl UserPrefs {
         self.save(paths)
     }
 
+    // ---- 界面背景 (custom image/video upload, set from ConfigPage) ----
+
+    /// "image" | "video" | "" (empty = no custom background → fall back to
+    /// the exe-adjacent background.json / default video).
+    pub fn background_type(&self) -> &str {
+        &self.background_type
+    }
+
+    /// Absolute path to the copied custom background file ("" = none).
+    pub fn background_path(&self) -> &str {
+        &self.background_path
+    }
+
+    pub fn has_custom_background(&self) -> bool {
+        !self.background_path.is_empty()
+    }
+
+    /// setBackgroundFromFile: copy the user's image/video into the data dir
+    /// as a uniquely-named file and store its path + inferred type. Each
+    /// upload gets a NEW filename so the WebView sees a fresh src URL (a
+    /// fixed name would serve the cached frame and look like a failed
+    /// change), and the previous custom file is removed. Returns the
+    /// destination path, or "" when the file is missing/unsupported.
+    pub fn set_background_from_file(&mut self, paths: &Paths, local_path: &str) -> Result<String, PrefsError> {
+        const BG_IMAGE_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "webp", "bmp", "gif"];
+        const BG_VIDEO_EXTS: [&str; 4] = ["mp4", "webm", "mov", "mkv"];
+        let path = file_url_to_local(local_path);
+        if path.is_empty() || !std::path::Path::new(&path).is_file() {
+            return Ok(String::new());
+        }
+        let src_ext = std::path::Path::new(&path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let bg_type = if BG_VIDEO_EXTS.contains(&src_ext.as_str()) {
+            "video"
+        } else {
+            "image"
+        };
+        if bg_type == "image" && !BG_IMAGE_EXTS.contains(&src_ext.as_str()) {
+            return Ok(String::new()); // unsupported format
+        }
+        let dest_ext = if bg_type == "video" { "mp4" } else { src_ext.as_str() };
+        // Unique name per upload (nanosecond timestamp) → fresh src URL for
+        // the WebView and no overwrite-in-use conflicts with the old file.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dest = paths.root().join(format!("background_custom_{nanos}.{dest_ext}"));
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&path, &dest)?;
+        // Drop the previous custom file (never the just-copied one).
+        let prev = std::mem::take(&mut self.background_path);
+        if !prev.is_empty() && std::path::Path::new(&prev).exists() && prev != dest.to_string_lossy() {
+            let _ = fs::remove_file(&prev);
+        }
+        let dest_str = dest.to_string_lossy().into_owned();
+        self.background_path = dest_str.clone();
+        self.background_type = bg_type.to_string();
+        self.save(paths)?;
+        Ok(dest_str)
+    }
+
+    pub fn clear_background(&mut self, paths: &Paths) -> Result<(), PrefsError> {
+        if self.background_path.is_empty() {
+            return Ok(());
+        }
+        let _ = fs::remove_file(&self.background_path);
+        self.background_path.clear();
+        self.background_type.clear();
+        self.save(paths)
+    }
+
     // ---- panelLayout (new field; absent in old files) ----
 
     pub fn panel_layout(&self) -> &Map<String, Value> {
@@ -552,6 +849,59 @@ impl UserPrefs {
                 source: e,
             })?;
         self.panel_layout.insert(panel_id.to_string(), value);
+        self.save(paths)
+    }
+
+    // ---- monitorFootmen (monitor page: infantry position + priority mark;
+    // key=sessionId, value={rx, ry, priority} — world-ratio coords so the
+    // sandbox survives window resizes and restarts) ----
+
+    pub fn monitor_footmen(&self) -> &Map<String, Value> {
+        &self.monitor_footmen
+    }
+
+    /// Persist one infantry's sandbox position + priority mark; entry=None
+    /// clears it (session deleted / mark removed → back to slot).
+    pub fn set_monitor_footman(
+        &mut self,
+        paths: &Paths,
+        session_id: &str,
+        entry: Option<Value>,
+    ) -> Result<(), PrefsError> {
+        match entry {
+            Some(v) => {
+                self.monitor_footmen.insert(session_id.to_string(), v);
+            }
+            None => {
+                self.monitor_footmen.remove(session_id);
+            }
+        }
+        self.save(paths)
+    }
+
+    // ---- monitorZones (monitor page: priority regions; frontend renders
+    // its default Eisenhower template when the list is empty) ----
+
+    pub fn monitor_zones(&self) -> &Vec<Value> {
+        &self.monitor_zones
+    }
+
+    /// Replace the whole zone list (frontend holds the full set).
+    pub fn set_monitor_zones(&mut self, paths: &Paths, zones: Vec<Value>) -> Result<(), PrefsError> {
+        self.monitor_zones = zones;
+        self.save(paths)
+    }
+
+    /// Master show/hide switch for all zones (floating toggle on the field).
+    pub fn monitor_zones_on(&self) -> bool {
+        self.monitor_zones_on
+    }
+
+    pub fn set_monitor_zones_on(&mut self, paths: &Paths, v: bool) -> Result<(), PrefsError> {
+        if self.monitor_zones_on == v {
+            return Ok(());
+        }
+        self.monitor_zones_on = v;
         self.save(paths)
     }
 
@@ -759,6 +1109,42 @@ mod tests {
     }
 
     #[test]
+    fn monitor_zones_and_footmen_persist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+
+        let mut prefs = UserPrefs::load(&paths);
+        // Zones master switch defaults ON; footmen/zones default empty.
+        assert!(prefs.monitor_zones_on());
+        assert!(prefs.monitor_footmen().is_empty());
+        assert!(prefs.monitor_zones().is_empty());
+
+        prefs.set_monitor_zones_on(&paths, false).unwrap();
+        assert!(!prefs.monitor_zones_on());
+
+        prefs
+            .set_monitor_footman(
+                &paths,
+                "s1",
+                Some(serde_json::json!({ "rx": 0.3, "ry": 0.2, "priority": 1 })),
+            )
+            .unwrap();
+        prefs
+            .set_monitor_zones(&paths, vec![serde_json::json!({ "id": "q1", "name": "重要·紧急" })])
+            .unwrap();
+        assert_eq!(prefs.monitor_zones().len(), 1);
+        assert_eq!(prefs.monitor_footmen().len(), 1);
+
+        prefs.set_monitor_footman(&paths, "s1", None).unwrap();
+        assert!(prefs.monitor_footmen().is_empty());
+
+        drop(prefs);
+        let reloaded = UserPrefs::load(&paths);
+        assert!(!reloaded.monitor_zones_on());
+        assert_eq!(reloaded.monitor_zones().len(), 1);
+    }
+
+    #[test]
     fn panel_width_migrates_from_legacy_panel_layout() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = Paths::new(tmp.path().to_path_buf());
@@ -770,5 +1156,42 @@ mod tests {
 
         let prefs = UserPrefs::load(&paths);
         assert_eq!(prefs.panel_width(), 230); // widest legacy width
+    }
+
+    #[test]
+    fn background_import_clears_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::new(tmp.path().to_path_buf());
+        let mut prefs = UserPrefs::load(&paths);
+
+        // No custom background by default.
+        assert!(!prefs.has_custom_background());
+
+        // A tiny PNG source → copied into the data root, typed "image".
+        let src = tmp.path().join("src_bg.png");
+        std::fs::write(&src, b"\x89PNG\r\n\x1a\n").unwrap();
+        let dest = prefs.set_background_from_file(&paths, &src.to_string_lossy()).unwrap();
+        assert!(!dest.is_empty());
+        assert_eq!(prefs.background_type(), "image");
+        assert!(prefs.has_custom_background());
+        assert!(std::path::Path::new(&dest).exists());
+
+        // Unsupported extension → refused (empty result, no change).
+        let bad = tmp.path().join("src_bg.txt");
+        std::fs::write(&bad, b"hi").unwrap();
+        assert!(prefs.set_background_from_file(&paths, &bad.to_string_lossy()).unwrap().is_empty());
+        assert_eq!(prefs.background_type(), "image");
+
+        // Round-trips through disk.
+        drop(prefs);
+        let reloaded = UserPrefs::load(&paths);
+        assert!(reloaded.has_custom_background());
+        assert_eq!(reloaded.background_type(), "image");
+
+        // Clear removes the file and the stored path.
+        let mut reloaded = reloaded;
+        reloaded.clear_background(&paths).unwrap();
+        assert!(!reloaded.has_custom_background());
+        assert!(!std::path::Path::new(&dest).exists());
     }
 }

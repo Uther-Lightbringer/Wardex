@@ -131,7 +131,7 @@
 ## 6. 布局与导航
 
 - 左面板（宽 48%）：`Agent 配置` 标题 + 计数行（`共 N 个 · 点击选中编辑`，空列表时 `暂无 Agent — 点击下方新建`）+ Agent 列表 + `新建 Agent` 按钮（主菜单尺寸）。
-- 右面板：可滚动表单（Flickable），依次是 **应用级设置**（我的头像 / 我的名字 / 界面字体缩放）→ 分隔线 → **Agent 编辑器**。
+- 右面板：可滚动表单（Flickable），依次是 **应用级设置**（我的头像 / 我的名字 / 界面字体缩放 / 界面风格 / 任务完成通知 / 界面背景）→ 分隔线 → **Agent 编辑器**。
 - 右下操作湾（贴右对齐的窄铁条框）：`保存并返回`、`返回(B)`。
 - `Esc` / `返回(B)` → `tryBack()`：有未保存修改弹 `未保存的更改` 对话框（`保存并返回` / `丢弃` / `取消` 三钮，`ui/ConfigPage.qml:1033-1066`）；无修改直接返回主菜单。
 - 页面进入时：有 agent 则自动选中**默认 Agent** 载入编辑器（`ui/ConfigPage.qml:1068-1074`）。
@@ -145,9 +145,11 @@
 - **点击行**：若当前编辑有未保存修改且切换到另一行 → **先自动保存当前**再载入新行（`ui/ConfigPage.qml:352-356`）。
 - `新建 Agent`：当前 dirty 也先自动保存；创建名为 `新 Agent` 的记录（默认 provider kimi）→ 选中新行 → 名称输入框聚焦全选 → 状态行 `已新建 Agent`。cliPath 为空会触发自动探测（见 9.2）。
 
-## 8. 应用级设置（表单顶部）
+## 8. 应用级设置（「设置」页 SettingsPage.vue）
 
-旧: `ui/ConfigPage.qml:406-552`
+> 入口调整：原「配置」页拆分为两个并列入口（Hub 更多功能）：
+> **设置(S)**（本页，应用级偏好：共性 + 个性）与 **Agent 配置(C)**（原配置页只留
+> Agent 列表 + 编辑器，§9）。设置页所有项立即生效 + 落盘。
 
 ### 8.1 我的头像
 
@@ -162,6 +164,19 @@
 ### 8.3 界面字体缩放
 
 - 下拉四档：`85%` / `100%` / `115%` / `130%` → `fontScale` 0.85 / 1.0 / 1.15 / 1.30；当前值取最近档。**立即生效**并持久化，作用于聊天气泡、输入框、会话列表、本表单等主要阅读区（各页面 `fs()` 辅助函数；共享控件艺术不缩放，见 ../ui-design.md）。
+
+### 8.4 界面风格
+
+- 「设置 → 个性 → 界面风格」下拉：**魔兽风格**（默认，贴图风） / **纯净风格**（浅色半透明 CSS 渲染）。选择**立即生效 + 落盘**（`user_prefs.json` 的 `uiStyle` 字段，Rust `set_ui_style`）。
+- 纯净风格：无铁轨/无剑形光标/系统字体；背景默认纯白，但用户自定义上传的背景图片/视频与 background.json 覆盖仍然显示；按钮为常规紧凑（高 30px）。**对话页内容为半透明**（主卡/铁轨卡/气泡/输入区），自定义背景透出。实现细节见 ../ui-design.md §8.5。
+
+### 8.5 共性 / 个性分组
+
+- 设置页分两组：**共性**（两种风格始终显示）= 我的名字、界面字体缩放、任务完成通知、用户头像、界面背景；**个性**（随界面风格）= 界面风格 + 该风格专属设置项。专属项由 `src/lib/themes.ts` 的 `ThemeDef.settings` 注册表驱动：`war: []`（暂无，未来可加铁轨/剑形光标开关）、`pure: ['chatAlpha', 'pageColor']`。
+- **任务完成通知**（`user_prefs.json` 的 `taskDoneNotify`，默认开，Rust `set_task_done_notify`）：后台会话（含监控页步兵）turn 完成时弹 Windows 桌面通知（`EventSink::notify_always`）——**窗口聚焦也弹**，监控页盯着看时 NEW 角标容易漏看。其余桌面通知（子 Agent 完成、待办到期）仍走 `notify`，仅在窗口失焦时弹。
+- **对话页透明度**（`user_prefs.json` 的 `chatAlpha`，0.5~1.0，默认 0.8，Rust `set_chat_alpha`）：下拉六档 `100% / 90% / 80% / 70% / 60% / 50%` + **手动输入框**（50~100%，任意整数，如 77 → 0.77），两者同步，立即生效 + 落盘。仅影响纯净风格下对话页内容（主卡/气泡/输入区）的半透明程度，数值越低越能看到背景图/视频。前端 `App.vue` 写成 `<html>` 的 `--war-chat-alpha` CSS 变量，`warTheme.css` 用 `rgba(var(--war-page-rgb), var(--war-chat-alpha,.8))` 引用（输入区为 `calc(... - 0.08)`）。
+- **页面颜色**（`user_prefs.json` 的 `pageColor`，hex #rrggbb，默认纯白，Rust `set_page_color`）：预置色板 6 色（纯白/浅灰/米白/浅蓝/浅绿/浅紫）点击选中，立即生效 + 落盘。含义 = 纯净风格下**表面层底色**（对话页卡片、菜单铁框、监控面板等 UI 表面，在背景之上）；背景图/视频是最底层，半透明表面会透出它，二者不冲突。`App.vue` 把 hex 解析成 `--war-page-color`（hex）与 `--war-page-rgb`（"r, g, b" 三元组）两个变量；pure 块的 `--war-panel*`/`--war-glass*`/气泡/监控兜底全部从固定白改为 `rgb(var(--war-page-rgb))` / `rgba(var(--war-page-rgb), a)`。
+- **背景亮度**（`user_prefs.json` 的 `bgBrightness`，0.5~1.5，默认 1.0，Rust `set_bg_brightness`）：下拉五档 `50% / 75% / 100% / 125% / 150%` + **手动输入框**（50~150%），同步落盘。作用对象 = 背景图/视频本身（`App.vue` 的 `.bg-img`/`.bg-video` 加 `filter: brightness(var(--war-bg-brightness, 1))`，war 下变量缺省无影响），表面层半透明时效果尤其明显；底部 dim 暗角渐变不受影响。
 
 ## 9. Agent 编辑器
 
@@ -207,11 +222,13 @@
 
 旧: `ui/ConfigPage.qml:824-871`
 
-- `设为默认`：先保存当前 → `setDefault` → 状态行 `已设为默认` / 失败原因。默认 Agent 是新建会话使用的 agent（`ChatController::startNewSessionImpl` 找不到可用默认时拒绝并报 `请先在配置中创建 Kimi Agent 并设为默认`，旧: `src/ChatController.cpp:692-698`）。
+- `设为默认`：先保存当前 → `setDefault` → 状态行 `已设为默认` / 失败原因。默认 Agent 是新建会话使用的 agent（找不到可用默认时拒绝并报 `请先在配置中创建 Pi Agent 并设为默认`）。
 - `测试连接`（`testAgent`，旧: `src/AgentStore.cpp:236-…`）：先保存当前；按钮文案 `测试中…` 且禁用（全局同时只跑一次）。语义：
-  - 若 CLI 路径为裸值且是内置 provider → 先发起探测，状态行 `正在解析 CLI 路径，完成后请再点测试连接`，本次不测试。
-  - 否则按 ChatController 同一约定 spawn CLI（provider 的 env 注入 + acpArgs + extraArgs；Windows `.cmd/.bat` shim 包 `cmd.exe /c`），写入一条 ACP `initialize` JSON-RPC 请求，**成功判据 = 收到合法的 initialize 响应**（不是"进程起来了"）；成功/失败/超时/崩溃都恰好收尾一次，结果文本显示在表单底部状态区（与 statusMsg 拼接换行）。
+  - 若 CLI 路径为裸值且是内置 provider → 先发起探测，状态行 `正在解析 CLI 路径，完成后请再点测试连接`，本次不测试。pi 不走此分支（其二进制/插件目录在后台解析）。
+  - 否则按 ChatController 同一约定 spawn CLI（provider 的 env 注入 + acpArgs + extraArgs；Windows `.cmd/.bat` shim 包 `cmd.exe /c`），写入一条 ACP `initialize` JSON-RPC 请求，**成功判据 = 收到合法的 initialize 响应 + 一次真实模型调用**（`session/new` + 一条 prompt，**且流式回复包含预期短语**，不是"进程起来了"）；成功/失败/超时/崩溃都恰好收尾一次。**pi** 不协议 ACP：测试改为 spawn 编译二进制、驱动一次真实 `{"type":"prompt"}` RPC 调用。
+  - 联通测试消息：ACP 发 `session/prompt` 文本 `这是一条联通测试。请你直接回复"为了艾泽拉斯"。`；pi 发 `{"type":"prompt","message":"这是一条联通测试。请你直接回复"为了艾泽拉斯"。"}`。两者都以**累计流式文本是否包含 `为了艾泽拉斯`** 为成功判据（ACP 在 id:3 收尾时判定；pi 在 `turn_end`/`agent_settled` 时判定）。
   - provider 不支持对话 → `该 Provider 暂不支持测试`。
+  - 结果：状态行直接显示 `✔ 测试成功` / `✘ 测试失败：<原因>`；旁边出现 `查看测试结果` 按钮，点开弹窗展示本次发送的请求与收到的响应（transcript，`probe.rs TestResult`）。
 - `删除 Agent`：立即删除（**无确认框**）→ 选中默认 agent（若无则清空选择）→ 状态行 `已删除`。
 
 ### 9.4 MCP Servers 容错

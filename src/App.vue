@@ -6,23 +6,25 @@
 // Pages are built on first visit (nav.visited) and kept resident (v-show) —
 // the old cached-Loader behaviour. All navigation runs through the nav store
 // three-stage transition (770ms up / popUp SFX 1280ms gate / 750ms drop).
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getVersion } from '@tauri-apps/api/app';
 import { isTauri } from './lib/tauri';
+import { DEFAULT_BG } from './lib/background';
+import { themeOf } from './lib/themes';
 import MainMenuPage from './pages/MainMenuPage.vue';
 import HubPage from './pages/HubPage.vue';
 import ConfigPage from './pages/ConfigPage.vue';
+import SettingsPage from './pages/SettingsPage.vue';
 import SessionSelectPage from './pages/SessionSelectPage.vue';
 import ChatPage from './pages/ChatPage.vue';
 import TodoPage from './pages/TodoPage.vue';
 import UsagePage from './pages/UsagePage.vue';
 import MonitorPage from './pages/MonitorPage.vue';
 import FolderBrowserDialog from './components/FolderBrowserDialog.vue';
-import { DEFAULT_BG, loadBackground, type BgConfig } from './lib/background';
 import { preloadSfx } from './lib/sfx';
 import { useNavStore, type PageId } from './stores/nav';
 import { useUiStore } from './stores/ui';
-import { usePrefsStore } from './stores/prefs';
+import { hexToRgbTriple, usePrefsStore } from './stores/prefs';
 import { useProjectsStore } from './stores/projects';
 import { useChatStore } from './stores/chat';
 
@@ -32,11 +34,52 @@ const prefs = usePrefsStore();
 const projects = useProjectsStore();
 const chat = useChatStore();
 
-const bg = ref<BgConfig>(DEFAULT_BG);
 const version = ref('0.3');
+
+// ---- 界面风格（war | pure）：挂 data-theme 到 <html> 供全局 CSS 覆盖 ----
+const theme = computed(() => themeOf(prefs.uiStyle));
+watch(
+  () => theme.value.id,
+  (id) => document.documentElement.setAttribute('data-theme', id),
+  { immediate: true },
+);
+// 对话页透明度（纯净风格）→ CSS 变量，warTheme.css 的 rgba() 直接引用。
+watch(
+  () => prefs.chatAlpha,
+  (a) => document.documentElement.style.setProperty('--war-chat-alpha', String(a)),
+  { immediate: true },
+);
+// 页面颜色（纯净风格表面层底色）→ hex + rgb 三元组两个变量：
+//   --war-page-color  供需要原始 hex 的地方（如设置页色板高亮）；
+//   --war-page-rgb    供 rgba(var(--war-page-rgb), alpha) 半透明表面。
+watch(
+  () => prefs.pageColor,
+  (c) => {
+    const root = document.documentElement;
+    root.style.setProperty('--war-page-color', c);
+    root.style.setProperty('--war-page-rgb', hexToRgbTriple(c));
+  },
+  { immediate: true },
+);
+// 背景亮度（纯净风格，作用于背景图/视频）→ --war-bg-brightness，.bg-img/.bg-video 的 filter 引用。
+watch(
+  () => prefs.bgBrightness,
+  (v) => document.documentElement.style.setProperty('--war-bg-brightness', String(v)),
+  { immediate: true },
+);
+
+/** 实际渲染的背景：war = 内置视频/自定义照旧；pure = 默认纯白，但用户
+ * 自定义上传的背景（图片/视频）与 background.json 覆盖仍然显示（决策 1）。 */
+const renderBg = computed(() => {
+  const b = prefs.background;
+  if (theme.value.kind !== 'plain') return b;
+  if (prefs.bgType) return b; // 用户上传的自定义背景照常显示
+  return b.source !== DEFAULT_BG.source ? b : null; // background.json 覆盖显示；否则纯白
+});
 
 const overlayPages: { id: PageId; comp: unknown }[] = [
   { id: 'hub', comp: HubPage },
+  { id: 'settings', comp: SettingsPage },
   { id: 'config', comp: ConfigPage },
   { id: 'sessionSelect', comp: SessionSelectPage },
   { id: 'chat', comp: ChatPage },
@@ -72,7 +115,6 @@ onMounted(() => {
   preloadSfx();
   void prefs.load();
   void projects.load();
-  void loadBackground().then((c) => (bg.value = c));
   onResize();
   if (isTauri) void getVersion().then((v) => (version.value = v));
   window.addEventListener('resize', onResize);
@@ -81,14 +123,14 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :data-theme="theme.id">
     <!-- background stack: gradient base → image/video → dim gradient (§8.2) -->
-    <div class="bg-base"></div>
-    <img v-if="bg.type === 'image'" class="bg-img" :src="bg.source" draggable="false" />
+    <div class="bg-base" :class="{ 'is-pure': !renderBg }"></div>
+    <img v-if="renderBg?.type === 'image'" class="bg-img" :src="renderBg.source" draggable="false" />
     <video
-      v-else-if="bg.type === 'video'"
+      v-else-if="renderBg?.type === 'video'"
       class="bg-video"
-      :src="bg.source"
+      :src="renderBg.source"
       autoplay
       muted
       loop
@@ -100,8 +142,9 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
     <!-- main menu (always mounted; slides via nav.menuY, input-gated) -->
     <MainMenuPage />
 
-    <!-- overlay pages -->
-    <div class="overlay" :style="{ transform: `translateY(${nav.overlayY}px)` }">
+    <!-- overlay pages (hidden on main: pure keeps overlayY=0, so without
+         v-show the transparent full-screen band would swallow menu clicks) -->
+    <div class="overlay" v-show="nav.page !== 'main'" :style="{ transform: `translateY(${nav.overlayY}px)` }">
       <template v-for="p in overlayPages" :key="p.id">
         <div v-if="nav.visited[p.id]" v-show="nav.page === p.id" class="overlay__slot">
           <component :is="p.comp" />
@@ -110,7 +153,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
     </div>
 
     <!-- permanent left/right iron rails: created once, z40, never slide -->
-    <div class="rails">
+    <div v-if="theme.rails" class="rails">
       <img class="rails__l" src="/assets/ui/frames/frame_edge_left.png" draggable="false" />
       <img class="rails__r" src="/assets/ui/frames/frame_edge_right.png" draggable="false" />
     </div>
@@ -137,6 +180,11 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
   position: absolute;
   inset: 0;
   background: linear-gradient(#0e2a22, #0a1a16 60%, #04070a);
+  transition: background 200ms;
+}
+
+.bg-base.is-pure {
+  background: #f4f6f8;
 }
 
 .bg-img,
@@ -146,6 +194,8 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
   width: 100%;
   height: 100%;
   object-fit: cover; /* Qt PreserveAspectCrop */
+  /* 背景亮度（纯净风格专属；war 下变量缺省 = 1 无影响） */
+  filter: brightness(var(--war-bg-brightness, 1));
 }
 
 .bg-dim {

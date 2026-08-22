@@ -437,6 +437,9 @@ const menuItems = computed<WarMenuItem[]>(() => {
     { label: '基于此提问' },
   ];
   if (s.parentId) items.push({ label: '跳转父会话' });
+  // 关闭会话（保留记录）= 杀进程不删记录；重开时按需重新拉起（pi 会话已
+  // 持久化，上下文秒恢复）。
+  items.push({ label: '关闭会话（保留记录）' });
   items.push({ label: '删除会话' });
   return items;
 });
@@ -451,30 +454,34 @@ function onContextMenu(e: MouseEvent, s: RailSession): void {
 function onMenuSelect(i: number): void {
   const s = menuSession.value;
   if (!s) return;
-  switch (i) {
-    case 0:
+  const label = menuItems.value[i]?.label;
+  if (!label) return;
+  switch (label) {
+    case '置顶会话':
+    case '取消置顶':
       void sessions.setPinned(s.sessionId, !s.pinned).then(() => sessions.refresh(chat.projectDir));
       break;
-    case 1:
+    case '重命名会话':
       renamingId.value = s.sessionId;
       renameText.value = s.title;
       break;
-    case 2:
+    case '复制会话内容':
       void sessions.copyTranscript(s.sessionId).then((err) => {
         if (err) chat.status = { ...chat.status, lastError: err };
       });
       break;
-    case 3:
+    case '基于此提问':
       // New empty session in the same project + composer prefill.
       sessions.pendingComposerText = `基于会话「${s.title}」：`;
       void chat.newSession();
       break;
-    case 4:
-      // Child rows: 跳转父会话; top-level rows: 删除会话.
-      if (s.parentId) void chat.openSession(s.parentId);
-      else deleteTarget.value = s;
+    case '跳转父会话':
+      void chat.openSession(s.parentId);
       break;
-    case 5:
+    case '关闭会话（保留记录）':
+      void chat.closeSession(s.sessionId);
+      break;
+    case '删除会话':
       deleteTarget.value = s;
       break;
   }
@@ -768,8 +775,8 @@ export default {
 .rail__new {
   flex: 1;
   height: 28px;
-  background: #10141f;
-  border: 1px solid #2a3344;
+  background: var(--war-panel);
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   color: var(--war-gold);
   font-family: SimSun, serif;
@@ -818,7 +825,7 @@ export default {
   padding: 4px 4px 4px 2px;
   border: 1px solid #3a4252;
   border-radius: 2px;
-  background: #10141f88;
+  background: var(--war-panel-glass);
   user-select: none;
 }
 
@@ -827,7 +834,7 @@ export default {
 }
 
 .rail__group:hover {
-  background: #32509633;
+  background: var(--war-blue-row);
 }
 
 .rail__group.hover {
@@ -863,7 +870,7 @@ export default {
   width: 18px;
   text-align: center;
   color: var(--war-gold);
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   line-height: 16px;
 }
@@ -889,7 +896,7 @@ export default {
 }
 
 .rail__row:hover {
-  background: #32509640;
+  background: var(--war-blue-row-2);
   border-color: #4a3c14;
 }
 
@@ -912,7 +919,7 @@ export default {
 /* 子会话行：通栏宽度 + 左缩进随深度递增（缩进在行内 paddingLeft，
    同一深度的行左边缘严格对齐，与父行共用左边缘基线） */
 .rail__row.child {
-  border-color: #2a3344;
+  border-color: var(--war-border);
 }
 
 .rail__row.drag {
@@ -964,7 +971,7 @@ export default {
   border: 1px solid var(--war-gold-dim);
   border-radius: 8px;
   color: var(--war-gold);
-  background: #0d1116;
+  background: var(--war-panel-dark-solid);
   user-select: none;
 }
 
@@ -988,7 +995,7 @@ export default {
   padding: 6px 10px;
   border: 1px solid #5cb380;
   border-radius: 3px;
-  background: #0d1116f2;
+  background: var(--war-panel-dark-solid);
   box-shadow: 0 6px 18px #000a;
   pointer-events: none;
 }
@@ -1045,7 +1052,7 @@ export default {
 
 .rail__rename {
   width: 100%;
-  background: #10141f;
+  background: var(--war-panel);
   border: 1px solid #8a6f24;
   border-radius: 2px;
   color: var(--war-text);

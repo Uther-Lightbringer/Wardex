@@ -398,10 +398,10 @@ watch(
 .sad__child {
   max-width: 220px;
   padding: 1px 8px;
-  background: #1a2334;
+  background: var(--war-panel-2);
   border: 1px solid #2c4a7a;
   border-radius: 2px;
-  color: #c0d0ec;
+  color: var(--war-text-light-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -415,7 +415,7 @@ watch(
 .sad__pane {
   min-height: 0;
   display: flex;
-  border: 1px solid #1a2230;
+  border: 1px solid var(--war-panel-2);
   background: #10141dcc;
 }
 
@@ -439,10 +439,10 @@ watch(
 
 .sad__aid {
   padding: 0 6px;
-  background: #1a2334;
+  background: var(--war-panel-2);
   border: 1px solid #2c4a7a;
   border-radius: 2px;
-  color: #c0d0ec;
+  color: var(--war-text-light-3);
   user-select: none;
 }
 
@@ -454,7 +454,7 @@ watch(
 
 .sad__refresh {
   margin-left: auto;
-  color: #a0a8b8;
+  color: var(--war-text-light-2);
   user-select: none;
 }
 
@@ -479,7 +479,7 @@ watch(
   margin: 3px 4px;
   padding: 3px 8px;
   border-radius: 2px;
-  background: #12151c44;
+  background: var(--war-glass-2);
   border: 1px solid #3a4a40;
 }
 
@@ -489,11 +489,11 @@ watch(
 }
 
 .sad__step--result {
-  border-color: #2a3344;
+  border-color: var(--war-border);
 }
 
 .sad__step-head {
-  color: #d0d6e0;
+  color: var(--war-text-light);
   user-select: none;
   white-space: nowrap;
   overflow: hidden;

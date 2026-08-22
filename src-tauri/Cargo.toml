@@ -1,6 +1,6 @@
 [package]
 name = "wardex-tauri"
-version = "0.0.2"
+version = "0.0.8"
 description = "WarDex - WC3 style AI coding assistant GUI (Tauri rewrite)"
 edition = "2021"
 
@@ -31,6 +31,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 base64 = "0.22"
 dirs = "6"
 encoding_rs = "0.8"
+percent-encoding = "2"
 # PNG/JPEG codec only: clipboard paste downscale chain (media) and the 128px
 # avatar crop (prefs). No other image formats are needed.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -52,6 +53,9 @@ ureq = { version = "2", features = ["tls", "json"] }
 toml = "0.8"
 # Regex-mode project code search (store/workspace.rs search_code).
 regex = "1"
+# Worktree file watching for the collab broadcast (cross-session awareness):
+# detect files changed by other sessions and attribute them for prompt injection.
+notify = "6"
 # Read-only access to the local opencode.db (chat/opencode_usage.rs): the
 # ACP prompt result only reports the LAST LLM call of a turn, so the session
 # row's cumulative token columns are diffed per turn instead.

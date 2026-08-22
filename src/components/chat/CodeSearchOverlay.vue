@@ -696,9 +696,9 @@ onBeforeUnmount(() => {
   height: 28px;
   padding: 0 8px;
   box-sizing: border-box;
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   outline: none;
-  background: #0b0d12;
+  background: var(--war-input-bg);
   color: var(--war-text);
   font-family: SimSun, serif;
 }
@@ -731,8 +731,8 @@ onBeforeUnmount(() => {
 .cs__opt-btn {
   flex: none;
   padding: 1px 8px;
-  border: 1px solid #2a3344;
-  background: #0b0d12;
+  border: 1px solid var(--war-border);
+  background: var(--war-input-bg);
   color: var(--war-text-muted);
   font-family: SimSun, serif;
   cursor: pointer;
@@ -755,9 +755,9 @@ onBeforeUnmount(() => {
   height: 20px;
   padding: 0 6px;
   box-sizing: border-box;
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   outline: none;
-  background: #0b0d12;
+  background: var(--war-input-bg);
   color: var(--war-text);
   font-family: Consolas, monospace;
 }
@@ -778,8 +778,8 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow-y: auto;
   scrollbar-width: none; /* native bar hidden — the WC3 WarScrollBar replaces it */
-  border: 1px solid #2a3344;
-  background: #0b0d12cc;
+  border: 1px solid var(--war-border);
+  background: var(--war-input-bg);
   padding-right: 30px; /* room for the WC3 scrollbar */
   box-sizing: border-box;
 }
@@ -846,7 +846,7 @@ onBeforeUnmount(() => {
 }
 
 .cs__hit {
-  color: #ffd479;
+  color: var(--war-gold-bright);
   background: #8a5a1a66;
 }
 
@@ -905,8 +905,8 @@ onBeforeUnmount(() => {
   overflow: auto;
   margin: 0;
   padding: 6px 10px;
-  border: 1px solid #2a3344;
-  background: #0b0d12cc;
+  border: 1px solid var(--war-border);
+  background: var(--war-input-bg);
   color: var(--war-text-muted);
   font-family: Consolas, monospace;
   text-align: left;
@@ -923,8 +923,8 @@ onBeforeUnmount(() => {
 
 .cs-card__btn {
   padding: 4px 12px;
-  border: 1px solid #2a3344;
-  background: #0b0d12;
+  border: 1px solid var(--war-border);
+  background: var(--war-input-bg);
   color: var(--war-text);
   font-family: SimSun, serif;
   cursor: pointer;

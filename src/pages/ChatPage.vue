@@ -15,12 +15,14 @@ import MessageList from '../components/chat/MessageList.vue';
 import Composer from '../components/chat/Composer.vue';
 import AttachmentBar from '../components/chat/AttachmentBar.vue';
 import QuoteBar from '../components/chat/QuoteBar.vue';
+import RefBar from '../components/chat/RefBar.vue';
 import QueuePanel from '../components/chat/QueuePanel.vue';
 import SubagentPanel from '../components/chat/SubagentPanel.vue';
 import PermissionDialog from '../components/chat/PermissionDialog.vue';
 import FilePreviewDialog from '../components/chat/FilePreviewDialog.vue';
 import DueTodoOverlay from '../components/chat/DueTodoOverlay.vue';
 import CodeSearchOverlay from '../components/chat/CodeSearchOverlay.vue';
+import WarDialog from '../components/war/WarDialog.vue';
 import { useNavStore } from '../stores/nav';
 import { usePrefsStore } from '../stores/prefs';
 import { useChatStore } from '../stores/chat';
@@ -97,7 +99,8 @@ onMounted(() => window.addEventListener('keydown', onPageKey));
 onBeforeUnmount(() => window.removeEventListener('keydown', onPageKey));
 
 // ---- title row: agent switcher dropdown (features/chat.md §6.1) ----
-const CHAT_PROVIDERS = ['kimi', 'claude', 'codex', 'custom'];
+// pi is an embedded agent (no ACP) but behaves identically in the switcher.
+const CHAT_PROVIDERS = ['pi', 'kimi', 'claude', 'codex', 'custom'];
 function agentUsable(enabled: boolean, provider: string): boolean {
   return enabled && CHAT_PROVIDERS.includes(provider.trim().toLowerCase());
 }
@@ -111,15 +114,45 @@ const agentIndex = computed(() => {
 
 const agentDisplay = computed(() => `◆ ${chat.meta?.agentName || 'Agent'}`);
 
+/** 已有对话的会话禁止切换 Agent（跨 provider 会静默丢失 agent 侧上下文，
+ * 后端 switch_agent 同样硬性拒绝）。meta.messageCount 随 store://sessions
+ * 事件实时刷新。 */
+const agentLocked = computed(() => (chat.meta?.messageCount ?? 0) > 0);
+
 /** 子会话快捷返回：父会话标题（铁轨里查；查不到就空 tooltip）。 */
 const parentTitle = computed(
   () => sessions.rail.find((s) => s.sessionId === chat.meta?.parentId)?.title ?? '',
 );
 
-function onAgentPick(i: number): void {
+/** Pi 前置检查（选择 pi 时）：插件二进制未就绪 → 提示。 */
+const piDialog = ref(false);
+const piDialogMsg = ref('');
+const piDialogOpen = computed({
+  get: () => piDialog.value,
+  set: (v: boolean) => {
+    piDialog.value = v;
+  },
+});
+
+async function onAgentPick(i: number): Promise<void> {
   const a = sessions.agents[i];
   if (!a || i === agentIndex.value) return;
+  if (agentLocked.value) return;
   if (!agentUsable(a.enabled, a.provider)) return;
+  if (a.provider.trim().toLowerCase() === 'pi') {
+    try {
+      const r = await agentsStore.probePi('');
+      if (!r.found || !r.pluginReady) {
+        piDialogMsg.value =
+          r.message ||
+          'Pi 插件二进制未就绪：请先用 bundle-pi.mjs 生成，或检查「Pi 插件目录」设置。';
+        piDialog.value = true;
+        return;
+      }
+    } catch (e) {
+      console.warn('[chat] probe_pi failed', e);
+    }
+  }
   void chat.switchAgent(a.id);
 }
 
@@ -127,7 +160,9 @@ function onAgentPick(i: number): void {
 // 强度候选 = 该 Agent 配置页勾选的 effortOptions（空 = 全部档位），再与
 // CLI 实际声明的 picker 选项取交集：只显示配置的档位，且选择一定生效。
 // kimi 报告 `id:"thinking"`（support_efforts 决定选项）；opencode 报告
-// `id:"effort"`（其 model variants）。其他 ACP CLI 既不声明也不显示。
+// `id:"effort"`（其 model variants）；pi 由驱动注入同构的 `id:"thinking"`
+// picker（chat/pi.rs emit_thinking_options），因此 pi 也能选思考强度。
+// 其他 ACP CLI 既不声明也不显示。
 const thinkingOpt = computed(() =>
   chat.configOptions.find((o) => o.id === 'thinking' || o.id === 'effort'),
 );
@@ -180,6 +215,25 @@ function onThinkingPick(i: number): void {
   const o = thinkingOpts.value[i];
   if (!o || o.value === thinkingOpt.value?.currentValue) return;
   void chat.setConfigOption(thinkingOptionId.value, o.value);
+}
+
+// ---- title row: model dropdown (ACP / Pi configOptions id:"model") ----
+const modelOpt = computed(() => chat.configOptions.find((o) => o.id === 'model'));
+const modelOpts = computed(() => modelOpt.value?.options ?? []);
+const modelOptions = computed(() => modelOpts.value.map((o) => o.name));
+const modelIndex = computed(() => {
+  const cur = modelOpt.value?.currentValue ?? '';
+  return modelOpts.value.findIndex((o) => o.value === cur);
+});
+const modelDisplay = computed(() => {
+  const cur = modelOpt.value?.currentValue ?? '';
+  const shown = modelOpts.value.find((o) => o.value === cur);
+  return shown?.name || cur || '模型';
+});
+function onModelPick(i: number): void {
+  const o = modelOpts.value[i];
+  if (!o || o.value === modelOpt.value?.currentValue) return;
+  void chat.setConfigOption('model', o.value);
 }
 
 // ---- action bay: 刷新工作区 / 停止生成 dual state (§6.4, §8) ----
@@ -386,7 +440,7 @@ function onBayResizeResetY(): void {
           </div>
         </WarFrame>
 
-        <!-- dropdown row above the composer: Agent → 思考（模型只读展示在右侧会话信息面板） -->
+        <!-- dropdown row above the composer: Agent → 模型 → 思考 -->
         <div v-if="chat.sessionId" class="chat__dd-row">
           <WarDropdown
             class="chat__agent-dd"
@@ -394,8 +448,20 @@ function onBayResizeResetY(): void {
             :model-value="agentIndex"
             :display-text="agentDisplay"
             :text-size="prefs.fs(12)"
+            :disabled="agentLocked"
+            :title="agentLocked ? '已有对话的会话不能切换 Agent，请新建会话' : ''"
             drop-up
             @update:model-value="onAgentPick"
+          />
+          <WarDropdown
+            v-if="modelOptions.length > 0"
+            class="chat__model-dd"
+            :options="modelOptions"
+            :model-value="modelIndex"
+            :display-text="modelDisplay"
+            :text-size="prefs.fs(12)"
+            drop-up
+            @update:model-value="onModelPick"
           />
           <WarDropdown
             v-if="thinkingOptions.length > 0"
@@ -439,6 +505,7 @@ function onBayResizeResetY(): void {
              above stay clear -->
         <div class="chat__float" :style="{ bottom: 'calc(' + composerHeight + ' + 6px)' }">
           <QuoteBar class="chat__quote" />
+          <RefBar />
           <AttachmentBar />
           <SubagentPanel />
           <QueuePanel />
@@ -513,6 +580,17 @@ function onBayResizeResetY(): void {
     <FilePreviewDialog />
     <CodeSearchOverlay v-if="codeSearchKind" :kind="codeSearchKind" @close="codeSearchKind = null" />
     <DueTodoOverlay />
+
+    <!-- Pi 前置检查弹窗：node 缺失 → 安装引导；插件未就绪 → 提示 -->
+    <WarDialog
+      v-if="piDialog"
+      v-model:open="piDialogOpen"
+      title-text="Pi 插件未就绪"
+      :message-text="piDialogMsg"
+      :dialog-width="620"
+    >
+      <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="知道了" @activated="piDialogOpen = false" />
+    </WarDialog>
   </PageShell>
 </template>
 
@@ -760,6 +838,12 @@ function onBayResizeResetY(): void {
 .chat__agent-dd {
   flex: none;
   width: 180px;
+  height: 30px;
+}
+
+.chat__model-dd {
+  flex: none;
+  width: 220px;
   height: 30px;
 }
 

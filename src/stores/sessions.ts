@@ -139,12 +139,15 @@ export const useSessionsStore = defineStore('sessions', {
     agentById(): (id: string) => AgentInfo | undefined {
       return (id: string) => this.agents.find((a) => a.id === id);
     },
-    /** Rail dot state: waiting (perm pending) > running (busy) > idle. */
-    dotState(): (id: string) => 'running' | 'waiting' | 'idle' {
+    /** Rail dot state: waiting (perm pending) > running (busy) > idle
+     * (process alive) > closed (no live process / never opened this run). */
+    dotState(): (id: string) => 'running' | 'waiting' | 'idle' | 'closed' {
       return (id: string) => {
         if (this.permPending.includes(id)) return 'waiting';
-        if (this.runtimeStates[id]?.busy) return 'running';
-        return 'idle';
+        const rt = this.runtimeStates[id];
+        if (rt?.busy) return 'running';
+        if (rt?.acpRunning) return 'idle';
+        return 'closed';
       };
     },
   },

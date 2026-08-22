@@ -206,12 +206,16 @@ export const useMonitorStore = defineStore('monitor', {
       await sessions.reloadAll();
     },
 
+    /** 搁置/恢复：走后端原子命令 shelve_session —— 搁置 = 关闭进程（保留
+     * 会话，pi 上下文已落盘，恢复时秒回）+ 隐藏；恢复 = 显示 + 重新拉起
+     * 进程（ensure_runtime）。一个命令走两端，避免“进程杀了但标志没写
+     * 上”的中间态。 */
     async setShelved(id: string, shelved: boolean): Promise<void> {
       if (!isTauri) return;
       try {
-        await cmd('set_session_shelved', { sessionId: id, shelved });
+        await cmd('shelve_session', { sessionId: id, shelved });
       } catch (e) {
-        console.warn('[monitor] set_session_shelved failed', e);
+        console.warn('[monitor] shelve_session failed', e);
       }
       await useSessionsStore().reloadAll();
     },

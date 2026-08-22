@@ -49,6 +49,58 @@ function bindProject(): void {
   ui.folderDialogOpen = true;
 }
 
+// 每会话开关：是否向 prompt 自动注入 codegraph 相关符号上下文（缺省=开）。
+const useCodegraph = computed(() => meta.value?.useCodegraph ?? true);
+function toggleCodegraph(): void {
+  void chat.setUseCodegraph(!useCodegraph.value);
+}
+
+// @引用展开方式（全局，见 prefs.refExpandMode）：'model' 只发标记让模型
+// 自读最新内容；'inject' 发送时把文件内容注入消息。切换按钮从 Composer
+// 搬到了会话信息面板（仅搬 UI，仍是全局共享偏好）。
+const refExpandLabel = computed(() =>
+  prefs.refExpandMode === 'inject' ? '注入内容' : '模型自读',
+);
+const refExpandTitle = computed(() =>
+  prefs.refExpandMode === 'inject'
+    ? '引用：发送时注入文件内容。点击改为「模型自读」'
+    : '引用：只发标记，模型自行读取最新内容。点击改为「注入内容」',
+);
+function toggleRefExpand(): void {
+  prefs.refExpandMode = prefs.refExpandMode === 'inject' ? 'model' : 'inject';
+}
+
+// codegraph MCP 注入状态展示：装没装 / 会话注入没注入 / 索引建没建。
+const cgInstalled = ref(false);
+const cgIndex = ref(false);
+async function loadCgInstalled(): Promise<void> {
+  const dir = meta.value?.projectDir || meta.value?.workDir || '';
+  if (!dir || !isTauri) {
+    cgInstalled.value = false;
+    return;
+  }
+  try {
+    const s = await cmd<{ installed: boolean; indexExists: boolean }>('codegraph_status', {
+      projectDir: dir,
+    });
+    cgInstalled.value = s.installed;
+    cgIndex.value = s.indexExists;
+  } catch {
+    cgInstalled.value = false;
+  }
+}
+watch(() => chat.meta?.projectDir, () => void loadCgInstalled());
+onMounted(() => void loadCgInstalled());
+
+const cgMCPText = computed(() => {
+  if (!meta.value?.projectDir && !meta.value?.workDir) return '';
+  if (!cgInstalled.value) return 'codegraph 未安装';
+  if (!useCodegraph.value) return '未启用 codegraph';
+  return cgIndex.value
+    ? 'codegraph MCP 已注入本会话'
+    : 'codegraph MCP 已注入（索引未建，Agent 需先 build）';
+});
+
 const agentLine = computed(() => {
   if (!meta.value) return '';
   return `${meta.value.agentName || 'Agent'} · ${meta.value.provider}`;
@@ -59,7 +111,11 @@ const infoRows = computed<InfoRow[]>(() => {
   const m = meta.value;
   if (!m) return [];
   const rows: InfoRow[] = [];
-  if (m.model) rows.push({ k: '模型', v: m.model });
+  const live = chat.configOptions.find((o) => o.id === 'model');
+  const liveVal = live?.currentValue ?? '';
+  const liveName = live?.options.find((o) => o.value === liveVal)?.name;
+  const model = liveName || liveVal || m.model;
+  if (model) rows.push({ k: '模型', v: model });
   rows.push({ k: '消息', v: `${m.messageCount} 条` });
   rows.push({ k: '创建', v: stamp(m.createdAt) });
   rows.push({ k: '更新', v: stamp(m.updatedAt) });
@@ -166,6 +222,31 @@ const usageRows = computed<InfoRow[]>(() => {
         关联项目目录…
       </div>
 
+      <div class="ainfo__sep"></div>
+      <div
+        class="ainfo__refmode"
+        :class="{ active: prefs.refExpandMode === 'model' }"
+        :title="refExpandTitle"
+        :style="{ fontSize: prefs.fs(11) + 'px' }"
+        @click="toggleRefExpand"
+      >
+        <span class="ainfo__refmode-dot">@</span>{{ refExpandLabel }}
+      </div>
+
+      <div class="ainfo__sep"></div>
+      <label class="ainfo__toggle" :style="{ fontSize: prefs.fs(11) + 'px' }">
+        <input type="checkbox" :checked="useCodegraph" @change="toggleCodegraph" />
+        使用 codegraph 索引
+      </label>
+      <div
+        v-if="cgMCPText"
+        class="ainfo__cgstatus"
+        :class="{ muted: !useCodegraph || !cgInstalled }"
+        :style="{ fontSize: prefs.fs(10) + 'px' }"
+      >
+        {{ cgMCPText }}
+      </div>
+
       <template v-if="meta.summary">
         <div class="ainfo__sep"></div>
         <div class="ainfo__label" :style="{ fontSize: prefs.fs(11) + 'px' }">会话摘要</div>
@@ -256,6 +337,60 @@ const usageRows = computed<InfoRow[]>(() => {
 
 .ainfo__bind:hover {
   color: var(--war-gold-bright);
+}
+
+.ainfo__refmode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 1px 8px;
+  border: 1px solid #6a5a3f;
+  border-radius: 3px;
+  background: #0d1116f0;
+  color: var(--war-text-faint);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.ainfo__refmode:hover {
+  border-color: #f2cf6b;
+  color: var(--war-text);
+}
+
+.ainfo__refmode.active {
+  border-color: #2c4a7a;
+  color: var(--war-gold);
+}
+
+.ainfo__refmode-dot {
+  font-weight: 700;
+}
+
+.ainfo__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--war-text-muted);
+  cursor: pointer;
+  user-select: none;
+  flex-wrap: wrap;
+}
+
+.ainfo__toggle input {
+  accent-color: var(--war-gold);
+  cursor: pointer;
+}
+
+.ainfo__cgstatus {
+  color: var(--war-text-dim);
+  font-family: SimSun, serif;
+  overflow-wrap: anywhere;
+}
+
+.ainfo__cgstatus.muted {
+  color: var(--war-text-faint);
 }
 
 .ainfo__error {

@@ -29,6 +29,7 @@ pub mod acp;
 pub mod chat;
 pub mod cmd;
 pub mod codegraph;
+pub mod collab_watch;
 pub mod db;
 pub mod inspect;
 pub mod mcp_reminder;
@@ -118,7 +119,6 @@ impl EventSink for TauriSink {
     /// Desktop notification, only while the main window is unfocused — when
     /// the user is watching the app the SubagentPanel already shows it.
     fn notify(&self, title: &str, body: &str) {
-        use tauri_plugin_notification::NotificationExt;
         let focused = self
             .0
             .get_webview_window("main")
@@ -127,6 +127,20 @@ impl EventSink for TauriSink {
         if focused {
             return;
         }
+        self.toast(title, body);
+    }
+
+    /// Task-completion notification: fires even while the window is focused
+    /// (e.g. user watching the monitor page — the NEW badge alone is easy
+    /// to miss).
+    fn notify_always(&self, title: &str, body: &str) {
+        self.toast(title, body);
+    }
+}
+
+impl TauriSink {
+    fn toast(&self, title: &str, body: &str) {
+        use tauri_plugin_notification::NotificationExt;
         if let Err(e) = self.0.notification().builder().title(title).body(body).show() {
             log::warn!("notify failed: {e}");
         }
@@ -234,6 +248,31 @@ fn set_session_shelved(
         .map_err(err)
 }
 
+/// Monitor 搁置/恢复：搁置 = 关闭进程（保留会话）+ 隐藏；恢复 = 显示 +
+/// 重新拉起进程（ensure_runtime）。一个命令走两端，避免“进程杀了但标志
+/// 没写上”之类的中间态。
+#[tauri::command]
+async fn shelve_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    shelved: bool,
+) -> Result<bool, String> {
+    if shelved {
+        state.chat.close_session(&session_id);
+    }
+    let ok = {
+        let mut stores = lock(&state.stores);
+        stores
+            .sessions
+            .set_session_shelved(&session_id, shelved)
+            .map_err(err)?
+    };
+    if !shelved {
+        state.chat.ensure_runtime(&session_id).await.map_err(err)?;
+    }
+    Ok(ok)
+}
+
 /// Per-session permission-mode override (default|plan|auto|yolo; null 清除
 /// 回全局 prefs 默认)。运行时发 prompt 前读 meta 里的这个值。
 #[tauri::command]
@@ -247,6 +286,18 @@ fn set_session_perm_mode(
         .sessions
         .set_session_perm_mode(&session_id, mode.as_deref())
         .map_err(err)
+}
+
+/// Per-session toggle for auto-injecting codegraph symbol context into
+/// prompts (会话信息面板的「使用 codegraph 索引」勾选框).
+#[tauri::command]
+fn set_session_use_codegraph(
+    state: State<'_, AppState>,
+    session_id: String,
+    value: bool,
+) -> Result<bool, String> {
+    let mut stores = lock(&state.stores);
+    stores.sessions.set_use_codegraph(&session_id, value).map_err(err)
 }
 
 #[tauri::command]
@@ -625,8 +676,22 @@ async fn probe_cli(
     Ok(serde_json::to_value(result).unwrap_or(Value::Null))
 }
 
+/// Pi 插件探测（provider "pi"）：编译二进制是否可用 + 插件目录是否就绪。
+/// 配置页探测按钮和 ChatPage 选择 pi 前都会调用；二进制缺失（未用
+/// bundle-pi.mjs 打包）时 message 带上提示。
 #[tauri::command]
-async fn test_agent(state: State<'_, AppState>, agent_id: String) -> Result<Option<String>, String> {
+async fn probe_pi(preferred_path: String) -> Result<Value, String> {
+    let bin = crate::chat::pi::pi_binary_name();
+    let plugin = crate::chat::pi::locate_plugin_dir(&preferred_path);
+    let found = plugin.as_ref().is_ok_and(|d| d.join(bin).is_file());
+    Ok(crate::chat::pi::probe_result(found, plugin))
+}
+
+#[tauri::command]
+async fn test_agent(
+    state: State<'_, AppState>,
+    agent_id: String,
+) -> Result<Option<probe::TestResult>, String> {
     // Clone the (small) store so no std MutexGuard crosses the await.
     let agents = lock(&state.stores).agents.clone();
     let result = state.tester.test_agent(&agents, &agent_id).await;
@@ -871,10 +936,14 @@ async fn codegraph_query_interfaces(
     Ok(serde_json::to_value(hits).map_err(err)?)
 }
 
-/// Open the interactive dependency graph in the default browser.
+/// Open the interactive dependency graph in an in-app window.
 #[tauri::command(async)]
-async fn codegraph_plot(state: State<'_, AppState>, project_dir: String) -> Result<(), String> {
-    state.codegraph.plot(&project_dir)
+async fn codegraph_plot(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    project_dir: String,
+) -> Result<(), String> {
+    state.codegraph.plot(&app, &project_dir)
 }
 
 /// Java `interface` declarations (Ctrl+\ overlay). Heuristic text scan,
@@ -916,6 +985,14 @@ async fn git_status(dir: String) -> Result<Value, String> {
             .map_err(err)?;
     let entries = result.map_err(err)?;
     Ok(serde_json::to_value(entries).unwrap_or(json!([])))
+}
+
+/// 工作区动态：某项目最近的文件改动（供监控页展示）。新的在前。
+#[tauri::command]
+fn collab_recent(state: State<'_, AppState>, project_dir: String, limit: Option<usize>) -> Value {
+    let stores = lock(&state.stores);
+    let recs = stores.collab.recent(&project_dir, limit.unwrap_or(20));
+    json!(recs)
 }
 
 /// Diff of one file (mode: worktree | staged | untracked), R4-capped.
@@ -1174,26 +1251,45 @@ fn get_prefs(state: State<'_, AppState>) -> Value {
         "railWidth": stores.prefs.rail_width(),
         "panelLayout": stores.prefs.panel_layout(),
         "monitorLayout": stores.prefs.monitor_layout(),
+        "monitorFootmen": stores.prefs.monitor_footmen(),
+        "monitorZones": stores.prefs.monitor_zones(),
+        "monitorZonesOn": stores.prefs.monitor_zones_on(),
         "panelWidth": stores.prefs.panel_width(),
         "composerHeight": stores.prefs.composer_height(),
         "actionBayWidth": stores.prefs.action_bay_width(),
         "actionBayHeight": stores.prefs.action_bay_height(),
         "monitorChatWidth": stores.prefs.monitor_chat_width(),
         "monitorChatHeight": stores.prefs.monitor_chat_height(),
+        "taskDoneNotify": stores.prefs.task_done_notify(),
+        "uiStyle": stores.prefs.ui_style(),
+        "chatAlpha": stores.prefs.chat_alpha(),
+        "pageColor": stores.prefs.page_color(),
         "userAvatarPath": stores.prefs.user_avatar_path(),
+        "backgroundType": stores.prefs.background_type(),
+        "backgroundPath": stores.prefs.background_path(),
     })
 }
 
-/// Background config, resolved next to the exe (old main.cpp:96-122 rules):
-/// default muted-looping video (background-default.mp4); background.json
-/// overrides {type, source}; relative source anchors at the exe dir;
-/// file:/absolute sources are returned as plain filesystem paths (the
-/// webview converts them via the asset protocol); qrc: passes through
+/// Background config, resolved from user prefs first (a custom background
+/// uploaded on the ConfigPage), else next to the exe (old main.cpp:96-122
+/// rules): default muted-looping video (background-default.mp4);
+/// background.json overrides {type, source}; relative source anchors at the
+/// exe dir; file:/absolute sources are returned as plain filesystem paths
+/// (the webview converts them via the asset protocol); qrc: passes through
 /// (frontend maps to bundled /assets); `video` plays in a muted looping
 /// <video> (WebView2 has native H.264, no FFmpeg).
 #[tauri::command]
-fn background_config() -> Value {
+fn background_config(state: State<'_, AppState>) -> Value {
     const DEFAULT_SOURCE: &str = "qrc:/qt/qml/WarDex/assets/background/background-default.mp4";
+    let stores = lock(&state.stores);
+    // 1) Custom user-uploaded background (ConfigPage) takes priority.
+    let bg_path = stores.prefs.background_path();
+    if !bg_path.is_empty() && std::path::Path::new(bg_path).is_file() {
+        let t = stores.prefs.background_type();
+        let t = if t == "image" { "image" } else { "video" };
+        return json!({ "type": t, "source": bg_path });
+    }
+    // 2) Exe-adjacent background.json override / default video.
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -1255,11 +1351,80 @@ fn clear_user_avatar(state: State<'_, AppState>) -> Result<(), String> {
     stores.prefs.clear_user_avatar(&paths).map_err(err)
 }
 
+/// setBackgroundFromFile: copy a user image/video into the data dir and
+/// store it as the custom background. Returns the destination path ("" on
+/// a missing/unsupported file — the UI shows 背景导入失败).
+#[tauri::command]
+fn set_background_from_file(
+    state: State<'_, AppState>,
+    local_path: String,
+) -> Result<String, String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores
+        .prefs
+        .set_background_from_file(&paths, &local_path)
+        .map_err(err)
+}
+
+/// clearBackground: drop the custom background, back to background.json /
+/// default video.
+#[tauri::command]
+fn clear_background(state: State<'_, AppState>) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.clear_background(&paths).map_err(err)
+}
+
 #[tauri::command]
 fn set_font_scale(state: State<'_, AppState>, scale: f64) -> Result<(), String> {
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
     stores.prefs.set_font_scale(&paths, scale).map_err(err)
+}
+
+/// 界面风格切换（war | pure）：立即生效 + 落盘 user_prefs.json。
+#[tauri::command]
+fn set_ui_style(state: State<'_, AppState>, style: String) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_ui_style(&paths, &style).map_err(err)
+}
+
+/// 对话页透明度（纯净风格，0.5~1.0）：立即生效 + 落盘 user_prefs.json。
+#[tauri::command]
+fn set_chat_alpha(state: State<'_, AppState>, alpha: f64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_chat_alpha(&paths, alpha).map_err(err)
+}
+
+/// 背景亮度（纯净风格，0.5~1.5）：立即生效 + 落盘 user_prefs.json。
+#[tauri::command]
+fn set_bg_brightness(state: State<'_, AppState>, v: f64) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_bg_brightness(&paths, v).map_err(err)
+}
+
+/// 页面颜色（纯净风格表面层底色，hex #rrggbb）：立即生效 + 落盘。
+#[tauri::command]
+fn set_page_color(state: State<'_, AppState>, hex: String) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_page_color(&paths, hex).map_err(err)
+}
+
+/// Desktop notification toggle: notify when a background session's turn
+/// completes (monitor "步兵" finishing). Persisted to user_prefs.json.
+#[tauri::command]
+fn set_task_done_notify(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores
+        .prefs
+        .set_task_done_notify(&paths, enabled)
+        .map_err(err)
 }
 
 #[tauri::command]
@@ -1302,14 +1467,58 @@ fn set_monitor_layout(
     project_dir: String,
     entry: Option<Value>,
 ) -> Result<(), String> {
+    let ids = {
+        let mut stores = lock(&state.stores);
+        let paths = stores.paths.clone();
+        stores
+            .prefs
+            .set_monitor_layout(&paths, &project_dir, entry)
+            .map_err(err)?;
+        stores.sessions.shelve_all_for_project(&project_dir)
+    };
+    // 搁置 = 关闭进程（保留会话）：部署/拆营把该项目既有会话全部休眠，
+    // 状态点实时反映进程死活；pi 会话已持久化，恢复时按需重新拉起。
+    for id in &ids {
+        state.chat.close_session(id);
+    }
+    Ok(())
+}
+
+/// Monitor page: persist one infantry's sandbox position (world-ratio
+/// coords) + priority mark; entry=None clears it (back to slot). Does NOT
+/// shelve sessions — that is the barracks layout's job.
+#[tauri::command]
+fn set_monitor_footman(
+    state: State<'_, AppState>,
+    session_id: String,
+    entry: Option<Value>,
+) -> Result<(), String> {
     let mut stores = lock(&state.stores);
     let paths = stores.paths.clone();
     stores
         .prefs
-        .set_monitor_layout(&paths, &project_dir, entry)
-        .map_err(err)?;
-    stores.sessions.shelve_all_for_project(&project_dir);
-    Ok(())
+        .set_monitor_footman(&paths, &session_id, entry)
+        .map_err(err)
+}
+
+/// Monitor page: replace the whole priority-region list (full replace;
+/// empty = frontend falls back to its default Eisenhower template).
+#[tauri::command]
+fn set_monitor_zones(state: State<'_, AppState>, zones: Vec<Value>) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores.prefs.set_monitor_zones(&paths, zones).map_err(err)
+}
+
+/// Monitor page: master show/hide switch for all priority regions.
+#[tauri::command]
+fn set_monitor_zones_on(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    let mut stores = lock(&state.stores);
+    let paths = stores.paths.clone();
+    stores
+        .prefs
+        .set_monitor_zones_on(&paths, enabled)
+        .map_err(err)
 }
 
 /// Shared right-dock drawer width (px) — one width for ALL dock tabs,
@@ -1521,7 +1730,9 @@ pub fn run() {
             set_session_project,
             set_session_pinned,
             set_session_shelved,
+            shelve_session,
             set_session_perm_mode,
+            set_session_use_codegraph,
             send_prompt,
             cancel,
             set_config_option,
@@ -1555,6 +1766,7 @@ pub fn run() {
             set_default_agent,
             provider_specs,
             probe_cli,
+            probe_pi,
             test_agent,
             // projects / workspace / files
             list_projects,
@@ -1583,6 +1795,7 @@ pub fn run() {
             git_log,
             git_status,
             git_diff_file,
+            collab_recent,
             git_diff_commit,
             subagent_process,
             list_workspace_dir,
@@ -1602,14 +1815,24 @@ pub fn run() {
             session_usage,
             get_prefs,
             background_config,
+            set_background_from_file,
+            clear_background,
             set_user_name,
             set_user_avatar_from_file,
             clear_user_avatar,
             set_font_scale,
+            set_ui_style,
+            set_chat_alpha,
+            set_bg_brightness,
+            set_page_color,
+            set_task_done_notify,
             set_preview_size,
             set_monitor_chat_size,
             set_panel_layout,
             set_monitor_layout,
+            set_monitor_footman,
+            set_monitor_zones,
+            set_monitor_zones_on,
             set_panel_width,
             set_rail_width,
             set_composer_height,

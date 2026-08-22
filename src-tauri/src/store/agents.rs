@@ -6,7 +6,7 @@
 //     ids missing from the index are appended to the list tail.
 //   - `isDefault` in agent files is a redundant snapshot; the index's
 //     `defaultAgentId` is authoritative. When it is empty and agents exist,
-//     the first chat-capable (currently: provider == "kimi") agent is picked.
+//     the first Pi agent is picked, else the first other chat-capable agent.
 //   - File missing `cliPath` → backfilled "kimi" (old fromJson default);
 //     a newly created agent holds "" in memory instead.
 //   - apiKey update guard: an empty string or one containing '*' keeps the
@@ -41,6 +41,10 @@ pub struct Agent {
     pub base_url: String,
     #[serde(rename = "cliPath", default = "default_cli_path")]
     pub cli_path: String,
+    /// Pi plugin checkout dir for provider "pi". Empty = locate automatically
+    /// (workspace 同级 pi 目录 / WARDEX_PI_DIR / 打包内置 resources/pi)。
+    #[serde(rename = "piDir")]
+    pub pi_dir: String,
     #[serde(rename = "createdAt", deserialize_with = "de_ms_i64")]
     pub created_at: i64,
     /// Default thinking effort for this agent ("" = the CLI's own default).
@@ -97,6 +101,7 @@ impl Default for Agent {
             avatar_path: String::new(),
             base_url: String::new(),
             cli_path: default_cli_path(),
+            pi_dir: String::new(),
             created_at: 0,
             default_effort: String::new(),
             effort_options: Vec::new(),
@@ -133,6 +138,8 @@ pub struct AgentPatch {
     pub max_context_k: Option<u32>,
     #[serde(rename = "cliPath")]
     pub cli_path: Option<String>,
+    #[serde(rename = "piDir")]
+    pub pi_dir: Option<String>,
     #[serde(rename = "apiKey")]
     pub api_key: Option<String>,
     #[serde(rename = "extraArgs")]
@@ -162,7 +169,7 @@ pub fn mask_key(key: &str) -> String {
 
 /// Single funnel so the store never grows `if provider == …` (red line C3).
 /// Delegates to the provider registry's chatCapable flag — all five
-/// providers (kimi/claude/codex/opencode/custom) are chat-capable.
+/// providers (pi/kimi/claude/codex/opencode/custom) are chat-capable.
 pub fn provider_supports_chat(provider: &str) -> bool {
     crate::provider::chat_capable(provider)
 }
@@ -227,14 +234,23 @@ impl AgentStore {
         }
 
         if store.default_agent_id.is_empty() && !store.agents.is_empty() {
-            // pick first usable kimi
-            if let Some(a) = store
+            // Prefer Pi; otherwise the first chat-capable agent.
+            let pick = store
                 .agents
-                .iter_mut()
-                .find(|a| provider_supports_chat(&a.provider))
-            {
-                a.is_default = true;
-                store.default_agent_id = a.id.clone();
+                .iter()
+                .find(|a| a.provider.eq_ignore_ascii_case("pi") && provider_supports_chat(&a.provider))
+                .or_else(|| {
+                    store
+                        .agents
+                        .iter()
+                        .find(|a| provider_supports_chat(&a.provider))
+                })
+                .map(|a| a.id.clone());
+            if let Some(id) = pick {
+                if let Some(a) = store.agents.iter_mut().find(|a| a.id == id) {
+                    a.is_default = true;
+                    store.default_agent_id = id;
+                }
             }
         }
         store
@@ -256,8 +272,8 @@ impl AgentStore {
         self.get(&self.default_agent_id)
     }
 
-    /// createAgent: provider kimi / model moonshot-v1-auto / cliPath "" (left
-    /// empty so config auto-detect can fill it), first agent becomes default.
+    /// createAgent: provider pi / model empty (Pi uses its own default) /
+    /// cliPath "" (pi locates the binary itself), first agent becomes default.
     pub fn create_agent(&mut self, paths: &Paths, name: &str) -> Result<String, AgentsError> {
         let now = now_ms();
         let agent = Agent {
@@ -267,8 +283,8 @@ impl AgentStore {
             } else {
                 name.to_string()
             },
-            provider: "kimi".to_string(),
-            model: "moonshot-v1-auto".to_string(),
+            provider: "pi".to_string(),
+            model: String::new(),
             cli_path: String::new(),
             enabled: true,
             is_default: self.agents.is_empty(),
@@ -322,6 +338,9 @@ impl AgentStore {
         }
         if let Some(v) = &patch.cli_path {
             a.cli_path = v.trim().to_string();
+        }
+        if let Some(v) = &patch.pi_dir {
+            a.pi_dir = v.trim().to_string();
         }
         if let Some(k) = &patch.api_key {
             // empty or still masked -> keep old

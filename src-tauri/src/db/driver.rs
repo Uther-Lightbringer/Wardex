@@ -63,22 +63,25 @@ pub trait DbDriver: Send + Sync {
     /// Execute one (already gated) statement. `allow_write` toggles the
     /// server-side readonly session for THIS call (defense layer 3) and the
     /// 60s statement timeout is always applied (defense layer 4).
-    async fn query(
+    fn query(
         &self,
         sql: &str,
         max_rows: u32,
         allow_write: bool,
-    ) -> anyhow::Result<QueryResult>;
+    ) -> impl std::future::Future<Output = anyhow::Result<QueryResult>> + Send;
 
     /// Schema metadata: `schema`/`keyword` narrow the listing.
-    async fn tables(
+    fn tables(
         &self,
         schema: Option<&str>,
         keyword: Option<&str>,
-    ) -> anyhow::Result<Vec<TableMeta>>;
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<TableMeta>>> + Send;
 
     /// Columns of `schema.table`.
-    async fn columns(&self, qualified: &str) -> anyhow::Result<Vec<ColumnMeta>>;
+    fn columns(
+        &self,
+        qualified: &str,
+    ) -> impl std::future::Future<Output = anyhow::Result<Vec<ColumnMeta>>> + Send;
 }
 
 /// Owned, storable driver. This is what `DbManager` holds per connection.

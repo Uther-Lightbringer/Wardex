@@ -254,8 +254,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey, true));
 
 .due__name {
   width: 100%;
-  background: #10141f;
-  border: 1px solid #2a3344;
+  background: var(--war-panel);
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   color: var(--war-text);
   font-family: SimSun, serif;

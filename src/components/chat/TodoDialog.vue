@@ -244,8 +244,8 @@ function close(): void {
 }
 
 .td__field {
-  background: #10141f;
-  border: 1px solid #2a3344;
+  background: var(--war-panel);
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   color: var(--war-text);
   font-family: SimSun, serif;
@@ -268,7 +268,7 @@ function close(): void {
 
 .td__scope {
   padding: 4px 14px;
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   color: var(--war-text-dim);
   user-select: none;

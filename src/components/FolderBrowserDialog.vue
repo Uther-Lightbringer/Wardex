@@ -1,5 +1,7 @@
 <script setup lang="ts">
-// WC3-style folder browser ("打开项目", FolderBrowserDialog.qml).
+// Folder browser ("打开项目", FolderBrowserDialog.qml). war = WC3 贴图风
+// （title plate + frame_popup 九宫格 + dialog 按钮皮）；pure = 浅色 CSS 面板
+// （is-plain 覆盖，按钮/下拉走 WarButton/WarDropdown 自带 plain 路径）。
 // Composition: title plate + path bar with drive dropdown + folder list in
 // the frame_popup nine-slice + dialog-skin button row. Keyboard navigation:
 // ↑/↓ select, Enter enter/choose, Backspace go up, Esc close.
@@ -11,6 +13,12 @@ import { computed, nextTick, ref, watch } from 'vue';
 import WarDropdown from './war/WarDropdown.vue';
 import WarButton from './war/WarButton.vue';
 import { cmd } from '../lib/tauri';
+import { themeOf } from '../lib/themes';
+import { usePrefsStore } from '../stores/prefs';
+
+const prefs = usePrefsStore();
+/** 纯净风格：去 WC3 贴图框/发光条，走浅色 CSS 面板（按钮/下拉自带 plain 路径）。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{
@@ -237,8 +245,8 @@ watch(
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="fb-mask" @keydown="onDialogKey">
-      <div class="fb">
+    <div v-if="open" class="fb-mask" :class="{ 'is-plain': plain }" @keydown="onDialogKey">
+      <div class="fb" :class="{ 'is-plain': plain }">
         <!-- title plate -->
         <div class="fb__title-plate">
           <span class="fb__title war-outline-gold">打 开 项 目</span>
@@ -471,11 +479,11 @@ watch(
 }
 
 .fb__row:hover {
-  background: #32509640;
+  background: var(--war-blue-row-2);
 }
 
 .fb__row--creating {
-  background: #32509633;
+  background: var(--war-blue-row);
 }
 
 .fb__row-glow {
@@ -535,5 +543,72 @@ watch(
   display: flex;
   justify-content: center;
   gap: 16px;
+}
+
+/* ---- 纯净风格（plain）：去 WC3 贴图，浅色 CSS 面板 ---- */
+.fb-mask.is-plain {
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.fb.is-plain {
+  background: var(--war-dialog-bg);
+  border: 1px solid var(--war-panel-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px var(--war-panel-shadow);
+  padding: 16px 20px;
+  box-sizing: border-box;
+}
+
+.fb.is-plain .fb__title-plate {
+  border: none;
+  border-image: none;
+  height: auto;
+  padding: 0 0 4px;
+}
+
+.fb.is-plain .fb__title {
+  font-family: inherit;
+  font-size: 18px;
+  letter-spacing: 2px;
+}
+
+.fb.is-plain .fb__list-iron {
+  display: none;
+}
+
+.fb.is-plain .fb__list-frame {
+  background: var(--war-input-bg);
+  border: 1px solid var(--war-panel-border);
+  border-radius: 8px;
+}
+
+.fb.is-plain .fb__list {
+  inset: 8px;
+}
+
+.fb.is-plain .fb__row-glow {
+  display: none;
+}
+
+.fb.is-plain .fb__row {
+  border-radius: 4px;
+}
+
+.fb.is-plain .fb__row.selected {
+  background: var(--war-highlight-bg);
+}
+
+.fb.is-plain .fb__path,
+.fb.is-plain .fb__path-input,
+.fb.is-plain .fb__name,
+.fb.is-plain .fb__up-text,
+.fb.is-plain .fb__create-input,
+.fb.is-plain .fb__empty,
+.fb.is-plain .fb__error {
+  font-family: inherit;
+}
+
+.fb.is-plain .fb__up-text {
+  color: var(--war-text-muted);
 }
 </style>

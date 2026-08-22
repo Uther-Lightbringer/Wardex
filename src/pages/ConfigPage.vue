@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // Agent config page (features/sessions-and-config.md 第二部分):
 // left = Agent list (★ default gold rim, zebra, autosave-on-switch) +
-// 新建 Agent; right = scrollable form with 应用级设置 (我的头像 / 我的名字 /
-// 界面字体缩放) then the Agent editor; right bottom = 保存并返回/返回.
+// 新建 Agent; right = scrollable Agent editor (draft + dirty flag); right
+// bottom = 保存并返回/返回.
+//   应用级偏好（我的名字/字体缩放/通知/头像/背景/界面风格/透明度/页面颜色）
+//   已拆分到「设置」页 SettingsPage.vue；本页只保留 Agent 编辑。
 //   - Draft model: fields edit a local draft + dirty flag; only an explicit
 //     save writes through (switch row / new / set-default / test / save-back
 //     all save first when dirty).
@@ -18,21 +20,25 @@ import WarButton from '../components/war/WarButton.vue';
 import WarDropdown from '../components/war/WarDropdown.vue';
 import WarDialog from '../components/war/WarDialog.vue';
 import { cmd, fileSrc, isTauri, openUrl } from '../lib/tauri';
+import { copyText } from '../lib/clipboard';
 import { useNavStore } from '../stores/nav';
-import { FONT_SCALE_STEPS, usePrefsStore } from '../stores/prefs';
+import { CHAT_ALPHA_STEPS, FONT_SCALE_STEPS, usePrefsStore } from '../stores/prefs';
+import { THEMES } from '../lib/themes';
 import {
   goModelId,
   isBareCliPath,
   maskKey,
   useAgentsStore,
   type AgentRecord,
+  type PiProbeResult,
+  type TestAgentResult,
+  type TestFrame,
 } from '../stores/agents';
 
 const nav = useNavStore();
 const prefs = usePrefsStore();
 const agents = useAgentsStore();
 
-const BUILTIN_USER_AVATAR = '/assets/ui/avatars/avatar_user_default.png';
 const BUILTIN_AGENT_AVATAR = '/assets/ui/avatars/avatar_agent.png';
 
 // ---------------------------------------------------------------------------
@@ -42,7 +48,7 @@ const BUILTIN_AGENT_AVATAR = '/assets/ui/avatars/avatar_agent.png';
 const selectedId = ref('');
 const draft = reactive({
   name: '',
-  provider: 'kimi',
+  provider: 'pi',
   model: '',
   baseUrl: '',
   /** 允许的思考强度档位（low/high/…，空 = 全部；后端 models.rs effective_efforts）。 */
@@ -50,6 +56,7 @@ const draft = reactive({
   /** 上下文长度（K），随思考强度声明写入 config.toml 的 max_context_size；0/空 = 256。 */
   maxContextK: 256,
   cliPath: '',
+  piDir: '',
   apiKey: '',
   extraArgs: '',
   mcpServers: '',
@@ -182,6 +189,7 @@ function loadAgent(a: AgentRecord): void {
   draft.effortOptions = [...(a.effortOptions ?? [])];
   draft.maxContextK = a.maxContextK || 256;
   draft.cliPath = a.cliPath;
+  draft.piDir = a.piDir;
   draft.apiKey = maskKey(a.apiKey); // display surface: masked only (§9.5)
   draft.extraArgs = a.extraArgs;
   draft.mcpServers = a.mcpServers;
@@ -212,6 +220,7 @@ async function saveCurrent(): Promise<boolean> {
     effortOptions: [...draft.effortOptions],
     maxContextK: clampContextK(draft.maxContextK),
     cliPath: draft.cliPath,
+    piDir: draft.piDir,
     apiKey: draft.apiKey,
     extraArgs: draft.extraArgs,
     mcpServers: draft.mcpServers,
@@ -284,10 +293,19 @@ function onProviderChange(i: number): void {
  * probe(): async scan. autoFill = the "bare value" mode (load / provider
  * switch / test-connect prep): a found path is written back into the CLI
  * field. Manual 检测 with an explicit path only reports (§9.2).
+ * For pi the scan is probe_pi (node + plugin dir), not a CLI probe.
  */
 async function probe(autoFill: boolean, preferredPath = ''): Promise<void> {
   const s = agents.specOf(draft.provider);
   if (!s || s.id === 'custom') return; // custom never probes
+  if (s.id === 'pi') {
+    const preferred = preferredPath || draft.piDir.trim();
+    const r = await agents.probePi(preferred);
+    if (!r) return;
+    if (r.found && r.pluginReady) statusMsg.value = 'Pi 环境就绪';
+    else statusMsg.value = r.message || 'Pi 插件未就绪';
+    return;
+  }
   const providerAtStart = draft.provider;
   const preferred = preferredPath || (isBareCliPath(s, draft.cliPath) ? '' : draft.cliPath);
   const r = await agents.probe(providerAtStart, preferred);
@@ -308,6 +326,18 @@ async function probe(autoFill: boolean, preferredPath = ''): Promise<void> {
 const probeLine = computed<{ text: string; cls: string } | null>(() => {
   const s = spec.value;
   if (!selectedId.value || !s || s.id === 'custom') return null;
+  // pi: 编译二进制是否可用 + 插件目录状态。
+  if (s.id === 'pi') {
+    const r = agents.probeCache['pi'] as unknown as (PiProbeResult & { found?: boolean }) | undefined;
+    if (!r) return null;
+    if (!r.found) {
+      return { text: r.message || 'Pi 二进制未就绪，请先用 bundle-pi.mjs 生成', cls: 'err' };
+    }
+    if (!r.pluginReady) {
+      return { text: r.message || 'Pi 插件未就绪', cls: 'err' };
+    }
+    return { text: `Pi 就绪 @ ${r.pluginDir}`, cls: 'ok' };
+  }
   if (agents.probing[s.id]) return { text: `正在检测 ${s.displayName}…`, cls: '' };
   const r = agents.probeCache[s.id];
   if (!r) return null;
@@ -319,6 +349,15 @@ const probeLine = computed<{ text: string; cls: string } | null>(() => {
 });
 
 async function browseCli(): Promise<void> {
+  // pi 的目录是插件目录，不是可执行文件；写入 piDir。
+  if (spec.value?.id === 'pi') {
+    const picked = await openFileDialog({ multiple: false, directory: true });
+    if (typeof picked !== 'string' || !picked) return;
+    draft.piDir = picked;
+    markDirty();
+    void probe(false, picked);
+    return;
+  }
   const picked = await openFileDialog({
     multiple: false,
     filters: [{ name: '程序', extensions: ['exe'] }],
@@ -355,18 +394,42 @@ async function loadInstallHelp(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 const testing = ref(false);
+const testResult = ref<TestAgentResult | null>(null);
+const testDetailOpen = ref(false);
+const testSelIdx = ref(0);
+
+/** Currently selected transcript frame in the detail dialog. */
+const selectedFrame = computed<TestFrame | null>(() => {
+  const t = testResult.value?.transcript;
+  return t && t[testSelIdx.value] ? t[testSelIdx.value] : (t?.[0] ?? null);
+});
+
+function openTestDetail(): void {
+  testSelIdx.value = 0;
+  testDetailOpen.value = true;
+}
+
+/** Copy the currently selected frame's content (pretty-printed). */
+const copiedFrame = ref(false);
+async function copySelectedFrame(): Promise<void> {
+  if (!selectedFrame.value) return;
+  copiedFrame.value = await copyText(prettyFrame(selectedFrame.value.text));
+  if (copiedFrame.value) setTimeout(() => (copiedFrame.value = false), 1500);
+}
 
 async function testConnection(): Promise<void> {
   if (testing.value || !selectedId.value) return;
+  testResult.value = null;
   if (!(await saveCurrent())) return;
   const s = agents.specOf(draft.provider);
   if (!s?.chatCapable) {
     statusMsg.value = '该 Provider 暂不支持测试';
     return;
   }
-  // Bare path on a builtin provider: resolve it first, ask for a second
-  // click once the probe has landed (§9.3).
-  if (isBareCliPath(s, draft.cliPath)) {
+  // Builtin (non-pi) providers with a bare CLI path resolve it first and ask
+  // for a second click once the probe has landed (§9.2). pi resolves its
+  // binary/plugin dir on the backend instead.
+  if (s.id !== 'pi' && isBareCliPath(s, draft.cliPath)) {
     statusMsg.value = '正在解析 CLI 路径，完成后请再点测试连接';
     void probe(true);
     return;
@@ -375,60 +438,31 @@ async function testConnection(): Promise<void> {
   try {
     const r = await agents.test(selectedId.value);
     if (r === null) return; // another test was already running (ignored)
-    statusMsg.value = statusMsg.value ? `${statusMsg.value}\n${r}` : r;
+    testResult.value = r;
+    statusMsg.value = r.ok ? '✔ 测试成功：连接与模型调用均通过' : `✘ 测试失败：${r.message}`;
   } finally {
     testing.value = false;
   }
 }
 
+/** Pretty-print a captured frame's JSON for display; keep as-is if it isn't JSON. */
+function prettyFrame(text: string): string {
+  const t = text.trim();
+  if (!t) return t;
+  try {
+    return JSON.stringify(JSON.parse(t), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 // ---------------------------------------------------------------------------
-// 应用级设置 (spec §8)
+// Agent 头像（draft 字段，§9.1）：引用图片路径，不复制。
 // ---------------------------------------------------------------------------
 
-// Bumped after each avatar import/clear: the imported file always lands on
-// the SAME path (user_avatar.png), so the <img> needs a cache-buster.
-const avatarSeq = ref(0);
-const userAvatarUrl = computed(() =>
-  prefs.userAvatarPath ? `${fileSrc(prefs.userAvatarPath)}?v=${avatarSeq.value}` : BUILTIN_USER_AVATAR,
-);
 const agentAvatarUrl = computed(() =>
   draft.avatarPath ? fileSrc(draft.avatarPath) : BUILTIN_AGENT_AVATAR,
 );
-
-async function uploadUserAvatar(): Promise<void> {
-  const picked = await openFileDialog({
-    multiple: false,
-    filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] }],
-  });
-  if (typeof picked !== 'string' || !picked) return;
-  const ok = await prefs.importUserAvatar(picked);
-  avatarSeq.value += 1;
-  statusMsg.value = ok ? '头像已更新' : '头像导入失败';
-}
-
-async function clearUserAvatar(): Promise<void> {
-  await prefs.clearUserAvatar();
-  avatarSeq.value += 1;
-  statusMsg.value = '已恢复默认头像';
-}
-
-const userNameDraft = ref(prefs.userName);
-
-function commitUserName(): void {
-  void prefs.setUserName(userNameDraft.value);
-  userNameDraft.value = prefs.userName; // show the trimmed/fallback value
-}
-
-// 界面字体缩放 (§8.3): four fixed steps, applied + persisted immediately.
-const scaleLabels = FONT_SCALE_STEPS.map((s) => `${Math.round(s * 100)}%`);
-const scaleIndex = computed(() => {
-  const i = FONT_SCALE_STEPS.findIndex((s) => Math.abs(s - prefs.fontScale) < 0.001);
-  return i >= 0 ? i : 1;
-});
-
-function onScaleChange(i: number): void {
-  void prefs.setFontScale(FONT_SCALE_STEPS[i]);
-}
 
 async function pickAgentAvatar(): Promise<void> {
   const picked = await openFileDialog({
@@ -480,7 +514,6 @@ function onPageKey(e: KeyboardEvent): void {
 
 async function initPage(): Promise<void> {
   await Promise.all([agents.loadSpecs(), agents.refresh(), prefs.load(), loadInstallHelp()]);
-  userNameDraft.value = prefs.userName;
   if (!selectedId.value && agents.agents.length > 0) {
     const def = agents.byId(agents.defaultAgentId) ?? agents.agents[0];
     loadAgent(def);
@@ -573,48 +606,6 @@ const pageKeysOn = computed(() => nav.page === 'config');
         :hole="[56, 25, 21, 24]"
       >
         <div class="cfg__scroll">
-          <!-- ===== 应用级设置 (§8) ===== -->
-          <div class="cfg__section-title" :style="{ fontSize: prefs.fs(15) + 'px' }">我的设置</div>
-
-          <div class="cfg__avatar-row">
-            <img class="cfg__avatar" :src="userAvatarUrl" draggable="false" />
-            <div class="cfg__avatar-side">
-              <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                对话页用户气泡使用此头像\n未上传时使用默认金发肖像
-              </div>
-              <div class="cfg__btn-row">
-                <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="上传…" @activated="uploadUserAvatar" />
-                <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="恢复默认" @activated="clearUserAvatar" />
-              </div>
-            </div>
-          </div>
-
-          <div class="cfg__field">
-            <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">我的名字</span>
-            <input
-              v-model="userNameDraft"
-              class="war-input cfg__input"
-              placeholder="阿尔萨斯"
-              maxlength="24"
-              :style="{ fontSize: prefs.fs(13) + 'px' }"
-              @change="commitUserName"
-              @keydown.enter.prevent="commitUserName"
-            />
-          </div>
-          <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-            对话页用户气泡显示此名字，留空则默认「阿尔萨斯」
-          </div>
-
-          <div class="cfg__field">
-            <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">界面字体缩放</span>
-            <WarDropdown class="cfg__dropdown" :options="scaleLabels" :model-value="scaleIndex" @activated="onScaleChange" />
-          </div>
-          <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-            立即生效，作用于聊天气泡、输入框、会话列表等主要阅读区
-          </div>
-
-          <div class="cfg__divider"></div>
-
           <!-- ===== Agent 编辑器 (§9) ===== -->
           <div class="cfg__section-title" :style="{ fontSize: prefs.fs(15) + 'px' }">
             {{ selectedId ? 'Agent 编辑器' : '请先在左侧新建或选择 Agent' }}
@@ -709,7 +700,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
               </div>
             </div>
             <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-              勾选该 Agent 可用的思考强度档位；对话页强度下拉只显示这些（思考恒开启）。全不勾 = 全部档位可用；kimi 保存时写入 config.toml 的 support_efforts，opencode 生成模型 variants
+              勾选该 Agent 可用的思考强度档位；对话页强度下拉只显示这些（思考恒开启）。全不勾 = 全部档位可用；kimi 保存时写入 config.toml 的 support_efforts，opencode 生成模型 variants，pi 由驱动注入思考档位下拉
             </div>
 
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
@@ -728,12 +719,28 @@ const pageKeysOn = computed(() => nav.page === 'config');
               </div>
             </div>
 
-            <div class="cfg__field">
+            <div v-if="draft.provider === 'pi'" class="cfg__field">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Pi 插件目录</span>
+              <input
+                v-model="draft.piDir"
+                class="war-input cfg__input"
+                :placeholder="'留空自动定位（workspace 同级 pi 目录 / WARDEX_PI_DIR / 打包内置）'"
+                :style="{ fontSize: prefs.fs(13) + 'px' }"
+                @input="markDirty"
+              />
+            </div>
+            <div v-else class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">CLI 路径</span>
               <input
                 v-model="draft.cliPath"
                 class="war-input cfg__input"
-                :placeholder="isCustom ? 'CLI 可执行文件完整路径' : '留空自动探测'"
+                :placeholder="
+                  isCustom
+                    ? 'CLI 可执行文件完整路径'
+                    : draft.provider === 'pi'
+                      ? '留空自动定位（workspace 同级 pi 目录或 WARDEX_PI_DIR）'
+                      : '留空自动探测'
+                "
                 :style="{ fontSize: prefs.fs(13) + 'px' }"
                 @input="markDirty"
               />
@@ -744,9 +751,19 @@ const pageKeysOn = computed(() => nav.page === 'config');
                 skin="dialog"
                 :width="120"
                 :art-aspect="5.34"
-                :text="agents.probing[draft.provider] ? '检测中…' : '检测 CLI'"
+                :text="
+                  agents.probing[draft.provider]
+                    ? '检测中…'
+                    : draft.provider === 'pi'
+                      ? '检测环境'
+                      : '检测 CLI'
+                "
                 :enabled="!agents.probing[draft.provider]"
-                @activated="probe(isBareCliPath(spec, draft.cliPath))"
+                @activated="
+                  draft.provider === 'pi'
+                    ? probe(false, draft.piDir.trim())
+                    : probe(isBareCliPath(spec, draft.cliPath))
+                "
               />
               <WarButton skin="dialog" :width="120" :art-aspect="5.34" text="浏览…" @activated="browseCli" />
               <WarButton
@@ -798,15 +815,15 @@ const pageKeysOn = computed(() => nav.page === 'config');
               @input="markDirty"
             ></textarea>
 
-            <div class="cfg__avatar-row">
+            <div class="cfg__avatar-row" :class="{ disabled: !selectedId }">
               <img class="cfg__avatar" :src="agentAvatarUrl" draggable="false" />
               <div class="cfg__avatar-side">
                 <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                  Agent 头像（引用图片路径，不复制）\n留空使用内置默认
+                  AI 头像（当前 Agent，引用图片路径不复制）\n{{ selectedId ? '留空使用内置默认' : '请先在左侧新建或选择 Agent' }}
                 </div>
                 <div class="cfg__btn-row">
-                  <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="选择图片…" @activated="pickAgentAvatar" />
-                  <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="重置" @activated="draft.avatarPath = ''; markDirty()" />
+                  <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="选择图片…" :enabled="!!selectedId" @activated="pickAgentAvatar" />
+                  <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="重置" :enabled="!!selectedId" @activated="draft.avatarPath = ''; markDirty()" />
                 </div>
               </div>
             </div>
@@ -833,6 +850,10 @@ const pageKeysOn = computed(() => nav.page === 'config');
             </div>
 
             <div v-if="statusMsg" class="cfg__status" :style="{ fontSize: prefs.fs(11) + 'px' }">{{ statusMsg }}</div>
+
+            <div v-if="testResult" class="cfg__result-row">
+              <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="查看测试结果" @activated="openTestDetail" />
+            </div>
           </div>
         </div>
       </WarFrame>
@@ -875,6 +896,42 @@ const pageKeysOn = computed(() => nav.page === 'config');
         @activated="installOpen = false; probe(true)"
       />
       <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="关闭" @activated="installOpen = false" />
+    </WarDialog>
+
+    <!-- 测试连接结果详情：请求 / 响应 transcript -->
+    <WarDialog
+      v-model:open="testDetailOpen"
+      title-text="测试结果"
+      :message-text="testResult?.message ?? ''"
+      :dialog-width="860"
+      :button-zone-y="0.62"
+      :button-zone-h="0.22"
+    >
+      <template #plate>
+        <div class="cfg__detail" :style="{ fontSize: prefs.fs(10) + 'px' }">
+          <div class="cfg__detail-tabs">
+            <button
+              v-for="(f, i) in testResult?.transcript ?? []"
+              :key="i"
+              type="button"
+              class="cfg__tab"
+              :class="[f.dir === 'req' ? 'is-req' : 'is-res', { active: i === testSelIdx }]"
+              @click="testSelIdx = i"
+            >
+              {{ f.dir === 'req' ? '请求' : '响应' }} {{ i + 1 }}
+            </button>
+          </div>
+          <div class="cfg__detail-head" v-if="selectedFrame">
+            <span class="cfg__trace-dir">{{ selectedFrame.dir === 'req' ? '请求' : '响应' }} {{ testSelIdx + 1 }}</span>
+            <button type="button" class="cfg__copy" @click="copySelectedFrame">
+              {{ copiedFrame ? '已复制' : '复制' }}
+            </button>
+          </div>
+          <pre v-if="selectedFrame" class="cfg__trace-json">{{ prettyFrame(selectedFrame.text) }}</pre>
+          <div v-else class="cfg__detail-empty">（无记录）</div>
+        </div>
+      </template>
+      <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="关闭" @activated="testDetailOpen = false" />
     </WarDialog>
   </PageShell>
 </template>
@@ -954,7 +1011,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
 }
 
 .cfg__agent-row:hover {
-  background: #32509633;
+  background: var(--war-blue-row);
 }
 
 .cfg__agent-row.selected {
@@ -1025,7 +1082,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
 .cfg__divider {
   flex: none;
   height: 1px;
-  background: #2a3344;
+  background: var(--war-border);
   margin: 4px 0;
 }
 
@@ -1034,6 +1091,19 @@ const pageKeysOn = computed(() => nav.page === 'config');
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.cfg__check-row {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--war-text-light-gold);
+}
+
+.cfg__check-text {
+  font-family: SimSun, serif;
 }
 
 .cfg__label {
@@ -1113,6 +1183,11 @@ const pageKeysOn = computed(() => nav.page === 'config');
   gap: 12px;
 }
 
+.cfg__avatar-row.disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 .cfg__avatar {
   flex: none;
   width: 56px;
@@ -1177,6 +1252,99 @@ const pageKeysOn = computed(() => nav.page === 'config');
   font-family: SimSun, serif;
   white-space: pre-line;
   overflow-wrap: break-word;
+}
+
+.cfg__result-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.cfg__detail {
+  width: 100%;
+  max-height: 230px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.cfg__detail-tabs {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.cfg__tab {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cfg__tab.is-req {
+  color: var(--war-gold-dim);
+}
+
+.cfg__tab.active {
+  border-color: var(--war-gold);
+  color: var(--war-gold);
+  background: rgba(242, 207, 107, 0.12);
+}
+
+.cfg__detail-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.cfg__copy {
+  flex: none;
+  padding: 2px 10px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  cursor: pointer;
+}
+
+.cfg__copy:hover {
+  color: var(--war-gold);
+  border-color: var(--war-gold-dim);
+}
+
+.cfg__detail-empty {
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+}
+
+.cfg__trace-json {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  font-family: Consolas, 'Courier New', monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  color: var(--war-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-y: auto;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 3px;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.25);
+  box-sizing: border-box;
 }
 
 .cfg__actions {

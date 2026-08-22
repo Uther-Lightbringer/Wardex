@@ -116,6 +116,11 @@ pub struct SessionMeta {
     pub shelved: Option<bool>,
     #[serde(rename = "permMode", skip_serializing_if = "Option::is_none")]
     pub perm_mode: Option<String>,
+    // Per-session toggle for auto-injecting codegraph symbol context into
+    // prompts. Absent = not set (treated as enabled); once set (even false)
+    // the key persists, matching the insert-once-set behavior of pinned.
+    #[serde(rename = "useCodegraph", skip_serializing_if = "Option::is_none")]
+    pub use_codegraph: Option<bool>,
     #[serde(rename = "lastMessage", skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(rename = "projectDir")]
@@ -793,6 +798,12 @@ impl SessionStore {
             if dir.exists() && fs::remove_dir_all(&dir).is_err() {
                 return Err(SessionsError::DeleteFailed);
             }
+            // pi agent session storage is per-Wardex-session — best-effort
+            // cleanup (an orphan JSONL is harmless, so never fail the delete).
+            let pdir = self.paths.pi_session_dir(id);
+            if pdir.exists() {
+                let _ = fs::remove_dir_all(&pdir);
+            }
         }
         self.index.retain(|r| !doomed.contains(&r.id));
         Ok(true)
@@ -901,6 +912,12 @@ impl SessionStore {
                 if dir.exists() && fs::remove_dir_all(&dir).is_err() {
                     return Err(SessionsError::DeleteFailed);
                 }
+                // pi agent session storage is per-Wardex-session — best-effort
+                // cleanup (an orphan JSONL is harmless, never fail the delete).
+                let pdir = self.paths.pi_session_dir(id);
+                if pdir.exists() {
+                    let _ = fs::remove_dir_all(&pdir);
+                }
             }
             removed.extend(doomed);
             self.index.retain(|r| !removed.contains(&r.id));
@@ -1004,21 +1021,22 @@ impl SessionStore {
     /// Shelve every un-shelved session of a project (monitor deploy = empty
     /// barracks start, raze = clear the field: history goes to the「已搁置」
     /// list, restorable one by one).
-    /// Returns how many were shelved.
-    pub fn shelve_all_for_project(&mut self, project_dir: &str) -> usize {
+    /// Returns the ids of the sessions actually shelved — the caller tears
+    /// down their runtimes (搁置 = 关闭进程，见 lib.rs shelve_session)。
+    pub fn shelve_all_for_project(&mut self, project_dir: &str) -> Vec<String> {
         let ids: Vec<String> = self
             .index
             .iter()
             .filter(|r| r.project_dir.eq_ignore_ascii_case(project_dir) && !r.shelved)
             .map(|r| r.id.clone())
             .collect();
-        let mut n = 0;
+        let mut shelved = Vec::new();
         for id in ids {
             if self.set_session_shelved(&id, true).unwrap_or(false) {
-                n += 1;
+                shelved.push(id);
             }
         }
-        n
+        shelved
     }
 
     /// Per-session permission-mode override (whitelisted to the same four
@@ -1038,6 +1056,21 @@ impl SessionStore {
         if let Some(row) = self.index.iter_mut().find(|r| r.id == session_id) {
             row.perm_mode = meta.perm_mode.clone();
         }
+        Ok(true)
+    }
+
+    /// Per-session toggle for auto-injecting codegraph symbol context into
+    /// prompts. None = unset (defaults to enabled); once set the key persists.
+    pub fn set_use_codegraph(&mut self, session_id: &str, v: bool) -> Result<bool, SessionsError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let Some(meta) = self.meta_mut(session_id) else {
+            return Ok(false);
+        };
+        meta.use_codegraph = Some(v);
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
         Ok(true)
     }
 

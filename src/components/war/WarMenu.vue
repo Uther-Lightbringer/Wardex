@@ -2,7 +2,9 @@
 // Context menu skinned with the dropdown expanded-panel nine-slice
 // (WarMenu.qml). Min width 160, item height 28; highlighted item gold+bold
 // over the KeyboardHighlight glow, disabled items #5a6272.
-import { onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { usePrefsStore } from '../../stores/prefs';
+import { themeOf } from '../../lib/themes';
 
 export interface WarMenuItem {
   label: string;
@@ -23,6 +25,10 @@ const emit = defineEmits<{
   (e: 'update:visible', v: boolean): void;
   (e: 'select', index: number): void;
 }>();
+
+const prefs = usePrefsStore();
+/** pure 风格：浅色 CSS 菜单（不贴图）。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
 
 const root = ref<HTMLElement | null>(null);
 
@@ -57,6 +63,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
       v-if="visible"
       ref="root"
       class="war-menu"
+      :class="{ 'is-plain': plain }"
       :style="{ left: x + 'px', top: y + 'px' }"
       @mousedown.stop
     >
@@ -124,6 +131,39 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocDown, true)
 }
 
 .war-menu__item:hover:not(.disabled) .war-menu__text {
+  color: var(--war-gold);
+  font-weight: bold;
+}
+
+/* ---- pure 风格：浅色 CSS 菜单 ---- */
+.war-menu.is-plain {
+  background: var(--war-dd-pop-bg, #ffffff);
+  border: 1px solid var(--war-dd-border, #c8cfd9);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, 0.12);
+}
+
+.war-menu.is-plain .war-menu__inner {
+  padding: 6px;
+}
+
+.war-menu.is-plain .war-menu__item {
+  border-radius: 4px;
+}
+
+.war-menu.is-plain .war-menu__item:hover:not(.disabled) {
+  background: var(--war-row-hover, #eef2f7);
+}
+
+.war-menu.is-plain .war-menu__glow {
+  display: none;
+}
+
+.war-menu.is-plain .war-menu__text {
+  color: var(--war-dd-text, #2a313c);
+}
+
+.war-menu.is-plain .war-menu__item:hover:not(.disabled) .war-menu__text {
   color: var(--war-gold);
   font-weight: bold;
 }

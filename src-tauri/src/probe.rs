@@ -475,6 +475,28 @@ fn percent_decode(s: &str) -> String {
 /// Differences from session start, kept verbatim from the old code:
 ///   - env injection does NOT apply clearEnvs (only ensureAcp does);
 ///   - program resolution has an extra fallback to "kimi".
+/// One captured test-connection frame: a request we sent to the agent
+/// ("req") or a raw stdout line the agent/model streamed back ("res").
+#[derive(Serialize)]
+pub struct TestFrame {
+    pub dir: &'static str,
+    pub text: String,
+}
+
+/// testAgent outcome: the user-facing Chinese message PLUS the raw
+/// request/response transcript, so the config page can show exactly what was
+/// sent to / received from the model as the test result.
+#[derive(Serialize)]
+pub struct TestResult {
+    pub ok: bool,
+    pub message: String,
+    pub transcript: Vec<Value>,
+}
+
+fn frame(dir: &'static str, text: String) -> Value {
+    serde_json::json!({ "dir": dir, "text": text })
+}
+
 #[derive(Default)]
 pub struct AgentTester {
     in_flight: AtomicBool,
@@ -490,21 +512,215 @@ impl AgentTester {
     }
 
     /// None = a test is already running and this request was ignored.
-    pub async fn test_agent(&self, store: &AgentStore, agent_id: &str) -> Option<String> {
+    pub async fn test_agent(&self, store: &AgentStore, agent_id: &str) -> Option<TestResult> {
         let Some(agent) = store.get(agent_id) else {
-            return Some("Agent 不存在".to_string());
+            return Some(TestResult {
+                ok: false,
+                message: "Agent 不存在".to_string(),
+                transcript: Vec::new(),
+            });
         };
         if !provider::chat_capable(&agent.provider) {
-            return Some("该 Provider 暂不支持测试".to_string());
+            return Some(TestResult {
+                ok: false,
+                message: "该 Provider 暂不支持测试".to_string(),
+                transcript: Vec::new(),
+            });
         }
         if self.in_flight.swap(true, Ordering::SeqCst) {
             return None; // single flight: ignored
         }
         let _guard = FlightGuard(&self.in_flight);
-        Some(self.run(agent).await)
+        if agent.provider == "pi" {
+            Some(self.test_pi(agent).await)
+        } else {
+            Some(self.run(agent).await)
+        }
     }
 
-    async fn run(&self, agent: &Agent) -> String {
+    /// Pi does not speak ACP, so a "test connection" means spawning the
+    /// compiled binary and driving one real RPC prompt (`{"type":"prompt"}`),
+    /// capturing the request/response frames for the transcript. Mirrors the
+    /// ACP phase-2 model call: a handshake alone (here, "it spawned") proves
+    /// nothing about Base URL / API Key / network reachability.
+    async fn test_pi(&self, agent: &Agent) -> TestResult {
+        let mut transcript: Vec<Value> = Vec::new();
+        let fail = |msg: String, transcript: Vec<Value>| TestResult {
+            ok: false,
+            message: msg,
+            transcript,
+        };
+
+        let dist_dir = match crate::chat::pi::locate_plugin_dir(&agent.pi_dir) {
+            Ok(d) => d,
+            Err(e) => return fail(format!("Pi 插件未就绪：{e}"), transcript),
+        };
+        let binary = dist_dir.join(crate::chat::pi::pi_binary_name());
+        let display = binary.to_string_lossy().into_owned();
+        // Render the Wardex custom provider into ~/.pi/agent/models.json so
+        // the agent's baseUrl/apiKey/model actually apply to this call.
+        let provider_key = match crate::models::write_pi_models(agent) {
+            Ok(k) => k.unwrap_or_default(),
+            Err(e) => return fail(format!("Pi 模型配置失败：{e}"), transcript),
+        };
+
+        let mut args = vec![
+            "--mode".to_string(),
+            "rpc".to_string(),
+            "--no-session".to_string(),
+        ];
+        if !provider_key.is_empty() {
+            args.push("--provider".to_string());
+            args.push(provider_key);
+        }
+        let model = agent.model.trim().to_string();
+        if !model.is_empty() {
+            args.push("--model".to_string());
+            args.push(model);
+        }
+
+        let mut cmd = Command::new(&binary);
+        cmd.args(&args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => return fail(format!("无法启动 «{display}»: {e}"), transcript),
+        };
+
+        let mut stdin = child.stdin.take();
+        // A real, verifiable round-trip: ask the model to answer a fixed
+        // phrase, then require that phrase to come back (not merely "it
+        // streamed something").
+        let expected = "为了艾泽拉斯";
+        let prompt_text = format!("这是一条联通测试。请你直接回复“{expected}”。");
+        let ping = serde_json::json!({ "type": "prompt", "message": prompt_text });
+        transcript.push(frame(
+            "req",
+            serde_json::to_string_pretty(&ping).unwrap_or_default(),
+        ));
+        if let Some(s) = stdin.as_mut() {
+            if !send_frame(s, &ping).await {
+                return fail(format!("失败 ({display}): 无法写入子进程输入"), transcript);
+            }
+        }
+
+        let stderr_task = child.stderr.take().map(|mut err| {
+            tokio::spawn(async move {
+                let mut s = String::new();
+                let _ = err.read_to_string(&mut s).await;
+                s
+            })
+        });
+        let Some(stdout) = child.stdout.take() else {
+            return fail(format!("失败 ({display}): 无法读取子进程输出"), transcript);
+        };
+        let mut lines = BufReader::new(stdout).lines();
+
+        let phase = async {
+            // Accumulate the assistant's streamed text so we can verify the
+            // model actually produced the expected phrase.
+            let mut answer: String = String::new();
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        transcript.push(frame("res", line.clone()));
+                        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
+                            continue; // non-JSON noise on stdout
+                        };
+                        let ty = v.get("type").and_then(Value::as_str).unwrap_or_default();
+                        match ty {
+                            "response" => {
+                                // A success:true prompt ack only means the
+                                // command was accepted — the model's answer
+                                // still has to stream in. Keep going.
+                                if v.get("command").and_then(Value::as_str) == Some("prompt")
+                                    && v.get("success").and_then(Value::as_bool) == Some(false)
+                                {
+                                    let err = v
+                                        .get("error")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("prompt 被拒绝");
+                                    return format!("失败 ({display}): Pi 模型调用被拒绝 — {err}");
+                                }
+                            }
+                            "message_update" => {
+                                let ev = v
+                                    .get("assistantMessageEvent")
+                                    .or_else(|| v.get("messageUpdate"));
+                                let kind = ev
+                                    .and_then(|e| e.get("type"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+                                if kind == "text_delta" {
+                                    if let Some(t) = ev.and_then(|e| e.get("delta")).and_then(Value::as_str) {
+                                        answer.push_str(t);
+                                    }
+                                }
+                            }
+                            "turn_end" | "agent_settled" => {
+                                // The turn is done: judge by what was streamed.
+                                if answer.contains(expected) {
+                                    return "成功: Pi 联通测试通过 — 模型返回了预期回复".to_string();
+                                }
+                                let snippet = truncate_200(&answer);
+                                return if snippet.is_empty() {
+                                    format!("失败 ({display}): Pi 模型未返回任何文本")
+                                } else {
+                                    format!("失败 ({display}): Pi 模型回复未包含「{expected}」 — 实际回复：{snippet}")
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(None) => {
+                        let code = child.wait().await.ok().and_then(|s| s.code());
+                        let stderr_text = match stderr_task {
+                            Some(t) => t.await.unwrap_or_default(),
+                            None => String::new(),
+                        };
+                        let code_str = code.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+                        let mut msg = format!("失败 ({display}): Pi 进程在响应前退出 (code {code_str})");
+                        let stderr_text = stderr_text.trim();
+                        if !stderr_text.is_empty() {
+                            msg.push_str(" — ");
+                            msg.push_str(&truncate_200(stderr_text));
+                        }
+                        return msg;
+                    }
+                    Err(e) => return format!("失败 ({display}): 读取输出失败 — {e}"),
+                }
+            }
+        };
+        let msg = match tokio::time::timeout(MODEL_CALL_TIMEOUT, phase).await {
+            Ok(m) => m,
+            Err(_) => format!(
+                "失败 ({display}): 已连接但模型 {} 秒内无响应 — 请检查 Base URL / API Key / 网络代理",
+                MODEL_CALL_TIMEOUT.as_secs()
+            ),
+        };
+        TestResult {
+            ok: msg.starts_with("成功"),
+            message: msg,
+            transcript,
+        }
+    }
+
+    async fn run(&self, agent: &Agent) -> TestResult {
+        let mut transcript: Vec<Value> = Vec::new();
+        let message = self.run_inner(agent, &mut transcript).await;
+        TestResult {
+            ok: message.starts_with("成功"),
+            message,
+            transcript,
+        }
+    }
+
+    async fn run_inner(&self, agent: &Agent, transcript: &mut Vec<Value>) -> String {
         let spec = provider::spec(&agent.provider);
 
         // Env: apiKey (+ bearer special case) and baseUrl only — clearEnvs is
@@ -566,7 +782,9 @@ impl AgentTester {
         // starts.
         let mut stdin = child.stdin.take();
         if let Some(s) = stdin.as_mut() {
-            let _ = send_frame(s, &initialize_request()).await;
+            let req = initialize_request();
+            transcript.push(frame("req", serde_json::to_string_pretty(&req).unwrap_or_default()));
+            let _ = send_frame(s, &req).await;
         }
 
         let stderr_task = child.stderr.take().map(|mut err| {
@@ -588,6 +806,7 @@ impl AgentTester {
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
+                        transcript.push(frame("res", line.clone()));
                         if let Some(verdict) = parse_initialize_response(&line, &display) {
                             return verdict;
                         }
@@ -631,7 +850,7 @@ impl AgentTester {
         };
 
         // Phase 2: prove the configured model is actually callable.
-        model_call(&mut child, &mut stdin, &mut lines, &display, &agent_info).await
+        model_call(&mut child, &mut stdin, &mut lines, &display, &agent_info, transcript).await
     }
 }
 
@@ -721,6 +940,7 @@ async fn model_call(
     lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     display: &str,
     agent_info: &str,
+    transcript: &mut Vec<Value>,
 ) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -741,13 +961,20 @@ async fn model_call(
         let Some(s) = stdin.as_mut() else {
             return format!("失败 ({display}): 无法写入子进程输入");
         };
+        transcript.push(frame("req", serde_json::to_string_pretty(&new_session).unwrap_or_default()));
         if !send_frame(s, &new_session).await {
             return format!("失败 ({display}): 无法写入子进程输入");
         }
         let mut prompted = false;
+        // A real, verifiable round-trip (same as the pi test): ask the model
+        // to answer a fixed phrase, then require that phrase to come back in
+        // the streamed reply — not merely "it streamed something".
+        let expected = "为了艾泽拉斯";
+        let mut answer: String = String::new();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
+                    transcript.push(frame("res", line.clone()));
                     let Ok(msg) = serde_json::from_str::<Value>(line.trim()) else {
                         continue; // banner/log noise on stdout
                     };
@@ -771,12 +998,13 @@ async fn model_call(
                                 "method": "session/prompt",
                                 "params": {
                                     "sessionId": sid,
-                                    "prompt": [{ "type": "text", "text": "ping" }],
+                                    "prompt": [{ "type": "text", "text": format!("这是一条联通测试。请你直接回复“{expected}”。") }],
                                 },
                             });
                             let Some(s) = stdin.as_mut() else {
                                 return format!("失败 ({display}): 无法写入子进程输入");
                             };
+                            transcript.push(frame("req", serde_json::to_string_pretty(&prompt).unwrap_or_default()));
                             if !send_frame(s, &prompt).await {
                                 return format!("失败 ({display}): 无法写入子进程输入");
                             }
@@ -786,24 +1014,44 @@ async fn model_call(
                             if let Some(detail) = error_detail(&msg) {
                                 return format!("失败 ({display}): 模型调用失败 — {detail}");
                             }
-                            return format!("成功: ACP 握手 + 模型调用通过{suffix}");
+                            // Turn finished but the expected phrase never
+                            // streamed (early success above would have caught
+                            // it) — report what the model actually said.
+                            let snippet = truncate_200(&answer);
+                            return if snippet.is_empty() {
+                                format!("失败 ({display}): 模型未返回任何文本{suffix}")
+                            } else {
+                                format!("失败 ({display}): 模型回复未包含「{expected}」 — 实际回复：{snippet}{suffix}")
+                            };
                         }
                         _ => {
-                            // Streaming activity after the prompt also proves
-                            // the model is alive — no need to wait for the
-                            // final prompt response.
+                            // Accumulate the assistant's streamed message text;
+                            // seeing the expected phrase proves the model
+                            // actually replied as instructed.
                             if prompted
                                 && msg.get("method").and_then(Value::as_str)
                                     == Some("session/update")
                             {
-                                let kind = msg
+                                let update = msg
                                     .get("params")
                                     .and_then(|p| p.get("update"))
-                                    .and_then(|u| u.get("sessionUpdate"))
+                                    .cloned()
+                                    .unwrap_or(Value::Null);
+                                let kind = update
+                                    .get("sessionUpdate")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default();
-                                if matches!(kind, "agent_message_chunk" | "agent_thought_chunk") {
-                                    return format!("成功: ACP 握手 + 模型调用通过{suffix}");
+                                if kind == "agent_message_chunk" {
+                                    if let Some(t) = update
+                                        .get("content")
+                                        .and_then(|c| c.get("text"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        answer.push_str(t);
+                                        if answer.contains(expected) {
+                                            return format!("成功: ACP 联通测试通过 — 模型返回了预期回复{suffix}");
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1104,6 +1352,7 @@ mod tests {
                 &paths,
                 &id,
                 &AgentPatch {
+                    provider: Some("kimi".to_string()),
                     cli_path: Some(fake.to_string_lossy().into_owned()),
                     ..Default::default()
                 },
@@ -1115,22 +1364,24 @@ mod tests {
     #[tokio::test]
     async fn test_agent_success_skips_noise_and_banner_lines() {
         let tmp = tempfile::tempdir().expect("tmp");
+        // The expected phrase lives in a UTF-8 file and is injected via %P%
+        // so the .cmd source stays pure ASCII (cmd's GBK batch parser would
+        // mangle inline UTF-8 Chinese and corrupt the script).
+        let phrase_path = tmp.path().join("phrase.txt");
+        std::fs::write(&phrase_path, "为了艾泽拉斯".as_bytes()).expect("write phrase");
+        let phrase = phrase_path.to_string_lossy();
         let (store, id) = store_with_agent(
             &tmp,
-            concat!(
-                "@echo warming up\n",
-                "@set /p req1=\n",
-                "@echo {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"fake-agent\",\"version\":\"9.9\"},\"capabilities\":{}}}\n",
-                "@set /p req2=\n",
-                "@echo {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"s1\"}}\n",
-                "@set /p req3=\n",
-                "@echo {\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"s1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"pong\"}}}}\n",
-                "@echo {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"stopReason\":\"end_turn\"}}\n",
+            &format!(
+                "@set /p P=<{phrase}\n@echo warming up\n@set /p req1=\n@echo {{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"protocolVersion\":1,\"agentInfo\":{{\"name\":\"fake-agent\",\"version\":\"9.9\"}},\"capabilities\":{{}}}}}}\n@set /p req2=\n@echo {{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"sessionId\":\"s1\"}}}}\n@set /p req3=\n@echo {{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"s1\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"%P%\"}}}}}}}}\n@echo {{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{{\"stopReason\":\"end_turn\"}}}}\n",
+                phrase = phrase,
             ),
         );
         let tester = AgentTester::new();
-        let msg = tester.test_agent(&store, &id).await.expect("not busy");
-        assert_eq!(msg, "成功: ACP 握手 + 模型调用通过 — fake-agent 9.9");
+        let r = tester.test_agent(&store, &id).await.expect("not busy");
+        assert_eq!(r.message, "成功: ACP 联通测试通过 — 模型返回了预期回复 — fake-agent 9.9");
+        assert!(r.ok, "expected ok=true");
+        assert!(!r.transcript.is_empty(), "expected a captured transcript");
         assert!(!tester.testing(), "flight guard released");
     }
 
@@ -1149,10 +1400,38 @@ mod tests {
             ),
         );
         let tester = AgentTester::new();
-        let msg = tester.test_agent(&store, &id).await.expect("not busy");
+        let r = tester.test_agent(&store, &id).await.expect("not busy");
         assert!(
-            msg.contains("模型调用失败 — HTTP 401 invalid api key"),
-            "{msg}"
+            r.message.contains("模型调用失败 — HTTP 401 invalid api key"),
+            "{:?}",
+            r.message
+        );
+        assert!(!r.ok);
+    }
+
+    #[tokio::test]
+    async fn test_agent_reply_missing_expected_phrase() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // ASCII-only .cmd source; a wrong (non-matching) ASCII reply.
+        let (store, id) = store_with_agent(
+            &tmp,
+            concat!(
+                "@set /p req1=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":1,\"agentInfo\":{\"name\":\"fake-agent\",\"version\":\"9.9\"},\"capabilities\":{}}}\n",
+                "@set /p req2=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"sessionId\":\"s1\"}}\n",
+                "@set /p req3=\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"s1\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello\"}}}}\n",
+                "@echo {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"stopReason\":\"end_turn\"}}\n",
+            ),
+        );
+        let tester = AgentTester::new();
+        let r = tester.test_agent(&store, &id).await.expect("not busy");
+        assert!(!r.ok);
+        assert!(
+            r.message.contains("模型回复未包含「为了艾泽拉斯」 — 实际回复：hello"),
+            "{:?}",
+            r.message
         );
     }
 
@@ -1164,8 +1443,8 @@ mod tests {
             "@set /p req=\n@echo {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"bad key\"}}\n",
         );
         let tester = AgentTester::new();
-        let msg = tester.test_agent(&store, &id).await.expect("not busy");
-        assert!(msg.contains("initialize 被拒绝 — bad key"), "{msg}");
+        let r = tester.test_agent(&store, &id).await.expect("not busy");
+        assert!(r.message.contains("initialize 被拒绝 — bad key"), "{:?}", r.message);
     }
 
     #[tokio::test]
@@ -1173,9 +1452,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let (store, id) = store_with_agent(&tmp, "@echo boom 1>&2\n@exit /b 3\n");
         let tester = AgentTester::new();
-        let msg = tester.test_agent(&store, &id).await.expect("not busy");
-        assert!(msg.contains("进程在握手前退出 (code 3)"), "{msg}");
-        assert!(msg.contains("boom"), "{msg}");
+        let r = tester.test_agent(&store, &id).await.expect("not busy");
+        assert!(r.message.contains("进程在握手前退出 (code 3)"), "{:?}", r.message);
+        assert!(r.message.contains("boom"), "{:?}", r.message);
     }
 
     #[tokio::test]
@@ -1184,7 +1463,7 @@ mod tests {
         let (store, _id) = store_with_agent(&tmp, "@exit /b 0\n");
         let tester = AgentTester::new();
         assert_eq!(
-            tester.test_agent(&store, "missing").await,
+            tester.test_agent(&store, "missing").await.map(|r| r.message),
             Some("Agent 不存在".to_string())
         );
     }

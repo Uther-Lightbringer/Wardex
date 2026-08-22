@@ -204,7 +204,7 @@ function cancel(): void {
 }
 
 .ced__counter.full {
-  color: #ff8a70;
+  color: var(--war-warn);
 }
 
 .ced__body {
@@ -217,8 +217,8 @@ function cancel(): void {
   flex: 1;
   min-width: 0;
   resize: none;
-  background: #10141f;
-  border: 1px solid #2a3344;
+  background: var(--war-panel);
+  border: 1px solid var(--war-border);
   border-radius: 2px;
   color: var(--war-text);
   font-family: SimSun, serif;

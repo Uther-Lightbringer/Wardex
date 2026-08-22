@@ -48,8 +48,25 @@ pub struct ProviderSpec {
     pub chat_capable: bool,
 }
 
-/// Registration order is the UI list order: kimi, claude, codex, opencode, custom.
+/// Registration order is the UI list order: pi first, then ACP CLIs.
 pub static REGISTRY: &[ProviderSpec] = &[
+    // Pi Agent: NOT an ACP CLI — driven over Pi RPC (chat/pi.rs). First in
+    // the list because Pi is WarDex's primary agent runtime.
+    ProviderSpec {
+        id: "pi",
+        display_name: "Pi Agent",
+        default_command: "",
+        acp_args: &[],
+        api_key_envs: &[],
+        base_url_envs: &[],
+        clear_envs: &[],
+        bearer_token_env: "",
+        official_key_prefix: "",
+        base_url_hint: "Pi 自定义端点：填写 OpenAI 兼容根地址（如 https://api.xxx.com/v1），连同模型一起写入 ~/.pi/agent/models.json（api=openai-completions）；留空则用 pi 自己的 ~/.pi 配置",
+        mode_map: &[],
+        install_hint: "Pi 为自包含二进制（bundle-pi.mjs / 安装包内置）。默认定位 workspace 同级 pi 目录，可在「Pi 插件目录」指定或设 WARDEX_PI_DIR",
+        chat_capable: true,
+    },
     ProviderSpec {
         id: "kimi",
         display_name: "Kimi CLI",
@@ -292,9 +309,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_five_records_in_order() {
+    fn registry_has_six_records_in_order() {
         let ids: Vec<&str> = ids().collect();
-        assert_eq!(ids, ["kimi", "claude", "codex", "opencode", "custom"]);
+        assert_eq!(ids, ["pi", "kimi", "claude", "codex", "opencode", "custom"]);
         // Every record: fixed chat_capable, non-empty display/hints.
         for s in REGISTRY {
             assert!(s.chat_capable, "{} chat_capable", s.id);
@@ -356,6 +373,16 @@ mod tests {
         assert!(custom.acp_args.is_empty());
         assert_eq!(custom.api_key_envs, &["OPENAI_API_KEY"]);
         assert_eq!(custom.base_url_envs, &["OPENAI_BASE_URL"]);
+
+        // pi: embedded plugin — no CLI command, no env injection.
+        let pi = spec("pi").expect("pi");
+        assert_eq!(pi.display_name, "Pi Agent");
+        assert_eq!(pi.default_command, "");
+        assert!(pi.acp_args.is_empty());
+        assert!(pi.api_key_envs.is_empty());
+        assert!(pi.base_url_envs.is_empty());
+        assert!(pi.clear_envs.is_empty());
+        assert!(pi.mode_map.is_empty());
     }
 
     #[test]

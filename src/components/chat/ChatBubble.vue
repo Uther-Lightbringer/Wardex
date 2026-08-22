@@ -747,7 +747,7 @@ const visibleAtts = computed(() =>
 .bubble-sys__text {
   font-family: SimSun, serif;
   color: var(--war-text-muted);
-  background: #12151c44;
+  background: var(--war-glass-2);
   border: 1px solid var(--war-gold-dim);
   border-radius: 10px;
   padding: 2px 12px;
@@ -768,8 +768,8 @@ const visibleAtts = computed(() =>
 /* terminal-command block (`!` prefix): full-width, terminal green accents */
 .bubble-term {
   width: 100%;
-  border: 1px solid #3f7a52;
-  background: #0d1116f0;
+  border: 1px solid var(--war-term-border);
+  background: var(--war-panel-dark);
   border-radius: 3px;
   margin: 2px 0;
   font-family: Consolas, monospace;
@@ -780,11 +780,11 @@ const visibleAtts = computed(() =>
   align-items: center;
   gap: 8px;
   padding: 4px 10px;
-  border-bottom: 1px solid #1a2230;
+  border-bottom: 1px solid var(--war-panel-2);
 }
 
 .bubble-term__prompt {
-  color: #5cb380;
+  color: var(--war-term-accent);
   font-weight: bold;
   user-select: none;
 }
@@ -800,7 +800,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-term__status {
-  color: #5cb380;
+  color: var(--war-term-accent);
   flex: none;
   user-select: none;
 }
@@ -820,7 +820,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-term__kill {
-  color: #ff8a70;
+  color: var(--war-warn);
   flex: none;
   user-select: none;
   padding: 0 4px;
@@ -852,7 +852,7 @@ const visibleAtts = computed(() =>
   padding: 6px 10px;
   white-space: pre-wrap;
   overflow-wrap: break-word;
-  color: #c8d6c8;
+  color: var(--war-term-text);
   user-select: text;
 }
 
@@ -943,7 +943,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-body.streaming {
-  box-shadow: inset 0 0 0 1px #f2cf6b66;
+  box-shadow: inset 0 0 0 1px var(--war-stream-ring);
 }
 
 .bubble-body.error .seg-text__plain,
@@ -994,7 +994,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-head__usage-out {
-  color: #6fd17f;
+  color: var(--war-usage-out);
   margin-left: 6px;
 }
 
@@ -1004,12 +1004,12 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-head__copy {
-  color: #a0a8b8;
+  color: var(--war-text-light-2);
   margin-left: auto;
 }
 
 .bubble-head__branch {
-  color: #a0a8b8;
+  color: var(--war-text-light-2);
 }
 
 .bubble-head__branch:hover {
@@ -1017,7 +1017,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-head__md {
-  color: #a0a8b8;
+  color: var(--war-text-light-2);
 }
 
 .bubble-head__md:hover {
@@ -1034,7 +1034,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-head__copy.copied {
-  color: #80f0a0;
+  color: var(--war-copied);
 }
 
 /* ---- text segments ---- */
@@ -1091,10 +1091,10 @@ const visibleAtts = computed(() =>
   min-width: 0;
   margin: 2px 0 6px;
   padding: 2px 10px;
-  background: #12151c44;
-  border: 1px solid #3a4a40;
+  background: var(--war-glass-2);
+  border: 1px solid var(--war-proc-border);
   border-radius: 2px;
-  color: #d0d6e0;
+  color: var(--war-text-light);
   user-select: none;
   overflow: hidden;
 }
@@ -1140,13 +1140,13 @@ const visibleAtts = computed(() =>
 }
 
 .seg-proc__flavor-text {
-  color: #ffffff;
+  color: var(--war-text-dim);
 }
 
 /* ---- plan card (ACP plan updates) ---- */
 .seg-plan {
-  background: #12151c44;
-  border: 1px solid #4a4033;
+  background: var(--war-glass-2);
+  border: 1px solid var(--war-plan-border);
   border-radius: 2px;
   margin: 4px 0;
   padding: 4px 8px;
@@ -1158,7 +1158,7 @@ const visibleAtts = computed(() =>
 }
 
 .seg-plan__row {
-  color: #d0d6e0;
+  color: var(--war-text-light);
   padding: 1px 0;
   user-select: text;
 }
@@ -1169,7 +1169,7 @@ const visibleAtts = computed(() =>
 }
 
 .seg-plan__icon.done {
-  color: #7ec88a;
+  color: var(--war-plan-done);
 }
 
 /* ---- attachments ---- */
@@ -1193,8 +1193,8 @@ const visibleAtts = computed(() =>
   gap: 6px;
   max-width: 220px;
   padding: 4px 8px;
-  background: #1a2334;
-  border: 1px solid #2c4a7a;
+  background: var(--war-panel-2);
+  border: 1px solid var(--war-att-border);
   border-radius: 2px;
 }
 
@@ -1205,7 +1205,7 @@ const visibleAtts = computed(() =>
 }
 
 .bubble-atts__chip span {
-  color: #c0d0ec;
+  color: var(--war-text-light-3);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1213,11 +1213,11 @@ const visibleAtts = computed(() =>
 </style>
 
 <style>
-/* markdown body (unscoped: v-html content). WC3 gold tone (四.7): headings
-   and emphasis in gold, code blocks dark with a thin brass border, quotes /
-   links / list markers follow the warTheme palette. Kept compact — body
-   text styling only, no layout interference with the bubble frame. Shared
-   with FilePreviewDialog's preview pane (same .md-body class). */
+/* markdown body (unscoped: v-html content). Colors come from the --md-*
+   semantic variables in warTheme.css (war = WC3 gold tone 四.7, pure =
+   light reading palette) so both themes share these rules. Kept compact —
+   body text styling only, no layout interference with the bubble frame.
+   Shared with FilePreviewDialog's preview pane (same .md-body class). */
 .md-body > :first-child {
   margin-top: 0;
 }
@@ -1230,15 +1230,15 @@ const visibleAtts = computed(() =>
 }
 .md-body strong,
 .md-body b {
-  color: var(--war-gold-bright);
+  color: var(--md-strong);
 }
 .md-body em,
 .md-body i {
-  color: var(--war-gold);
+  color: var(--md-em);
 }
 .md-body pre {
-  background: #00000070;
-  border: 1px solid var(--war-gold-input);
+  background: var(--md-pre-bg);
+  border: 1px solid var(--md-pre-border);
   border-radius: 2px;
   padding: 6px 8px;
   overflow-x: auto;
@@ -1258,10 +1258,10 @@ const visibleAtts = computed(() =>
   right: 4px;
   z-index: 1;
   padding: 1px 8px;
-  background: #12151cbb;
+  background: var(--war-glass-2);
   border: 1px solid var(--war-gold-dim);
   border-radius: 2px;
-  color: #a0a8b8;
+  color: var(--war-text-light-2);
   font-family: SimSun, serif;
   font-size: 11px;
   cursor: url('/assets/ui/misc/cursor_green_32.png') 1 0, pointer;
@@ -1278,8 +1278,8 @@ const visibleAtts = computed(() =>
 }
 .md-body code {
   font-family: Consolas, monospace;
-  background: #00000050;
-  color: var(--war-gold-bright);
+  background: var(--md-code-bg);
+  color: var(--md-code-text);
   padding: 0 3px;
   border-radius: 2px;
   font-size: 0.92em;
@@ -1295,15 +1295,15 @@ const visibleAtts = computed(() =>
   padding-left: 22px;
 }
 .md-body li::marker {
-  color: var(--war-gold-dim);
+  color: var(--md-marker);
 }
 .md-body h1,
 .md-body h2,
 .md-body h3,
 .md-body h4 {
   margin: 10px 0 6px;
-  color: var(--war-gold);
-  font-family: SimSun, serif;
+  color: var(--md-heading);
+  font-family: var(--md-heading-font);
   font-weight: bold;
   text-shadow:
     -1px 0 var(--war-outline-brown), 1px 0 var(--war-outline-brown),
@@ -1315,15 +1315,15 @@ const visibleAtts = computed(() =>
 .md-body blockquote {
   margin: 6px 0;
   padding-left: 10px;
-  border-left: 3px solid var(--war-gold-dim);
+  border-left: 3px solid var(--md-quote-border);
   color: var(--war-text-muted);
 }
 .md-body a {
-  color: var(--war-gold-bright);
+  color: var(--md-link);
   text-decoration: underline;
 }
 .md-body a:hover {
-  color: var(--war-gold);
+  color: var(--md-link-hover);
 }
 .md-body img {
   max-width: min(100%, 320px);
@@ -1364,15 +1364,15 @@ const visibleAtts = computed(() =>
 }
 .md-body th,
 .md-body td {
-  border: 1px solid #2a3344;
+  border: 1px solid var(--war-border);
   padding: 3px 8px;
 }
 .md-body th {
-  color: var(--war-gold);
+  color: var(--md-table-head);
 }
 .md-body hr {
   border: none;
-  border-top: 1px solid #2a3344;
+  border-top: 1px solid var(--war-border);
   margin: 8px 0;
 }
 

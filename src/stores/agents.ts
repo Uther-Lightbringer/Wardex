@@ -25,6 +25,8 @@ export interface AgentRecord {
   /** 保存时写入 config.toml 模型声明的 max_context_size，单位 K；0 = 256K 兜底。 */
   maxContextK: number;
   cliPath: string;
+  /** provider "pi" 的插件目录；空 = 自动定位。 */
+  piDir: string;
   /** PLAINTEXT from the backend — display surfaces must maskKey() it. */
   apiKey: string;
   extraArgs: string;
@@ -49,6 +51,7 @@ export type AgentPatch = Partial<
     | 'effortOptions'
     | 'maxContextK'
     | 'cliPath'
+    | 'piDir'
     | 'apiKey'
     | 'extraArgs'
     | 'mcpServers'
@@ -76,6 +79,28 @@ export interface ProbeResult {
   version: string;
   error: string;
   message: string;
+}
+
+/** Pi 插件探测 (probe_pi command; chat/pi.rs probe_result). */
+export interface PiProbeResult {
+  found: boolean;
+  pluginDir: string;
+  pluginReady: boolean;
+  message: string;
+}
+
+/** One captured test-connection frame (probe.rs TestFrame). */
+export interface TestFrame {
+  /** "req" = we sent this to the agent; "res" = agent/model streamed it back. */
+  dir: 'req' | 'res';
+  text: string;
+}
+
+/** testAgent outcome (probe.rs TestResult). */
+export interface TestAgentResult {
+  ok: boolean;
+  message: string;
+  transcript: TestFrame[];
 }
 
 /** maskKey (agents.rs): ≤8 chars fully masked, else left(3)+"****"+right(4). */
@@ -165,7 +190,7 @@ export const useAgentsStore = defineStore('agents', {
       }
     },
 
-    /** 新建 Agent (§7): provider kimi / model moonshot-v1-auto / cliPath ""
+    /** 新建 Agent: provider pi / model 空（Pi 自带默认） / cliPath ""
      * (empty → auto-probe). Returns the new id. */
     async create(name: string): Promise<string> {
       const id = await cmd<string>('create_agent', { name });
@@ -236,13 +261,27 @@ export const useAgentsStore = defineStore('agents', {
     },
 
     /** testAgent (§9.3): single-flight in Rust; null = a test is already
-     * running (this click was ignored). Success = ACP initialize handshake. */
-    async test(id: string): Promise<string | null> {
+     * running (this click was ignored). Success = ACP initialize handshake.
+     * Result carries the raw request/response transcript for display. */
+    async test(id: string): Promise<TestAgentResult | null> {
       try {
         this.lastError = '';
-        return await cmd<string | null>('test_agent', { agentId: id });
+        return await cmd<TestAgentResult | null>('test_agent', { agentId: id });
       } catch (e) {
-        return String(e);
+        return { ok: false, message: String(e), transcript: [] };
+      }
+    },
+
+    /** probe_pi: 编译二进制可用性 + 插件目录就绪状态（provider "pi" 前置检查）。
+     * ChatPage 选择 pi 与配置页探测按钮共用。 */
+    async probePi(preferredPath: string): Promise<PiProbeResult> {
+      try {
+        const r = await cmd<PiProbeResult>('probe_pi', { preferredPath: preferredPath ?? '' });
+        this.probeCache = { ...this.probeCache, pi: r as unknown as ProbeResult };
+        return r;
+      } catch (e) {
+        console.warn('[agents] probe_pi failed', e);
+        return { found: false, pluginDir: '', pluginReady: false, message: String(e) };
       }
     },
   },

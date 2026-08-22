@@ -20,6 +20,53 @@
   --war-user-blue: #7eb6ff;       /* user-side name / user identity blue */
   --war-outline-brown: #241500;   /* gold text outline color */
   --war-outline-dark: #1a1000;    /* WarDialog title outline color */
+
+  /* 主流程机械替换用语义变量（war 值 = 原硬编码；pure 覆盖见下方） */
+  --war-border: #2a3344;          /* 通用边框 */
+  --war-border-brown: #6a5a3f;    /* 棕色边框 */
+  --war-panel: #10141f;           /* 不透明深色面板 */
+  --war-panel-glass: #10141f99;   /* 半透明深色面板 */
+  --war-panel-2: #1a2334;         /* 稍浅深色面板 */
+  --war-panel-dark: #0d1116f0;    /* 近黑面板（气泡区/条/浮层） */
+  --war-panel-dark-solid: #0d1116;
+  --war-glass-2: #12151c44;       /* 半透明深玻璃 */
+  --war-input-bg: #0b0d12;        /* 输入框/代码区底 */
+  --war-text-light: #d0d6e0;      /* 深面板上的浅色文本 */
+  --war-text-light-2: #a0a8b8;
+  --war-text-light-3: #c0d0ec;
+  --war-text-light-gold: #e8d9a0;
+  --war-blue-row: #32509633;      /* 选中行蓝底 */
+  --war-blue-row-2: #32509640;
+
+  /* Markdown 正文语义变量（ChatBubble .md-body，FilePreviewDialog 预览共用；
+     war 值 = 原硬编码金色系，pure 覆盖见下方纯净风格区） */
+  --md-heading: var(--war-gold);
+  --md-heading-font: SimSun, serif;
+  --md-strong: var(--war-gold-bright);
+  --md-em: var(--war-gold);
+  --md-link: var(--war-gold-bright);
+  --md-link-hover: var(--war-gold);
+  --md-code-bg: #00000050;
+  --md-code-text: var(--war-gold-bright);
+  --md-pre-bg: #00000070;
+  --md-pre-border: var(--war-gold-input);
+  --md-marker: var(--war-gold-dim);
+  --md-quote-border: var(--war-gold-dim);
+  --md-table-head: var(--war-gold);
+
+  /* 状态/角色色（终端块、usage、复制反馈、计划完成、流式描边等；
+     war 值 = 原硬编码，pure 覆盖见下方纯净风格区） */
+  --war-term-border: #3f7a52;
+  --war-term-accent: #5cb380;
+  --war-term-text: #c8d6c8;
+  --war-warn: #ff8a70;
+  --war-usage-out: #6fd17f;
+  --war-copied: #80f0a0;
+  --war-plan-done: #7ec88a;
+  --war-stream-ring: #f2cf6b66;
+  --war-proc-border: #3a4a40;
+  --war-plan-border: #4a4033;
+  --war-att-border: #2c4a7a;
 }
 
 html,
@@ -123,4 +170,342 @@ body,
 
 img {
   -webkit-user-drag: none;
+}
+
+/* =====================================================================
+ * 纯净风格（html[data-theme="pure"]，src/lib/themes.ts 注册表）
+ * war 变量整体换浅色系；铁轨/贴图/剑形光标由组件 plain 路径或下方覆盖关掉。
+ * ===================================================================== */
+html[data-theme='pure'] {
+  /* 浅色系调色板 */
+  --war-gold: #8a6d1f;
+  --war-gold-bright: #a9882f;
+  --war-gold-dim: #b07c0a;
+  --war-gold-input: #8a6f24;
+  --war-text: #1f242c;
+  --war-text-dim: #3d4554;
+  --war-text-muted: #6b7484;
+  --war-text-faint: #9aa3b2;
+  --war-glass: rgba(var(--war-page-rgb, 255, 255, 255), 0.85); /* 浅色半透明玻璃（决策 3） */
+  --war-glass-border: #0000001a;
+  --war-error: #c0392b;
+  --war-interrupted: #8a7a4a;
+  --war-user-blue: #2f6fd0;
+  --war-outline-brown: transparent;
+  --war-outline-dark: transparent;
+
+  --war-border: #d4dae2;
+  --war-border-brown: #c3b394;
+  --war-panel: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-panel-glass: rgba(var(--war-page-rgb, 255, 255, 255), 0.85);
+  --war-panel-2: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-panel-dark: rgba(var(--war-page-rgb, 255, 255, 255), 0.85);
+  --war-panel-dark-solid: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-glass-2: rgba(var(--war-page-rgb, 255, 255, 255), 0.60);
+  --war-input-bg: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-text-light: #2a313c;
+  --war-text-light-2: #4a5464;
+  --war-text-light-3: #3a4556;
+  --war-text-light-gold: #8a6d1f;
+  --war-blue-row: rgba(59, 130, 246, 0.10);
+  --war-blue-row-2: rgba(59, 130, 246, 0.14);
+
+  /* plain 渲染路径用到的语义变量 */
+  --war-panel-bg: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-panel-border: #d4dae2;
+  --war-panel-shadow: rgba(15, 23, 42, 0.08);
+  --war-btn-bg: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-btn-bg-hover: #eef2f7;
+  --war-btn-bg-active: #e0e6ee;
+  --war-btn-border: #c8cfd9;
+  --war-btn-border-hover: #aeb8c6;
+  --war-btn-text: #2a313c;
+  --war-dd-bg: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-dd-border: #c8cfd9;
+  --war-dd-text: #2a313c;
+  --war-dd-pop-bg: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-row-hover: #eef2f7;
+  --war-highlight-bg: rgba(59, 130, 246, 0.14);
+  --war-dialog-bg: rgb(var(--war-page-rgb, 255, 255, 255));
+  --war-input-border: #c8cfd9;
+
+  /* Markdown 正文（.md-body）：常规浅色阅读配色。代码底色用半透明深色
+     而非写死灰，随「页面颜色」设置自适应；标题/加粗回近黑，链接回蓝。 */
+  --md-heading: #161b22;
+  --md-heading-font: inherit;
+  --md-strong: #161b22;
+  --md-em: inherit;
+  --md-link: #2f6fd0;
+  --md-link-hover: #2456a8;
+  --md-code-bg: rgba(15, 23, 42, 0.06);
+  --md-code-text: #476582;
+  --md-pre-bg: rgba(15, 23, 42, 0.05);
+  --md-pre-border: #d4dae2;
+  --md-marker: #9aa3b2;
+  --md-quote-border: #c8cfd9;
+  --md-table-head: #161b22;
+
+  /* 状态/角色色：浅底上换深色版 */
+  --war-term-border: #74ab8f;
+  --war-term-accent: #1e8e4f;
+  --war-term-text: #3a4756;
+  --war-warn: #c0392b;
+  --war-usage-out: #1e8e4f;
+  --war-copied: #1e8e4f;
+  --war-plan-done: #1e8e4f;
+  --war-stream-ring: rgba(47, 111, 208, 0.45);
+  --war-proc-border: #d4dae2;
+  --war-plan-border: #d4dae2;
+  --war-att-border: #c8cfd9;
+}
+
+html[data-theme='pure'] body {
+  background: #eef1f5;
+  color: var(--war-text);
+  font-family: system-ui, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+}
+
+/* 取消 WC3 剑形光标（themes.ts cursor=false） */
+html[data-theme='pure'],
+html[data-theme='pure'] * {
+  cursor: default;
+}
+
+/* 组件 scoped 里硬编码 SimSun/Georgia 的地方统一回系统字体 */
+html[data-theme='pure'] .war-font-title,
+html[data-theme='pure'] .war-btn__label,
+html[data-theme='pure'] .war-dd__bar-text,
+html[data-theme='pure'] .war-dd__row-text,
+html[data-theme='pure'] .war-menu__text,
+html[data-theme='pure'] .war-dialog__title,
+html[data-theme='pure'] .war-dialog__msg,
+html[data-theme='pure'] .war-input,
+html[data-theme='pure'] .war-inline-input,
+html[data-theme='pure'] .md-body .codeblock__copy,
+html[data-theme='pure'] .cw .md-body .codeblock__copy,
+html[data-theme='pure'] .mon,
+html[data-theme='pure'] .mon * {
+  font-family: inherit;
+}
+
+/* 浅底上的 KeyboardHighlight 去 screen 混合，改浅蓝底 */
+html[data-theme='pure'] .war-highlight {
+  background: var(--war-highlight-bg);
+  mix-blend-mode: normal;
+  border-radius: 2px;
+}
+
+/* 输入框浅色 */
+html[data-theme='pure'] .war-input {
+  background: var(--war-input-bg);
+  border-color: var(--war-input-border);
+  color: var(--war-text);
+}
+
+html[data-theme='pure'] .war-input::placeholder {
+  color: var(--war-text-faint);
+}
+
+html[data-theme='pure'] .war-inline-input {
+  background: var(--war-input-bg);
+  border-color: var(--war-input-border);
+  color: var(--war-text);
+}
+
+/* 滚动条：暗色贴图 → 浅色 CSS（track/thumb） */
+html[data-theme='pure'] .war-scroll__track {
+  background: #e3e8ee;
+}
+
+html[data-theme='pure'] .war-scroll__thumb {
+  background: #b9c3cf;
+  border-image: none;
+}
+
+html[data-theme='pure'] .war-scroll__arrow {
+  opacity: 0.35;
+}
+
+/* 暗色硬编码边框/面板（主流程最常见的一批，其余在页面级逐步收敛） */
+html[data-theme='pure'] .war-frame__glass {
+  border: none;
+}
+
+html[data-theme='pure'] .steel__glass {
+  border: none;
+}
+
+/* ---- 战场监控页（phase 2 区域）：纯净风格先给浅色半透明兜底（决策 3） ---- */
+html[data-theme='pure'] .mon__world {
+  background: rgba(var(--war-page-rgb, 255, 255, 255), 0.55);
+}
+
+html[data-theme='pure'] .mon__field::before {
+  background: radial-gradient(ellipse at center, transparent 55%, rgba(31, 42, 58, 0.16) 100%);
+}
+
+html[data-theme='pure'] .mon__field-hint,
+html[data-theme='pure'] .mon__pan-hint {
+  color: #8a93a5;
+  text-shadow: none;
+}
+
+html[data-theme='pure'] .mon__zones-toggle {
+  background: rgba(var(--war-page-rgb, 255, 255, 255), 0.85);
+  border-color: #c8cfd9;
+  color: var(--war-text);
+  text-shadow: none;
+}
+
+html[data-theme='pure'] .mon__zones-toggle:hover {
+  background: #f0f4f9;
+  border-color: #aeb8c6;
+}
+
+/* 监控小窗（MonitorChatWin）：深蓝贴图窗框 → 浅色半透明 CSS */
+html[data-theme='pure'] .cw__frame {
+  border: 1px solid var(--war-panel-border, #d4dae2);
+  border-radius: 10px;
+  background: rgba(var(--war-page-rgb, 255, 255, 255), 0.82);
+  box-shadow: 0 8px 28px rgba(15, 23, 42, 0.16);
+}
+
+html[data-theme='pure'] .cw__inner {
+  inset: 12px;
+}
+
+html[data-theme='pure'] .cw__head {
+  border-bottom-color: #d4dae2;
+}
+
+/* 小窗内容色：深底硬编码 → 浅色系（组件里 war 原值保留） */
+html[data-theme='pure'] .cw__title {
+  text-shadow: none;
+}
+
+html[data-theme='pure'] .cw__full {
+  color: #2f6fd0;
+  border-color: rgba(47, 111, 208, 0.27);
+}
+
+html[data-theme='pure'] .cw__full:hover {
+  background: rgba(47, 111, 208, 0.1);
+}
+
+html[data-theme='pure'] .cw__close {
+  color: #4a5464;
+}
+
+html[data-theme='pure'] .cw__close:hover {
+  color: #c0392b;
+  border-color: #c0392b;
+}
+
+html[data-theme='pure'] .cw__bubble.user {
+  background: rgba(47, 111, 208, 0.1);
+  color: #26425f;
+}
+
+html[data-theme='pure'] .cw__bubble.ai {
+  color: var(--war-text);
+}
+
+html[data-theme='pure'] .cw__proc-flavor-text {
+  color: var(--war-text-dim);
+}
+
+html[data-theme='pure'] .cw__queue-clear:hover,
+html[data-theme='pure'] .cw__queue-op.remove:hover {
+  color: #b03a2e;
+}
+
+html[data-theme='pure'] .cw__input {
+  background: var(--war-input-bg);
+  color: var(--war-text);
+}
+
+html[data-theme='pure'] .cw__input:focus {
+  border-color: #aeb8c6;
+}
+
+html[data-theme='pure'] .cw__grip {
+  background: repeating-linear-gradient(135deg, transparent 0 5px, rgba(15, 23, 42, 0.18) 5px 7px, transparent 7px 12px);
+}
+
+html[data-theme='pure'] .cw__grip:hover {
+  background: repeating-linear-gradient(135deg, transparent 0 5px, rgba(15, 23, 42, 0.3) 5px 7px, transparent 7px 12px);
+}
+
+html[data-theme='pure'] .cw__atts-img {
+  border-color: #d4dae2;
+}
+
+html[data-theme='pure'] .cw__atts-chip:hover {
+  border-color: var(--war-btn-border-hover);
+}
+
+html[data-theme='pure'] .cw .md-body .codeblock__copy {
+  background: rgba(255, 255, 255, 0.9);
+}
+
+/* ---- 聊天主流程（phase 1）：气泡去深色贴图，改浅色半透明圆角 ----
+ * 对话页内容白色 → 半透明：主卡/铁轨卡/输入区让自定义背景（图/视频）透出。 */
+html[data-theme='pure'] .chat {
+  --war-panel-bg: rgba(var(--war-page-rgb, 255, 255, 255), var(--war-chat-alpha, 0.8));
+  --war-panel: rgba(var(--war-page-rgb, 255, 255, 255), var(--war-chat-alpha, 0.8));
+}
+
+html[data-theme='pure'] .bubble-body {
+  border-image: none;
+  border: 1px solid var(--war-panel-border, #d4dae2);
+  border-radius: 12px;
+  background: rgba(var(--war-page-rgb, 255, 255, 255), var(--war-chat-alpha, 0.8));
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+
+html[data-theme='pure'] .bubble-body.error {
+  background: rgba(192, 57, 43, 0.08);
+}
+
+html[data-theme='pure'] .bubble-slot__avatar img {
+  background: #e8ecf2;
+}
+
+/* 消息区/悬浮条底色：深色不透明 → 浅色半透明（Composer/浮层） */
+html[data-theme='pure'] .composer__field-wrap {
+  background: rgba(var(--war-page-rgb, 255, 255, 255), calc(var(--war-chat-alpha, 0.8) - 0.08));
+}
+
+/* ---- 主菜单「最近项目」卡片：深色卡 → 浅色卡（RecentProjectsPanel） ---- */
+html[data-theme='pure'] .recent__item {
+  background: rgba(var(--war-page-rgb, 255, 255, 255), 0.72);
+  border-color: var(--war-panel-border);
+  border-radius: 8px;
+}
+
+html[data-theme='pure'] .recent__item:hover {
+  background: rgb(var(--war-page-rgb, 255, 255, 255));
+  border-color: var(--war-btn-border-hover);
+}
+
+html[data-theme='pure'] .recent__glow {
+  display: none;
+}
+
+/* 黑描边在浅底上会糊成一圈，去掉 */
+html[data-theme='pure'] .recent__title {
+  text-shadow: none;
+}
+
+html[data-theme='pure'] .recent__name,
+html[data-theme='pure'] .recent__empty {
+  font-family: inherit;
+}
+
+html[data-theme='pure'] .recent__date {
+  color: var(--war-text-muted);
+}
+
+html[data-theme='pure'] .recent__path {
+  color: var(--war-text-muted);
 }

@@ -23,7 +23,8 @@ use tokio::sync::mpsc;
 
 use crate::acp::{AcpError, AcpEvent};
 use crate::acp::events::TurnUsage;
-use crate::chat::driver::{ClientDriver, SessionLaunch, Spawner};
+use crate::chat::driver::{ClientDriver, Launch, SessionLaunch, Spawner};
+use crate::chat::pi;
 use crate::chat::opencode_usage::OpencodeReader;
 use crate::chat::wire::{ArchiveKind, ArchiveReader};
 use crate::provider;
@@ -56,11 +57,50 @@ pub const K_FLUSH_LONG_THRESHOLD: usize = 64 * 1024;
 const PLACEHOLDER: &str = "…";
 const INTERRUPTED_MARK: &str = "（已中断）";
 
-/// 会话首条用户消息发往 ACP 前注入的引导语：告知 agent 本会话挂载了内置
-/// wardex-reminder MCP 工具（build_launch 注入）。只进 prompt 文本，不进
+// ---- codegraph prompt context injection (per-session toggle) ----
+/// Maximum number of distinct identifier terms used to decide whether a
+/// message is code-related (triggers the codegraph hint).
+const CG_MAX_TERMS: usize = 5;
+
+/// Pull candidate codegraph search terms out of a user message: ASCII
+/// identifier-like tokens (CamelCase / snake_case / SCREAMING), length ≥ 3,
+/// skipping common English filler. Chinese-only messages yield nothing (and
+/// are skipped), which keeps injection focused on code-related turns.
+fn extract_code_terms(text: &str, max: usize) -> Vec<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for tok in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+        let t = tok.trim();
+        if t.len() < 3 || t.starts_with(|c: char| c.is_ascii_digit()) {
+            continue;
+        }
+        if CG_STOPWORDS.contains(&t.to_lowercase().as_str()) {
+            continue;
+        }
+        if terms.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+            continue;
+        }
+        terms.push(t.to_string());
+        if terms.len() >= max {
+            break;
+        }
+    }
+    terms
+}
+
+const CG_STOPWORDS: &[&str] = &[
+    "the", "and", "for", "with", "this", "that", "can", "how", "what", "when", "why", "who",
+    "code", "file", "files", "function", "func", "class", "struct", "method", "interface",
+    "use", "using", "please", "help", "want", "need", "make", "does", "should", "would",
+    "into", "from", "about", "there", "their", "have", "has", "not", "are", "was", "you",
+    "your", "my", "me", "will", "just", "like", "also", "because", "where", "which", "done",
+    "open", "new", "show", "fix", "bug", "error", "test", "tests",
+];
+
+/// 会话首条用户消息发往 agent 前注入的引导语：告知已挂载提醒工具
+///（ACP = MCP；Pi = wardex-reminders extension）。只进 prompt 文本，不进
 /// 聊天显示的用户行；判定用 store 里的用户消息计数（resume 的老会话不会
 /// 重复注入）。
-pub const REMINDER_GUIDE_PREFIX: &str = "[Wardex 提示] 本会话已挂载 wardex-reminder MCP 工具（set_reminder/cancel_reminder/list_reminders）。当你想稍后主动跟进、或用户说\"过会提醒我/晚点通知我\"时，调用 set_reminder(minutes, content) 设置提醒；到点后系统会自动把 content 作为新消息发给你。当你自己启动了后台任务/子 Agent、需要等它们完成后继续时，也应主动调用 set_reminder 设置短时提醒（如 1 分钟）来唤醒自己。";
+pub const REMINDER_GUIDE_PREFIX: &str = "[Wardex 提示] 本会话已挂载提醒工具（set_reminder/cancel_reminder/list_reminders）。当你想稍后主动跟进、或用户说\"过会提醒我/晚点通知我\"时，调用 set_reminder(minutes, content) 设置提醒；到点后系统会自动把 content 作为新消息发给你。当你自己启动了后台任务/子 Agent、需要等它们完成后继续时，也应主动调用 set_reminder 设置短时提醒（如 1 分钟）来唤醒自己。";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested below)
@@ -399,6 +439,12 @@ pub trait EventSink: Send + Sync {
     /// Desktop notification for the human (sub-agent completion etc.).
     /// Default no-op: tests and non-desktop sinks ignore it.
     fn notify(&self, _title: &str, _body: &str) {}
+    /// Desktop notification that also fires while the window is focused
+    /// (background-session task completion: the user asked to still see it
+    /// when sitting on the monitor page). Default falls back to `notify`.
+    fn notify_always(&self, title: &str, body: &str) {
+        self.notify(title, body);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1387,9 @@ impl Actor {
                 }
                 self.emit_status(None);
             }
+            AcpEvent::Notify { title, body } => {
+                self.sink.notify_always(&title, &body);
+            }
             AcpEvent::ProcessExited { code } => {
                 log::info!("chat[{}] ACP process exited (code {code})", self.session_id);
                 self.acp_ready = false;
@@ -1375,6 +1424,9 @@ impl Actor {
         {
             let mut stores = lock_ok(&self.stores);
             stores.sessions.upsert_last_assistant_tool(&self.session_id, &tool);
+            // 供工作区动态归因：该项目最近有工具活动的会话（per-project）。
+            let pd = stores.sessions.project_dir_of(&self.session_id);
+            stores.collab_watch.note_activity(&pd, &self.session_id);
         }
         self.emit(
             "acp://tool",
@@ -1466,6 +1518,7 @@ impl Actor {
         // prompt，不进显示的用户行；pending_prompt 路径复用同一文本）。
         // 另：终端命令上下文（cmd.rs）在命令结束时挂起，随这一次 prompt
         // 一次性注入（drain），让 agent 知道用户执行了什么。
+        let cg_ctx = self.codegraph_prompt_ctx(&text);
         let prompt_text = {
             let mut stores = lock_ok(&self.stores);
             stores.sessions.ensure_open(&self.session_id);
@@ -1477,14 +1530,23 @@ impl Actor {
                     format!("{}\n\n", pending.join("\n\n"))
                 }
             };
+            // 工作区动态：自上次以来别人改过的文件。只在会话绑定了项目时注入。
+            let collab_ctx = {
+                let project_dir = stores.sessions.workspace_path_for(&self.session_id);
+                if project_dir.is_empty() {
+                    String::new()
+                } else {
+                    stores.collab.inject_ctx(&self.session_id, &project_dir)
+                }
+            };
             let first_user = stores
                 .sessions
                 .messages(&self.session_id)
                 .is_none_or(|ms| !ms.iter().any(|m| m.role == "user"));
             if first_user {
-                format!("{cmd_ctx}{REMINDER_GUIDE_PREFIX}\n\n{text}")
+                format!("{cmd_ctx}{collab_ctx}{cg_ctx}{REMINDER_GUIDE_PREFIX}\n\n{text}")
             } else {
-                format!("{cmd_ctx}{text}")
+                format!("{cmd_ctx}{collab_ctx}{cg_ctx}{text}")
             }
         };
         let (user_row, asst_row) = {
@@ -1549,7 +1611,7 @@ impl Actor {
         if !provider::chat_capable(&provider) {
             self.update_last_assistant(
                 &format!(
-                    "Provider «{provider}» 未注册，请在配置页选择 kimi / claude / codex / custom。"
+                    "Provider «{provider}» 未注册，请在配置页选择 pi / kimi / claude / codex / custom。"
                 ),
                 "error",
             );
@@ -1576,6 +1638,30 @@ impl Actor {
         }
     }
 
+    /// Build a short `[Wardex 提示]` line telling the model to use codegraph
+    /// for code queries. Only prepended to the *sent* prompt (never the
+    /// displayed row), and skipped when the session has codegraph disabled,
+    /// has no project, has no index, or the message isn't code-related.
+    fn codegraph_prompt_ctx(&self, text: &str) -> String {
+        let enabled = lock_ok(&self.stores)
+            .sessions
+            .meta_for(&self.session_id)
+            .map(|m| m.use_codegraph.unwrap_or(true))
+            .unwrap_or(true);
+        if !enabled {
+            return String::new();
+        }
+        let project_dir = lock_ok(&self.stores).sessions.project_dir_of(&self.session_id);
+        if project_dir.is_empty() || !crate::codegraph::CodegraphRunner::index_exists(&project_dir) {
+            return String::new();
+        }
+        if extract_code_terms(text, CG_MAX_TERMS).is_empty() {
+            return String::new();
+        }
+        "[Wardex 提示] 本项目已建立 codegraph 索引，遇到代码相关的查询可使用 codegraph_query / codegraph_where（或 ACP 的 codegraph MCP）进行代码查询。\n\n"
+            .to_string()
+    }
+
     fn finish_reply(&mut self) {
         self.clear_permission();
         self.set_busy(false);
@@ -1587,6 +1673,23 @@ impl Actor {
                 .unread
                 .insert(self.session_id.clone());
             self.emit("chat://unread", json!({ "sessionId": self.session_id }));
+            // 后台会话完成 → 桌面通知（monitor 步兵完成）。notify_always：
+            // 窗口聚焦也弹——人坐在监控页时 NEW 角标容易漏看。开关
+            // taskDoneNotify 默认开。
+            let mut stores = lock_ok(&self.stores);
+            if stores.prefs.task_done_notify() {
+                let title = stores
+                    .sessions
+                    .meta_for(&self.session_id)
+                    .map(|m| m.title)
+                    .unwrap_or_default();
+                let body = if title.is_empty() {
+                    "后台会话已完成".to_string()
+                } else {
+                    format!("「{title}」")
+                };
+                self.sink.notify_always("任务完成", &body);
+            }
         }
         self.emit("store://sessions", json!({}));
         // guide插队优先于队列 drain（ChatController.cpp:1368-1384）。
@@ -1651,8 +1754,11 @@ impl Actor {
         self.acp_ready = false;
         self.snap().acp_running = false;
 
-        let launch = self.build_launch();
-        self.fresh_launch = launch.start.resume_session_id.is_empty();
+        let (fresh_launch, launch) = match self.build_launch() {
+            Launch::Acp(l) => (l.start.resume_session_id.is_empty(), Launch::Acp(l)),
+            Launch::Pi(p) => (true, Launch::Pi(p)),
+        };
+        self.fresh_launch = fresh_launch;
         self.model_applied = false;
         enforce_process_cap(&self.registry, &self.session_id);
         self.emit_status(None); // 连接 ACP…
@@ -1664,16 +1770,89 @@ impl Actor {
                 self.snap().acp_running = true;
             }
             Err(e) => {
-                // AcpClient::spawn already emitted StartFailed (spawner
-                // contract); just log here.
+                // AcpClient::spawn / PiDriver::spawn already emitted
+                // StartFailed (spawner contract); just log here.
                 log::warn!("chat[{}] ACP spawn failed: {e}", self.session_id);
                 self.snap().acp_running = false;
             }
         }
     }
 
-    fn build_launch(&self) -> SessionLaunch {
+    fn build_launch(&self) -> Launch {
         let provider = self.agent.provider.trim().to_lowercase();
+        // Embedded pi agent: no ACP, no env/MCP/mode — a pi rpc subprocess in
+        // the session's project dir, with pi-side session persistence (per-
+        // Wardex-session --session-dir + --session-id) so a respawn resumes
+        // the conversation context (pi.rs spawn).
+        if provider == "pi" {
+            let cwd = {
+                let mut stores = lock_ok(&self.stores);
+                let mut cwd = stores.sessions.workspace_path_for(&self.session_id);
+                if cwd.is_empty() {
+                    cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                }
+                cwd
+            };
+            // Isolated pi session dir: <appData>/pi-sessions/<wardexSessionId>.
+            let session_dir = {
+                let stores = lock_ok(&self.stores);
+                stores
+                    .paths
+                    .pi_session_dir(&self.session_id)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let dist_dir = pi::locate_plugin_dir(&self.agent.pi_dir)
+                .map_err(|e| log::warn!("chat[{}] {e}", self.session_id))
+                .ok()
+                .unwrap_or_default();
+            let binary = dist_dir.join(pi::pi_binary_name());
+            // Render the Wardex custom provider into ~/.pi/agent/models.json so
+            // the agent's baseUrl/apiKey/model take effect (pi's baseUrl rides
+            // models.json, not an env var).
+            let provider_key = crate::models::write_pi_models(&self.agent)
+                .map_err(|e| log::warn!("chat[{}] pi models.json: {e}", self.session_id))
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let use_codegraph = lock_ok(&self.stores)
+                .sessions
+                .meta_for(&self.session_id)
+                .map(|m| m.use_codegraph.unwrap_or(true))
+                .unwrap_or(true);
+            let extensions: Vec<String> = pi::wardex_extension_files(use_codegraph)
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            let (todos_path, project_dir) = {
+                let mut stores = lock_ok(&self.stores);
+                (
+                    stores.paths.todos_path().to_string_lossy().into_owned(),
+                    stores.sessions.workspace_path_for(&self.session_id),
+                )
+            };
+            let mut env = vec![
+                ("WARDEX_SESSION_ID".to_string(), Some(self.session_id.clone())),
+                ("WARDEX_TODOS_PATH".to_string(), Some(todos_path)),
+            ];
+            if !project_dir.is_empty() {
+                env.push(("WARDEX_PROJECT_DIR".to_string(), Some(project_dir)));
+            }
+            return Launch::Pi(crate::chat::driver::PiLaunch {
+                binary,
+                provider_key,
+                model: self.agent.model.trim().to_string(),
+                effort_options: self.agent.effort_options.clone(),
+                default_effort: self.agent.default_effort.clone(),
+                env,
+                cwd,
+                session_dir,
+                session_id: self.session_id.clone(),
+                extensions,
+            });
+        }
         let spec = provider::spec(&provider);
         let mut env = match spec {
             Some(s) => provider::env_overrides(s, &self.agent.api_key, &self.agent.base_url, true),
@@ -1772,6 +1951,36 @@ impl Actor {
                 }
             }
         }
+        // Built-in codegraph symbol-index MCP (codegraph.rs): registered for
+        // every ACP session when the session's 「使用 codegraph 索引」 toggle is
+        // on and codegraph is installed. The db is pinned via -d; if no index
+        // exists yet, tool calls return a clear "run codegraph build" error the
+        // agent can recover from in-session (no restart needed).
+        let use_codegraph = lock_ok(&self.stores)
+            .sessions
+            .meta_for(&self.session_id)
+            .map(|m| m.use_codegraph.unwrap_or(true))
+            .unwrap_or(true);
+        if use_codegraph {
+            let cg_project = lock_ok(&self.stores).sessions.workspace_path_for(&self.session_id);
+            if !cg_project.is_empty() {
+                if let Some((cg_cmd, cg_args)) =
+                    crate::codegraph::CodegraphRunner::mcp_command(&cg_project)
+                {
+                    mcp_servers.push(json!({ "name": "codegraph", "command": cg_cmd, "args": cg_args, "env": [] }));
+                }
+            }
+        }
+        // ACP schema hardening (kimi 0.29.1 / opencode 1.18.x 升级后的严格
+        // zod 校验)：mcpServers 条目缺 `env` 字段（数组）时整条 session/new
+        // 会被拒为 -32602 Invalid params。内置条目已带 env，但用户配置页
+        // 手写的 mcpServers JSON 可能缺——统一补齐空数组，保证任何 agent
+        // 都能过校验。
+        for s in mcp_servers.iter_mut() {
+            if s.is_object() && s.get("env").is_none() {
+                s["env"] = json!([]);
+            }
+        }
         let (cwd, resume) = {
             let mut stores = lock_ok(&self.stores);
             let mut cwd = stores.sessions.workspace_path_for(&self.session_id);
@@ -1784,7 +1993,7 @@ impl Actor {
             (cwd, resume)
         };
         let mode = self.current_mapped_mode();
-        SessionLaunch {
+        Launch::Acp(SessionLaunch {
             spawn: crate::acp::SpawnConfig {
                 cli_path: cli,
                 args,
@@ -1797,7 +2006,7 @@ impl Actor {
                 resume_session_id: resume,
                 mcp_servers,
             },
-        }
+        })
     }
 
     /// resumeInterruptedTurn (ChatController.cpp:1210-1231): synthetic

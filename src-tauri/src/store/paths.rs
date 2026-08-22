@@ -72,6 +72,18 @@ impl Paths {
         self.root.join("sessions")
     }
 
+    /// Per-session pi agent session storage (pi --session-dir): one isolated
+    /// directory per Wardex session, so pi's session files never collide
+    /// with the user's own ~/.pi/agent/sessions or with other Wardex
+    /// sessions. Removed together with the session on delete.
+    pub fn pi_sessions_dir(&self) -> PathBuf {
+        self.root.join("pi-sessions")
+    }
+
+    pub fn pi_session_dir(&self, session_id: &str) -> PathBuf {
+        self.pi_sessions_dir().join(session_id)
+    }
+
     pub fn session_dir(&self, session_id: &str) -> PathBuf {
         self.sessions_dir().join(session_id)
     }
@@ -121,6 +133,11 @@ impl Paths {
         self.root.join("todos.json")
     }
 
+    /// 工作区动态记录（store/collab.rs）。
+    pub fn collab_path(&self) -> PathBuf {
+        self.root.join("collab.json")
+    }
+
     /// Legacy reminders file — only read by the todos.json migration
     /// (reminders have merged into todos.json, store/todos.rs).
     pub fn reminders_path(&self) -> PathBuf {
@@ -148,6 +165,7 @@ impl Paths {
             self.agents_dir(),
             self.opencode_config_dir(),
             self.sessions_dir(),
+            self.pi_sessions_dir(),
             self.media_root(),
             self.logs_dir(),
             self.crashes_dir(),
