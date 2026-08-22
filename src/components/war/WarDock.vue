@@ -9,7 +9,7 @@
 // (420ms ease) in sync with the drawer's translateX; while the user is
 // DRAGGING the width the transition is disabled so the dock tracks the
 // pointer freely (no lag), re-enabled on release.
-import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, defineComponent, h, markRaw, onBeforeUnmount, onMounted, ref } from 'vue';
 import { panelRegistry, PANEL_MAX_W, PANEL_DEFAULT_W, type PanelDef } from '../../panels/registry';
 import { usePrefsStore } from '../../stores/prefs';
 import { usePluginsStore, type PluginInfo } from '../../stores/plugins';
@@ -20,14 +20,19 @@ const RAIL_W = 44;
 const prefs = usePrefsStore();
 const plugins = usePluginsStore();
 
-/** Wrap one UI plugin's iframe host as a lazily-resolved panel component. */
+/** Wrap one UI plugin's iframe host as a lazily-resolved panel component.
+ *  markRaw is REQUIRED: defs flows through the pinia store's reactive
+ *  computed, and a reactive-proxied component loses its render function
+ *  ("Component is missing template or render function" → blank panel). */
 function pluginPanelComp(p: PluginInfo) {
-  return defineComponent({
-    name: `PluginPanel_${p.id}`,
-    render() {
-      return h(PluginPanel, { src: p.ui, title: p.name });
-    },
-  });
+  return markRaw(
+    defineComponent({
+      name: `PluginPanel_${p.id}`,
+      render() {
+        return h(PluginPanel, { src: p.ui, title: p.name });
+      },
+    }),
+  );
 }
 
 onMounted(() => {
