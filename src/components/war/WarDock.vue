@@ -93,7 +93,20 @@ const defs = computed<PanelDef[]>(() => {
     order: 100 + i,
     refreshOn: [],
   }));
-  return [...builtin, ...native, ...dynamic];
+  // Dialog-surface plugins (阶段②): rail buttons that open floating windows
+  // instead of drawer tabs. Without this, surface:'dialog' plugins would
+  // appear NOWHERE (uiPanels excludes them, dialogPanels unused).
+  const dialogTabs: PanelDef[] = plugins.dialogPanels.map((p, i) => ({
+    id: `plugin:${p.id}`,
+    title: p.name,
+    component: () => Promise.resolve(pluginPanelComp(p)),
+    defaultOpen: false,
+    defaultWidth: PANEL_MAX_W,
+    order: 140 + i,
+    refreshOn: [],
+    surface: 'dialog',
+  }));
+  return [...builtin, ...native, ...dynamic, ...dialogTabs];
 });
 
 // Drawer open state — transient, never written to panelLayout.
