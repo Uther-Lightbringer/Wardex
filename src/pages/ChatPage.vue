@@ -25,6 +25,7 @@ import CodeSearchOverlay from '../components/chat/CodeSearchOverlay.vue';
 import WarDialog from '../components/war/WarDialog.vue';
 import { useNavStore } from '../stores/nav';
 import { usePrefsStore } from '../stores/prefs';
+import { cmd } from '../lib/tauri';
 import { useChatStore } from '../stores/chat';
 import { usePluginsStore } from '../stores/plugins';
 import { useSessionsStore } from '../stores/sessions';
@@ -56,6 +57,23 @@ async function onExitWorkshop(): Promise<void> {
   const target =
     chat.preWorkshopId || sessions.all.find((m) => !m.workshop && !m.shelved)?.id || '';
   if (target) await chat.openSession(target);
+}
+
+/** 主对话直达工坊：本项目已有工坊会话则直接切过去，否则新建一个。 */
+async function onOpenWorkshop(): Promise<void> {
+  const existing = sessions.all.find(
+    (m) => m.workshop && m.projectDir === chat.projectDir && !m.shelved,
+  );
+  if (existing) {
+    await chat.openSession(existing.id);
+    return;
+  }
+  try {
+    const id = await cmd<string>('workshop_open', { projectDir: chat.projectDir ?? '' });
+    await chat.openSession(id);
+  } catch (e) {
+    console.warn('[chat] 打开插件工坊失败', e);
+  }
 }
 
 // Coming BACK to the chat page (kept-alive): re-pull the rail + agents so
@@ -437,6 +455,14 @@ function onBayResizeResetY(): void {
               :title="'跳转到父会话：' + parentTitle"
               @click="chat.jumpToParent()"
               >父会话 ▸</span
+            >
+            <span
+              v-if="!chat.inWorkshop"
+              class="chat__parent"
+              :style="{ fontSize: prefs.fs(11) + 'px' }"
+              title="打开插件工坊（专属插件开发会话）"
+              @click="onOpenWorkshop"
+              >🛠 工坊</span
             >
             <span class="chat__status" :style="{ fontSize: prefs.fs(11) + 'px' }">
               {{ chat.sessionId ? chat.status.statusText : '' }}
