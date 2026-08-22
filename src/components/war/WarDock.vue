@@ -169,8 +169,11 @@ function onRailClick(def: PanelDef): void {
     switchTimer = null;
   }
   // surface 'dialog' plugins open a floating window instead of the drawer.
+  // def.id carries the 'plugin:' rail prefix — strip it back to the raw
+  // plugin id for the dialog registry (src lookup + storage/log routing).
   if (def.surface === 'dialog') {
-    toggleDialog({ id: def.id, title: def.title, src: dialogSrcOf(def.id) });
+    const pid = def.id.startsWith('plugin:') ? def.id.slice('plugin:'.length) : def.id;
+    toggleDialog({ id: pid, title: def.title, src: dialogSrcOf(pid) });
     return;
   }
   if (openId.value === def.id) closePanel();
@@ -201,8 +204,9 @@ function toggleDialog(d: OpenDialog): void {
 // dedupe by id).
 function onPluginWindow(e: Event): void {
   const d = (e as CustomEvent).detail as { id: string; title: string; src: string; op: string };
-  if (!d || !String(d.id).startsWith('plugin:')) return;
-  const id = String(d.id).slice('plugin:'.length);
+  if (!d || !d.id) return;
+  // Accept both raw ids (drawer PluginPanel) and 'plugin:'-prefixed ones.
+  const id = String(d.id).startsWith('plugin:') ? String(d.id).slice('plugin:'.length) : String(d.id);
   if (d.op === 'open') {
     if (!dialogs.value.some((x) => x.id === id)) {
       dialogs.value.push({ id, title: d.title, src: d.src });
