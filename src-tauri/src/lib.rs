@@ -180,6 +180,27 @@ async fn create_session(
         .map_err(err)
 }
 
+/// 插件工坊 (plugin workshop): create (or reuse the existing) workshop
+/// session for a project. The session is flagged `workshop` so its runtime
+/// spawns with ONLY the plugin-manager extension + WARDEX_WORKSHOP=1.
+#[tauri::command]
+async fn workshop_open(state: State<'_, AppState>, project_dir: String) -> Result<String, String> {
+    let id = state
+        .chat
+        .create_session_in_group(&project_dir, "", None, None)
+        .await
+        .map_err(err)?;
+    {
+        let mut stores = lock(&state.stores);
+        stores
+            .sessions
+            .set_workshop(&id, true)
+            .map_err(|e| e.to_string())?;
+        let _ = stores.sessions.rename_session(&id, "插件工坊");
+    }
+    Ok(id)
+}
+
 #[tauri::command]
 async fn open_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.open_session(&session_id).await.map_err(err)
@@ -1866,6 +1887,7 @@ pub fn run() {
             plugin_log_append,
             plugin_data_get,
             plugin_data_set,
+            workshop_open,
             plugins_apply,
             send_prompt,
             cancel,

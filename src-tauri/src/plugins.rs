@@ -270,15 +270,27 @@ pub fn delete_plugin(paths: &Paths, id: &str) -> Result<(), String> {
 }
 
 /// Absolute pi-extension entry files for a spawn, honouring enabled flags and
-/// the per-session codegraph toggle. The plugin-manager builtin ("plugins")
-/// is FORCE-INCLUDED so the model can always manage plugins.
+/// the per-session codegraph toggle.
+///
+/// The plugin-manager builtin ("plugins") is deliberately NOT included:
+/// plugin authoring lives in the dedicated workshop session (插件工坊,
+/// see `workshop_extension_file`) — main-chat sessions stay clean of it.
 pub fn extension_files(paths: &Paths, use_codegraph: bool) -> Vec<PathBuf> {
     scan(paths)
         .into_iter()
-        .filter(|p| p.has_tool())
-        .filter(|p| p.id == "plugins" || (p.enabled && (p.id != "codegraph" || use_codegraph)))
+        .filter(|p| p.has_tool() && p.id != "plugins")
+        .filter(|p| p.enabled && (p.id != "codegraph" || use_codegraph))
         .map(|p| PathBuf::from(p.entry))
         .collect()
+}
+
+/// The plugin manager's extension file for WORKSHOP sessions — the only
+/// extension they load (plus WARDEX_WORKSHOP=1 env so it can inject the
+/// authoring system prompt via before_agent_start).
+pub fn workshop_extension_file(paths: &Paths) -> Option<PathBuf> {
+    locate_extensions_dir()
+        .map(|d| d.join("wardex-plugins.ts"))
+        .filter(|p| p.is_file())
 }
 
 /// Ensure the user plugin tree exists (first run) and return it.

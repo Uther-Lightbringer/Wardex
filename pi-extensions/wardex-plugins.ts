@@ -106,6 +106,25 @@ function listPlugins(root: string): string {
 }
 
 export default function (pi: ExtensionAPI) {
+	// 插件工坊 mode (WARDEX_WORKSHOP=1, set by the WarDex runtime for
+	// workshop-flagged sessions): this extension is the ONLY one loaded there,
+	// and we inject the full authoring spec into the system prompt so the
+	// workshop model is a dedicated plugin author. Main-chat sessions never
+	// load this extension by default — they don't need authoring knowledge.
+	if ((process.env["WARDEX_WORKSHOP"] ?? "").trim() === "1") {
+		pi.on("before_agent_start", async (event) => {
+			const spec = [
+				"# 插件工坊",
+				"你是 WarDex 的专职插件开发助手。你唯一的职责：帮助用户创建、修改、调试、删除 WarDex 插件。与插件无关的请求请礼貌拒绝并引导用户回主对话。",
+				"工作流：理解需求 → plugins_list 查看现状 → plugin_write 写文件 → plugin_apply 请求生效 → 让用户验证；报错时先 plugin_logs 读运行日志定位，再修。每次修改记得 bump plugin.json 的 version。",
+				"",
+				"## 面板/插件编写规范（必须遵守）",
+				PANEL_GUIDELINES,
+			].join("\n");
+			return { systemPrompt: `${event.systemPrompt ?? ""}\n\n${spec}` };
+		});
+	}
+
 	// Shared authoring rules injected into every tool's description context.
 	// These encode WarDex host constraints so plugins work on the first try:
 	// - panel.html is rendered via iframe srcdoc → it MUST be one

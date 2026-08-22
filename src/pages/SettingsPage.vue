@@ -13,6 +13,7 @@ import WarFrame from '../components/war/WarFrame.vue';
 import WarButton from '../components/war/WarButton.vue';
 import WarDropdown from '../components/war/WarDropdown.vue';
 import { fileSrc, openPath } from '../lib/tauri';
+import { cmd } from '../lib/tauri';
 import { useNavStore } from '../stores/nav';
 import { CHAT_ALPHA_STEPS, FONT_SCALE_STEPS, PAGE_COLOR_OPTIONS, BG_BRIGHTNESS_STEPS, clampChatAlpha, clampBgBrightness, usePrefsStore } from '../stores/prefs';
 import { usePluginsStore } from '../stores/plugins';
@@ -211,6 +212,20 @@ const statusMsg = ref('');
 onMounted(() => {
   if (!plugins.loaded) void plugins.load();
 });
+/** 插件工坊：创建一个只挂插件管理员的专属会话并跳转过去。 */
+async function onWorkshop(): Promise<void> {
+  try {
+    const { useChatStore } = await import('../stores/chat');
+    const chat = useChatStore();
+    const id = await cmd<string>('workshop_open', { projectDir: chat.projectDir ?? '' });
+    if (await chat.openSession(id)) {
+      statusMsg.value = '';
+      await nav.goOverlay('chat');
+    }
+  } catch (e) {
+    statusMsg.value = `打开工坊失败：${String(e)}`;
+  }
+}
 function kindLabel(kind: string): string {
   if (kind === 'ui') return '界面';
   if (kind === 'tool+ui') return '工具+界面';
@@ -459,6 +474,7 @@ async function onApply(): Promise<void> {
             尚未发现任何插件，点「扫描」试试
           </div>
           <div class="cfg__btn-row set__actions--inline">
+            <WarButton skin="blue" :width="130" text="插件工坊" @activated="onWorkshop" />
             <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="扫描" @activated="onRescan" />
             <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="打开目录…" @activated="onOpenDir" />
             <WarButton

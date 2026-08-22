@@ -121,6 +121,11 @@ pub struct SessionMeta {
     // the key persists, matching the insert-once-set behavior of pinned.
     #[serde(rename = "useCodegraph", skip_serializing_if = "Option::is_none")]
     pub use_codegraph: Option<bool>,
+    /// 插件工坊 session (plugin workshop): spawned with ONLY the plugin
+    /// manager extension + WARDEX_WORKSHOP=1 so the extension can inject the
+    /// authoring system prompt. Main-chat sessions never load it by default.
+    #[serde(rename = "workshop", skip_serializing_if = "Option::is_none")]
+    pub workshop: Option<bool>,
     #[serde(rename = "lastMessage", skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(rename = "projectDir")]
@@ -1057,6 +1062,27 @@ impl SessionStore {
             row.perm_mode = meta.perm_mode.clone();
         }
         Ok(true)
+    }
+
+    /// Mark/unmark a session as a plugin-workshop session. Once set the key
+    /// persists (insert-once-set, like pinned/permMode).
+    pub fn set_workshop(&mut self, session_id: &str, v: bool) -> Result<bool, SessionsError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let Some(meta) = self.meta_mut(session_id) else {
+            return Ok(false);
+        };
+        meta.workshop = Some(v);
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
+        Ok(true)
+    }
+
+    pub fn is_workshop(&mut self, session_id: &str) -> bool {
+        self.meta_for(session_id)
+            .map(|m| m.workshop.unwrap_or(false))
+            .unwrap_or(false)
     }
 
     /// Per-session toggle for auto-injecting codegraph symbol context into
