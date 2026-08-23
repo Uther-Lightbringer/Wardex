@@ -52,6 +52,8 @@ export interface SessionIndexRow {
   shelved?: boolean;
   /** 每会话权限模式覆盖（default|plan|auto|yolo）；无 = 跟随全局。 */
   permMode?: string;
+  /** 插件工坊会话：只挂插件管理员扩展的专属开发会话。 */
+  workshop?: boolean;
   /** 最后一条消息摘要（监控页兵营 label 副标题）。 */
   lastMessage?: string;
 }

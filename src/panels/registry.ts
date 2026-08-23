@@ -25,11 +25,14 @@ export interface PanelDef {
   id: string; // 'git' | 'files' | 'db' | ... globally unique
   title: string; // Chinese title: 版本控制 / 工作区文件 / 数据库
   icon?: string; // /assets/... icon, optional
-  component: () => Promise<{ default: Component }>; // lazy — not loaded while collapsed
+  component: () => Promise<{ default: Component } | Component>; // lazy — not loaded while collapsed
   defaultOpen: boolean;
   defaultWidth: number; // px — informational; the SHARED prefs.panelWidth drives rendering
   order: number; // default ordering (v1: fixed, drag-reorder deferred)
   refreshOn: RefreshTrigger[];
+  /** UI-plugin surface (阶段②): 'dialog' opens a floating window instead
+   *  of the drawer; absent = drawer. */
+  surface?: string;
 }
 
 export const panelRegistry: PanelDef[] = [
@@ -41,24 +44,6 @@ export const panelRegistry: PanelDef[] = [
     defaultWidth: 220,
     order: 10,
     refreshOn: ['sessionSwitch'],
-  },
-  {
-    id: 'tasks',
-    title: '后台任务',
-    component: () => import('./TasksPanel.vue'),
-    defaultOpen: false,
-    defaultWidth: 220,
-    order: 12,
-    refreshOn: ['turnEnd', 'sessionSwitch'],
-  },
-  {
-    id: 'todos',
-    title: '待办',
-    component: () => import('./TodosPanel.vue'),
-    defaultOpen: false,
-    defaultWidth: 220,
-    order: 15,
-    refreshOn: ['turnEnd', 'sessionSwitch', 'manual'],
   },
   {
     id: 'git',
@@ -78,7 +63,34 @@ export const panelRegistry: PanelDef[] = [
     order: 30,
     refreshOn: ['sessionSwitch', 'expand', 'manual'],
   },
-  {
+];
+
+/** Native panels converted to default-installed SYSTEM plugins (插件化改造
+ * 阶段①): they live in the Rust plugin registry (toggleable/undeletable,
+ * settings → 插件) but still render as compiled Vue components — trusted
+ * code, no iframe sandbox. WarDock merges them into the rail when the
+ * registry reports them enabled; ids match the old static entries so
+ * panelLayout prefs survive. */
+export const nativePluginPanels: Record<string, PanelDef> = {
+  tasks: {
+    id: 'tasks',
+    title: '后台任务',
+    component: () => import('./TasksPanel.vue'),
+    defaultOpen: false,
+    defaultWidth: 220,
+    order: 12,
+    refreshOn: ['turnEnd', 'sessionSwitch'],
+  },
+  todos: {
+    id: 'todos',
+    title: '待办',
+    component: () => import('./TodosPanel.vue'),
+    defaultOpen: false,
+    defaultWidth: 220,
+    order: 15,
+    refreshOn: ['turnEnd', 'sessionSwitch', 'manual'],
+  },
+  db: {
     id: 'db',
     title: '数据库',
     component: () => import('./DbPanel.vue'),
@@ -87,4 +99,4 @@ export const panelRegistry: PanelDef[] = [
     order: 35,
     refreshOn: ['sessionSwitch'],
   },
-];
+};

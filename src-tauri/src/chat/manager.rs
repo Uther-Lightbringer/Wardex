@@ -390,6 +390,40 @@ impl ChatManager {
         self.sink.emit("store://sessions", json!({}));
     }
 
+    /// plugins_apply (插件化改造): restart every IDLE live runtime so the
+    /// freshly edited plugin set (registry.json + extension files) is picked
+    /// up by a new pi process. Busy/queued sessions are skipped — the user
+    /// can re-apply later; the returned tuple is (restarted, skipped).
+    /// Sessions resume from their --session-dir/--session-id, so conversation
+    /// context survives the respawn.
+    pub async fn apply_plugins(&self) -> (usize, usize) {
+        let ids: Vec<String> = lock_ok(&self.registry).keys().cloned().collect();
+        let mut restarted = 0usize;
+        let mut skipped = 0usize;
+        for id in ids {
+            let interruptible = {
+                let reg = lock_ok(&self.registry);
+                reg.get(&id)
+                    .map(|e| {
+                        let s = lock_ok(&e.snap);
+                        !s.busy && s.queue_len == 0 && s.perm_pending.is_none()
+                    })
+                    .unwrap_or(false)
+            };
+            if !interruptible {
+                skipped += 1;
+                continue;
+            }
+            self.destroy_runtime(&id);
+            let agent = self.resolve_agent_for(&id);
+            self.create_runtime(&id, agent);
+            if self.send(&id, RuntimeCmd::EnsureAcp).await.is_ok() {
+                restarted += 1;
+            }
+        }
+        (restarted, skipped)
+    }
+
     /// Rail 删除会话: closeRuntime first, then delete from disk.
     pub async fn delete_session(&self, session_id: &str) -> Result<bool, ChatError> {
         self.close_session(session_id);

@@ -121,6 +121,11 @@ pub struct SessionMeta {
     // the key persists, matching the insert-once-set behavior of pinned.
     #[serde(rename = "useCodegraph", skip_serializing_if = "Option::is_none")]
     pub use_codegraph: Option<bool>,
+    /// 插件工坊 session (plugin workshop): spawned with ONLY the plugin
+    /// manager extension + WARDEX_WORKSHOP=1 so the extension can inject the
+    /// authoring system prompt. Main-chat sessions never load it by default.
+    #[serde(rename = "workshop", skip_serializing_if = "Option::is_none")]
+    pub workshop: Option<bool>,
     #[serde(rename = "lastMessage", skip_serializing_if = "Option::is_none")]
     pub last_message: Option<String>,
     #[serde(rename = "projectDir")]
@@ -364,6 +369,9 @@ pub struct SessionIndexRow {
     /// Per-session permission-mode override (null = global prefs default).
     #[serde(rename = "permMode")]
     pub perm_mode: Option<String>,
+    /// 插件工坊 session flag (workshop runtime: plugin-manager extension only).
+    #[serde(rename = "workshop")]
+    pub workshop: bool,
     /// Latest user/assistant message snippet (null before the first write).
     #[serde(rename = "lastMessage")]
     pub last_message: Option<String>,
@@ -520,6 +528,7 @@ impl SessionStore {
                     pinned,
                     shelved,
                     perm_mode: meta.perm_mode,
+                    workshop: meta.workshop.unwrap_or(false),
                     last_message: meta.last_message,
                     parent_id: meta.parent_id.unwrap_or_default(),
                     group_id: meta.group_id.unwrap_or_default(),
@@ -1057,6 +1066,27 @@ impl SessionStore {
             row.perm_mode = meta.perm_mode.clone();
         }
         Ok(true)
+    }
+
+    /// Mark/unmark a session as a plugin-workshop session. Once set the key
+    /// persists (insert-once-set, like pinned/permMode).
+    pub fn set_workshop(&mut self, session_id: &str, v: bool) -> Result<bool, SessionsError> {
+        if session_id.is_empty() {
+            return Ok(false);
+        }
+        let Some(meta) = self.meta_mut(session_id) else {
+            return Ok(false);
+        };
+        meta.workshop = Some(v);
+        let meta = meta.clone();
+        self.write_meta(&meta)?;
+        Ok(true)
+    }
+
+    pub fn is_workshop(&mut self, session_id: &str) -> bool {
+        self.meta_for(session_id)
+            .map(|m| m.workshop.unwrap_or(false))
+            .unwrap_or(false)
     }
 
     /// Per-session toggle for auto-injecting codegraph symbol context into

@@ -12,13 +12,16 @@ import PageShell from '../components/PageShell.vue';
 import WarFrame from '../components/war/WarFrame.vue';
 import WarButton from '../components/war/WarButton.vue';
 import WarDropdown from '../components/war/WarDropdown.vue';
-import { fileSrc } from '../lib/tauri';
+import { fileSrc, openPath } from '../lib/tauri';
+import { cmd } from '../lib/tauri';
 import { useNavStore } from '../stores/nav';
 import { CHAT_ALPHA_STEPS, FONT_SCALE_STEPS, PAGE_COLOR_OPTIONS, BG_BRIGHTNESS_STEPS, clampChatAlpha, clampBgBrightness, usePrefsStore } from '../stores/prefs';
+import { usePluginsStore } from '../stores/plugins';
 import { THEMES, themeOf } from '../lib/themes';
 
 const nav = useNavStore();
 const prefs = usePrefsStore();
+const plugins = usePluginsStore();
 
 const pageKeysOn = computed(() => nav.page === 'settings');
 
@@ -204,6 +207,56 @@ function commitBgBrightnessInput(): void {
 
 // ---- 状态提示 ----
 const statusMsg = ref('');
+
+// ---- 插件（插件化改造 P0）：列表/开关/删除/扫描/生效 ----
+onMounted(() => {
+  if (!plugins.loaded) void plugins.load();
+});
+/** 插件工坊：创建一个只挂插件管理员的专属会话并跳转过去。 */
+async function onWorkshop(): Promise<void> {
+  try {
+    const { useChatStore } = await import('../stores/chat');
+    const chat = useChatStore();
+    const id = await cmd<string>('workshop_open', { projectDir: chat.projectDir ?? '' });
+    if (await chat.openSession(id)) {
+      statusMsg.value = '';
+      await nav.goOverlay('chat');
+    }
+  } catch (e) {
+    statusMsg.value = `打开工坊失败：${String(e)}`;
+  }
+}
+function kindLabel(kind: string): string {
+  if (kind === 'ui') return '界面';
+  if (kind === 'tool+ui') return '工具+界面';
+  return '工具';
+}
+async function onPluginToggle(p: { id: string }, e: Event): Promise<void> {
+  await plugins.toggle(p.id, (e.target as HTMLInputElement).checked);
+}
+async function onPluginDelete(id: string): Promise<void> {
+  try {
+    await plugins.remove(id);
+    statusMsg.value = `已删除插件 ${id}`;
+  } catch (e) {
+    statusMsg.value = String(e);
+  }
+}
+async function onRescan(): Promise<void> {
+  await plugins.rescan();
+  statusMsg.value = `扫描完成，共 ${plugins.list.length} 个插件`;
+}
+async function onOpenDir(): Promise<void> {
+  const dir = await plugins.rootDir();
+  if (dir) openPath(dir);
+}
+async function onApply(): Promise<void> {
+  const r = await plugins.apply();
+  await plugins.load(); // UI 面板随生效结果刷新
+  statusMsg.value = r.skipped > 0
+    ? `已重启 ${r.restarted} 个会话，${r.skipped} 个忙碌会话已跳过（稍后可再点生效）`
+    : `已应用到 ${r.restarted} 个运行中的会话`;
+}
 </script>
 
 <template>
@@ -386,6 +439,52 @@ const statusMsg = ref('');
               魔兽风格暂无可配置的专属项（贴图风保持原汁原味）；后续可扩展铁轨/剑形光标开关等
             </div>
           </template>
+
+          <div class="cfg__divider"></div>
+
+          <!-- ===== 插件（工具 + 界面面板） ===== -->
+          <div class="cfg__section-title" :style="{ fontSize: prefs.fs(15) + 'px' }">插件</div>
+          <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            工具类插件注入给 AI（pi extension），界面类插件在对话页右侧栏新增面板。\n也可以直接在对话里让 AI 帮你新建/修改插件；改动后点「生效」应用
+          </div>
+          <div v-for="p in plugins.list" :key="p.id" class="cfg__field plug-row">
+            <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">{{ p.name }}</span>
+            <span class="plug-row__meta" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              {{ kindLabel(p.kind) }} · v{{ p.version }}<template v-if="p.builtin"> · 内置</template>
+            </span>
+            <label class="cfg__check-row plug-row__toggle">
+              <input
+                type="checkbox"
+                :checked="p.enabled"
+                :disabled="p.id === 'plugins'"
+                @change="onPluginToggle(p, $event)"
+              />
+              <span class="cfg__check-text" :style="{ fontSize: prefs.fs(12) + 'px' }">启用</span>
+            </label>
+            <WarButton
+              v-if="!p.builtin"
+              skin="dialog"
+              :width="86"
+              :art-aspect="5.34"
+              text="删除"
+              @activated="onPluginDelete(p.id)"
+            />
+          </div>
+          <div v-if="plugins.list.length === 0" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            尚未发现任何插件，点「扫描」试试
+          </div>
+          <div class="cfg__btn-row set__actions--inline">
+            <WarButton skin="blue" :width="130" text="插件工坊" @activated="onWorkshop" />
+            <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="扫描" @activated="onRescan" />
+            <WarButton skin="dialog" :width="130" :art-aspect="5.34" text="打开目录…" @activated="onOpenDir" />
+            <WarButton
+              skin="blue"
+              :width="130"
+              text="生效"
+              :enabled="!plugins.applying"
+              @activated="onApply"
+            />
+          </div>
 
           <div class="cfg__divider"></div>
 
@@ -576,5 +675,25 @@ const statusMsg = ref('');
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* 插件列表行：名称 + 元信息 + 启用开关 + 删除 */
+.plug-row {
+  align-items: center;
+}
+
+.plug-row__meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--war-text-dim);
+}
+
+.plug-row__toggle {
+  flex: none;
+  margin-right: 4px;
+}
+
+.set__actions--inline {
+  padding: 6px 0 2px;
 }
 </style>

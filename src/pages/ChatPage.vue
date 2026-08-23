@@ -25,7 +25,9 @@ import CodeSearchOverlay from '../components/chat/CodeSearchOverlay.vue';
 import WarDialog from '../components/war/WarDialog.vue';
 import { useNavStore } from '../stores/nav';
 import { usePrefsStore } from '../stores/prefs';
+import { cmd } from '../lib/tauri';
 import { useChatStore } from '../stores/chat';
+import { usePluginsStore } from '../stores/plugins';
 import { useSessionsStore } from '../stores/sessions';
 import { useAgentsStore } from '../stores/agents';
 import { useElementSize } from '../lib/useElementSize';
@@ -34,6 +36,7 @@ import { formatTokens } from '../lib/format';
 const nav = useNavStore();
 const prefs = usePrefsStore();
 const chat = useChatStore();
+const plugins = usePluginsStore();
 const sessions = useSessionsStore();
 const agentsStore = useAgentsStore();
 
@@ -42,7 +45,36 @@ onMounted(async () => {
   await sessions.refreshAgents();
   if (!agentsStore.loaded) void agentsStore.refresh();
   if (chat.projectDir) await sessions.refresh(chat.projectDir);
+  void plugins.load(); // 启动待生效轮询 + UI 插件面板列表
 });
+
+async function onApplyPlugins(): Promise<void> {
+  await plugins.apply();
+}
+
+/** 插件工坊横幅的返回：优先回进入工坊前的会话，否则第一个非工坊会话。 */
+async function onExitWorkshop(): Promise<void> {
+  const target =
+    chat.preWorkshopId || sessions.all.find((m) => !m.workshop && !m.shelved)?.id || '';
+  if (target) await chat.openSession(target);
+}
+
+/** 主对话直达工坊：本项目已有工坊会话则直接切过去，否则新建一个。 */
+async function onOpenWorkshop(): Promise<void> {
+  const existing = sessions.all.find(
+    (m) => m.workshop && m.projectDir === chat.projectDir && !m.shelved,
+  );
+  if (existing) {
+    await chat.openSession(existing.id);
+    return;
+  }
+  try {
+    const id = await cmd<string>('workshop_open', { projectDir: chat.projectDir ?? '' });
+    await chat.openSession(id);
+  } catch (e) {
+    console.warn('[chat] 打开插件工坊失败', e);
+  }
+}
 
 // Coming BACK to the chat page (kept-alive): re-pull the rail + agents so
 // config-page edits (avatar/name/default) and background turn activity show
@@ -424,6 +456,14 @@ function onBayResizeResetY(): void {
               @click="chat.jumpToParent()"
               >父会话 ▸</span
             >
+            <span
+              v-if="!chat.inWorkshop"
+              class="chat__parent"
+              :style="{ fontSize: prefs.fs(11) + 'px' }"
+              title="打开插件工坊（专属插件开发会话）"
+              @click="onOpenWorkshop"
+              >🛠 工坊</span
+            >
             <span class="chat__status" :style="{ fontSize: prefs.fs(11) + 'px' }">
               {{ chat.sessionId ? chat.status.statusText : '' }}
             </span>
@@ -431,6 +471,30 @@ function onBayResizeResetY(): void {
                 {{ sessionUsage }}
               </span>
             </div>
+            <!-- 插件工坊横幅（阶段⑤）：当前会话是工坊时，提供一键返回主对话 -->
+            <div
+              v-if="chat.inWorkshop"
+              class="chat__plug-hint chat__workshop-bar"
+              :style="{ fontSize: prefs.fs(11) + 'px' }"
+            >
+              <span>🛠 插件工坊 — 专属插件开发会话，描述你想要的工具/面板即可</span>
+              <button class="chat__workshop-back" title="切换回之前的主对话" @click="onExitWorkshop">
+                返回主对话 ←
+              </button>
+            </div>
+            <!-- 插件待生效提示条（插件化 A）：模型或手动改过插件文件后出现 -->
+            <transition name="plug-hint">
+              <button
+                v-if="plugins.pending"
+                class="chat__plug-hint"
+                :style="{ fontSize: prefs.fs(11) + 'px' }"
+                :disabled="plugins.applying"
+                title="点击立即应用插件变更（重启空闲会话）"
+                @click="onApplyPlugins"
+              >
+                ⚙ 插件有未生效的变更 — 点击应用{{ plugins.applying ? '（应用中…）' : '' }}
+              </button>
+            </transition>
             <div class="chat__list">
               <MessageList v-if="chat.sessionId" />
               <div v-else class="chat__empty" :style="{ fontSize: prefs.fs(13) + 'px' }">
@@ -781,6 +845,57 @@ function onBayResizeResetY(): void {
   align-items: baseline;
   gap: 10px;
   min-width: 0;
+}
+
+/* 插件待生效提示条（插件化 A）：标题行下方的窄条，点击即应用 */
+.chat__plug-hint {
+  flex: none;
+  margin: 4px 0 0;
+  padding: 3px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--war-gold-dim, #a9882f);
+  background: rgba(169, 136, 47, 0.14);
+  color: var(--war-gold, #e8c56a);
+  cursor: pointer;
+  text-align: center;
+}
+
+.chat__plug-hint:hover {
+  filter: brightness(1.25);
+}
+
+/* 插件工坊横幅: flex row with a back button on the right. */
+.chat__workshop-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: default;
+}
+.chat__workshop-bar:hover {
+  filter: none;
+}
+.chat__workshop-back {
+  flex: none;
+  border: 1px solid var(--war-gold-dim, #a9882f);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--war-gold, #e8c56a);
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.chat__workshop-back:hover {
+  background: rgba(169, 136, 47, 0.2);
+}
+
+.plug-hint-enter-active,
+.plug-hint-leave-active {
+  transition: opacity 250ms ease;
+}
+
+.plug-hint-enter-from,
+.plug-hint-leave-to {
+  opacity: 0;
 }
 
 .chat__title {

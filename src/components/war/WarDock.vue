@@ -9,13 +9,42 @@
 // (420ms ease) in sync with the drawer's translateX; while the user is
 // DRAGGING the width the transition is disabled so the dock tracks the
 // pointer freely (no lag), re-enabled on release.
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
-import { panelRegistry, PANEL_MAX_W, PANEL_DEFAULT_W, type PanelDef } from '../../panels/registry';
+import { computed, defineComponent, h, markRaw, onBeforeUnmount, onMounted, ref } from 'vue';
+import {
+  panelRegistry,
+  nativePluginPanels,
+  PANEL_MAX_W,
+  PANEL_DEFAULT_W,
+  type PanelDef,
+} from '../../panels/registry';
 import { usePrefsStore } from '../../stores/prefs';
+import { usePluginsStore, type PluginInfo } from '../../stores/plugins';
 import WarPanel from './WarPanel.vue';
+import PluginPanel from './PluginPanel.vue';
+import PluginDialog from './PluginDialog.vue';
 
 const RAIL_W = 44;
 const prefs = usePrefsStore();
+const plugins = usePluginsStore();
+
+/** Wrap one UI plugin's iframe host as a lazily-resolved panel component.
+ *  markRaw is REQUIRED: defs flows through the pinia store's reactive
+ *  computed, and a reactive-proxied component loses its render function
+ *  ("Component is missing template or render function" → blank panel). */
+function pluginPanelComp(p: PluginInfo) {
+  return markRaw(
+    defineComponent({
+      name: `PluginPanel_${p.id}`,
+      render() {
+        return h(PluginPanel, { src: p.ui, title: p.name, pluginId: p.id });
+      },
+    }),
+  );
+}
+
+onMounted(() => {
+  void plugins.load(); // discover UI-plugin drawer tabs
+});
 
 const root = ref<HTMLElement | null>(null);
 const chatWidth = ref(0);
@@ -36,11 +65,49 @@ onMounted(() => {
 });
 onBeforeUnmount(() => ro?.disconnect());
 
-const defs = computed<PanelDef[]>(() =>
-  [...panelRegistry].sort(
-    (a, b) => (prefs.panelLayout[a.id]?.order ?? a.order) - (prefs.panelLayout[b.id]?.order ?? b.order),
-  ),
-);
+const defs = computed<PanelDef[]>(() => {
+  // Static panels: 会话信息/版本控制/工作区文件 (NOT registry-managed).
+  const builtin = [...panelRegistry].sort(
+    (a, b) =>
+      (prefs.panelLayout[a.id]?.order ?? a.order) - (prefs.panelLayout[b.id]?.order ?? b.order),
+  );
+  // System plugins (阶段①): 待办/后台任务/数据库 are compiled Vue panels
+  // but managed through the plugin registry — shown only when enabled.
+  const native: PanelDef[] = plugins.list
+    .filter((p) => p.enabled && nativePluginPanels[p.id])
+    .map((p, i) => ({
+      ...nativePluginPanels[p.id],
+      title: p.name || nativePluginPanels[p.id].title,
+      order: (prefs.panelLayout[p.id]?.order ?? nativePluginPanels[p.id].order) + i * 0.01,
+    }))
+    .sort((a, b) => a.order - b.order);
+  // UI plugins (插件化改造 P2): each enabled ui-kind plugin becomes a drawer
+  // tab hosting its panel.html in a sandboxed iframe (PluginPanel). Loaded
+  // after builtins; the list refreshes when the plugins store re-pulls.
+  const dynamic: PanelDef[] = plugins.uiPanels.map((p, i) => ({
+    id: `plugin:${p.id}`,
+    title: p.name,
+    component: () => Promise.resolve(pluginPanelComp(p)),
+    defaultOpen: false,
+    defaultWidth: PANEL_MAX_W,
+    order: 100 + i,
+    refreshOn: [],
+  }));
+  // Dialog-surface plugins (阶段②): rail buttons that open floating windows
+  // instead of drawer tabs. Without this, surface:'dialog' plugins would
+  // appear NOWHERE (uiPanels excludes them, dialogPanels unused).
+  const dialogTabs: PanelDef[] = plugins.dialogPanels.map((p, i) => ({
+    id: `plugin:${p.id}`,
+    title: p.name,
+    component: () => Promise.resolve(pluginPanelComp(p)),
+    defaultOpen: false,
+    defaultWidth: PANEL_MAX_W,
+    order: 140 + i,
+    refreshOn: [],
+    surface: 'dialog',
+  }));
+  return [...builtin, ...native, ...dynamic, ...dialogTabs];
+});
 
 // Drawer open state — transient, never written to panelLayout.
 const openId = ref<string | null>(null);
@@ -114,9 +181,57 @@ function onRailClick(def: PanelDef): void {
     clearTimeout(switchTimer);
     switchTimer = null;
   }
+  // surface 'dialog' plugins open a floating window instead of the drawer.
+  // def.id carries the 'plugin:' rail prefix — strip it back to the raw
+  // plugin id for the dialog registry (src lookup + storage/log routing).
+  if (def.surface === 'dialog') {
+    const pid = def.id.startsWith('plugin:') ? def.id.slice('plugin:'.length) : def.id;
+    toggleDialog({ id: pid, title: def.title, src: dialogSrcOf(pid) });
+    return;
+  }
   if (openId.value === def.id) closePanel();
   else openPanel(def);
 }
+
+// ---- floating dialogs (阶段② surface:'dialog'|'both') -------------------
+interface OpenDialog {
+  id: string;
+  title: string;
+  src: string;
+}
+const dialogs = ref<OpenDialog[]>([]);
+
+function dialogSrcOf(pluginId: string): string {
+  const p = plugins.list.find((x) => x.id === pluginId);
+  return p?.ui ?? '';
+}
+
+function toggleDialog(d: OpenDialog): void {
+  const i = dialogs.value.findIndex((x) => x.id === d.id);
+  if (i >= 0) dialogs.value.splice(i, 1);
+  else if (d.src) dialogs.value.push(d);
+}
+
+// 'both' panels promote/demote themselves over the bridge (PluginPanel
+// dispatches a global event; drawer AND dialog instances are mounted, so
+// dedupe by id).
+function onPluginWindow(e: Event): void {
+  const d = (e as CustomEvent).detail as { id: string; title: string; src: string; op: string };
+  if (!d || !d.id) return;
+  // Accept both raw ids (drawer PluginPanel) and 'plugin:'-prefixed ones.
+  const id = String(d.id).startsWith('plugin:') ? String(d.id).slice('plugin:'.length) : String(d.id);
+  if (d.op === 'open') {
+    if (!dialogs.value.some((x) => x.id === id)) {
+      dialogs.value.push({ id, title: d.title, src: d.src });
+      closePanel();
+    }
+  } else {
+    const i = dialogs.value.findIndex((x) => x.id === id);
+    if (i >= 0) dialogs.value.splice(i, 1);
+  }
+}
+onMounted(() => window.addEventListener('wardex-plugin-window', onPluginWindow));
+onBeforeUnmount(() => window.removeEventListener('wardex-plugin-window', onPluginWindow));
 
 // ---- width drag (shared across all panels, persisted on release) ----
 function onResizeStart(): void {
@@ -182,6 +297,17 @@ function onResizeReset(): void {
         <span v-else class="war-dock__btn-text">{{ def.title }}</span>
       </div>
     </div>
+
+    <!-- floating dialogs (surface:'dialog' | promoted 'both' panels) -->
+    <PluginDialog
+      v-for="(d, i) in dialogs"
+      :key="d.id"
+      :plugin-id="d.id"
+      :title="d.title"
+      :src="d.src"
+      :index="i"
+      @close="toggleDialog(d)"
+    />
   </div>
 </template>
 

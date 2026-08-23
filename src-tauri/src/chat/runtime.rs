@@ -1854,10 +1854,26 @@ impl Actor {
                 .meta_for(&self.session_id)
                 .map(|m| m.use_codegraph.unwrap_or(true))
                 .unwrap_or(true);
-            let extensions: Vec<String> = pi::wardex_extension_files(use_codegraph)
-                .into_iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
+            // Plugin registry (插件化): enabled tool plugins from
+            // wardex-plugins/registry.json + builtins; codegraph still gated
+            // by the per-session toggle. Workshop sessions (插件工坊) load
+            // ONLY the plugin manager + set WARDEX_WORKSHOP=1.
+            let is_workshop = lock_ok(&self.stores)
+                .sessions
+                .is_workshop(&self.session_id);
+            let extensions: Vec<String> = {
+                let paths = lock_ok(&self.stores).paths.clone();
+                if is_workshop {
+                    crate::plugins::workshop_extension_file(&paths)
+                        .into_iter()
+                        .collect()
+                } else {
+                    crate::plugins::extension_files(&paths, use_codegraph)
+                }
+            }
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
             let (todos_path, project_dir) = {
                 let mut stores = lock_ok(&self.stores);
                 (
@@ -1865,12 +1881,21 @@ impl Actor {
                     stores.sessions.workspace_path_for(&self.session_id),
                 )
             };
+            let plugins_dir = crate::plugins::plugins_root(&lock_ok(&self.stores).paths)
+                .to_string_lossy()
+                .into_owned();
             let mut env = vec![
                 ("WARDEX_SESSION_ID".to_string(), Some(self.session_id.clone())),
                 ("WARDEX_TODOS_PATH".to_string(), Some(todos_path)),
             ];
             if !project_dir.is_empty() {
                 env.push(("WARDEX_PROJECT_DIR".to_string(), Some(project_dir)));
+            }
+            // Root of the user plugin tree — the built-in plugin-manager
+            // extension reads it to sandbox its file tools.
+            env.push(("WARDEX_PLUGINS_DIR".to_string(), Some(plugins_dir)));
+            if is_workshop {
+                env.push(("WARDEX_WORKSHOP".to_string(), Some("1".to_string())));
             }
             return Launch::Pi(crate::chat::driver::PiLaunch {
                 binary,

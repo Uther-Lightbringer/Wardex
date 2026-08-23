@@ -224,6 +224,8 @@ const unlisteners: UnlistenFn[] = [];
 export const useChatStore = defineStore('chat', {
   state: () => ({
     sessionId: '',
+    /** Session to return to when leaving a 插件工坊 session ('' = none). */
+    preWorkshopId: '',
     projectDir: '',
     meta: null as SessionMeta | null,
     rows: [] as ChatMessage[],
@@ -277,6 +279,11 @@ export const useChatStore = defineStore('chat', {
     previewLine: 0,
   }),
   getters: {
+    /** True while the active session is a 插件工坊 session. */
+    inWorkshop(): boolean {
+      const sessions = useSessionsStore();
+      return sessions.all.some((m) => m.id === this.sessionId && m.workshop);
+    },
     /** Slash commands of the active session (composer `/` completion). */
     commands(): SlashCommand[] {
       return this.commandsBySession[this.sessionId] ?? [];
@@ -529,6 +536,11 @@ export const useChatStore = defineStore('chat', {
         const next = [...this.rows];
         next[i] = markRaw({ ...r, status: p.status, usage: p.usage ?? r.usage });
         this.rows = next;
+        // Deferred plugin apply (插件化 B): the turn just ended — safe to
+        // restart idle runtimes now.
+        if (p.status !== 'pending' && p.status !== 'streaming') {
+          void import('./plugins').then(({ usePluginsStore }) => usePluginsStore().flushDeferred());
+        }
         return;
       }
     },
@@ -672,6 +684,17 @@ export const useChatStore = defineStore('chat', {
      * the 无法打开会话 banner). */
     async openSession(id: string): Promise<boolean> {
       if (id === this.sessionId) return true;
+      // 插件工坊 navigation: entering a workshop session stashes the current
+      // (non-workshop) session so the workshop banner's 返回主对话 can
+      // switch straight back; leaving a workshop session clears the stash.
+      if (useSessionsStore().all.some((m) => m.id === id && m.workshop)) {
+        const cur = useSessionsStore();
+        if (this.sessionId && !cur.all.some((m) => m.id === this.sessionId && m.workshop)) {
+          this.preWorkshopId = this.sessionId;
+        }
+      } else {
+        this.preWorkshopId = '';
+      }
       // Switch-cost instrumentation (temporary): per-step + total timing.
       let t = performance.now();
       const t0 = t;
@@ -982,11 +1005,24 @@ export const useChatStore = defineStore('chat', {
 
     async answerPermission(optionId: string, cancelled: boolean): Promise<void> {
       if (!this.sessionId) return;
+      // Plugin-apply hook (插件化 B): the plugin-manager's plugin_apply tool
+      // surfaces as a confirm dialog flagged params.pluginApply — on approval
+      // the host applies the changes right after the answer reaches pi.
+      const params = this.permission?.params as
+        | { pluginApply?: boolean; options?: { optionId: string; kind?: string }[] }
+        | undefined;
+      const isApplyAsk = params?.pluginApply === true;
+      const chosen = params?.options?.find((o) => o.optionId === optionId);
+      const approved = !cancelled && (!chosen || chosen.kind !== 'reject_once');
       this.permission = null;
       try {
         await cmd('answer_permission', { sessionId: this.sessionId, optionId, cancelled });
       } catch (e) {
         console.warn('[chat] answer_permission failed', e);
+      }
+      if (isApplyAsk && approved) {
+        const { usePluginsStore } = await import('./plugins');
+        usePluginsStore().requestApplyAfterTurn();
       }
     },
 

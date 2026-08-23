@@ -34,6 +34,7 @@ pub mod db;
 pub mod inspect;
 pub mod mcp_reminder;
 pub mod models;
+pub mod plugins;
 pub mod probe;
 pub mod provider;
 pub mod store;
@@ -179,6 +180,27 @@ async fn create_session(
         .map_err(err)
 }
 
+/// 插件工坊 (plugin workshop): create (or reuse the existing) workshop
+/// session for a project. The session is flagged `workshop` so its runtime
+/// spawns with ONLY the plugin-manager extension + WARDEX_WORKSHOP=1.
+#[tauri::command]
+async fn workshop_open(state: State<'_, AppState>, project_dir: String) -> Result<String, String> {
+    let id = state
+        .chat
+        .create_session_in_group(&project_dir, "", None, None)
+        .await
+        .map_err(err)?;
+    {
+        let mut stores = lock(&state.stores);
+        stores
+            .sessions
+            .set_workshop(&id, true)
+            .map_err(|e| e.to_string())?;
+        let _ = stores.sessions.rename_session(&id, "插件工坊");
+    }
+    Ok(id)
+}
+
 #[tauri::command]
 async fn open_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.open_session(&session_id).await.map_err(err)
@@ -286,6 +308,127 @@ fn set_session_perm_mode(
         .sessions
         .set_session_perm_mode(&session_id, mode.as_deref())
         .map_err(err)
+}
+
+// ---------------------------------------------------------------------------
+// Plugins (插件化改造 P0): registry-backed hot-manageable tool/ui plugins.
+// Files live under <data root>/wardex-plugins/; built-in pi-extensions show
+// up in the same list. "生效" = plugins_apply restarts idle runtimes.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+fn plugins_list(state: State<'_, AppState>) -> Vec<plugins::PluginInfo> {
+    let stores = lock(&state.stores);
+    plugins::scan(&stores.paths)
+}
+
+#[tauri::command]
+fn plugins_toggle(state: State<'_, AppState>, id: String, enabled: bool) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    plugins::set_enabled(&stores.paths, &id, enabled)
+}
+
+#[tauri::command]
+fn plugins_rescan(state: State<'_, AppState>) -> Vec<plugins::PluginInfo> {
+    let stores = lock(&state.stores);
+    plugins::ensure_root(&stores.paths);
+    plugins::scan(&stores.paths)
+}
+
+#[tauri::command]
+fn plugins_delete(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    plugins::delete_plugin(&stores.paths, &id)
+}
+
+#[tauri::command]
+fn plugins_root_dir(state: State<'_, AppState>) -> String {
+    let stores = lock(&state.stores);
+    plugins::ensure_root(&stores.paths).to_string_lossy().into_owned()
+}
+
+/// Plugin data storage (阶段③): read the WHOLE data document for one plugin
+/// at its declared scope. The frontend bridge does per-key get/set on top.
+#[tauri::command]
+fn plugin_data_get(
+    state: State<'_, AppState>,
+    id: String,
+    scope: String,
+    projectDir: String,
+) -> Result<Value, String> {
+    let stores = lock(&state.stores);
+    let path = plugins::data_file(&stores.paths, &id, &scope, &projectDir)?;
+    Ok(plugins::read_data(&stores.paths, &path))
+}
+
+/// Write back the whole document (atomic tmp+rename).
+#[tauri::command]
+fn plugin_data_set(
+    state: State<'_, AppState>,
+    id: String,
+    scope: String,
+    projectDir: String,
+    doc: Value,
+) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    let path = plugins::data_file(&stores.paths, &id, &scope, &projectDir)?;
+    plugins::write_data(&stores.paths, &path, &doc)
+}
+
+/// Read one UI plugin's panel html for the iframe host. The path MUST match
+/// exactly the `ui` field of an ENABLED plugin from the current scan — this
+/// is the whitelist; arbitrary file reads are rejected. Content is served as
+/// srcdoc (avoids asset-protocol issues with non-ASCII paths and drops the
+/// need for allow-same-origin in the sandbox).
+#[tauri::command]
+fn plugins_read_panel(state: State<'_, AppState>, path: String) -> Result<String, String> {
+    let stores = lock(&state.stores);
+    let allowed = plugins::scan(&stores.paths)
+        .into_iter()
+        .any(|p| p.enabled && !p.ui.is_empty() && p.ui == path);
+    if !allowed {
+        return Err(format!("面板路径不在启用插件白名单内: {path}"));
+    }
+    std::fs::read_to_string(&path).map_err(|e| format!("读面板失败: {e}"))
+}
+
+/// Apply pending plugin changes to LIVE sessions: restart every idle runtime
+/// (pi resumes from its --session-dir so context survives); busy/queued
+/// sessions are skipped and reported back so the UI can tell the user.
+#[tauri::command]
+async fn plugins_apply(state: State<'_, AppState>) -> Result<Value, String> {
+    let (restarted, skipped) = state.chat.apply_plugins().await;
+    let stores = lock(&state.stores);
+    plugins::mark_applied(&stores.paths);
+    Ok(json!({ "restarted": restarted, "skipped": skipped }))
+}
+
+/// True when plugin files changed since the last apply — the frontend shows
+/// a "有未生效的变更" hint bar (polled; the tree is tiny).
+#[tauri::command]
+fn plugins_pending(state: State<'_, AppState>) -> bool {
+    let stores = lock(&state.stores);
+    plugins::pending_changes(&stores.paths)
+}
+
+/// Runtime log sink for UI-plugin panels: PluginPanel captures console/
+/// errors inside the sandboxed iframe and forwards them here so the model
+/// can read them back via its plugin_logs tool and debug itself.
+#[tauri::command]
+fn plugin_log_append(
+    state: State<'_, AppState>,
+    id: String,
+    lines: Vec<String>,
+) -> Result<(), String> {
+    let stores = lock(&state.stores);
+    if lines.is_empty() || lines.len() > 50 {
+        return Err("lines 数量必须在 1..=50".into());
+    }
+    let clean: Vec<String> = lines
+        .iter()
+        .map(|l| l.chars().take(2000).collect())
+        .collect();
+    plugins::append_log(&stores.paths, &id, &clean)
 }
 
 /// Per-session toggle for auto-injecting codegraph symbol context into
@@ -1733,6 +1876,19 @@ pub fn run() {
             shelve_session,
             set_session_perm_mode,
             set_session_use_codegraph,
+            // plugins (插件化)
+            plugins_list,
+            plugins_toggle,
+            plugins_rescan,
+            plugins_delete,
+            plugins_root_dir,
+            plugins_read_panel,
+            plugins_pending,
+            plugin_log_append,
+            plugin_data_get,
+            plugin_data_set,
+            workshop_open,
+            plugins_apply,
             send_prompt,
             cancel,
             set_config_option,
