@@ -396,8 +396,32 @@ impl ChatManager {
     /// can re-apply later; the returned tuple is (restarted, skipped).
     /// Sessions resume from their --session-dir/--session-id, so conversation
     /// context survives the respawn.
+    ///
+    /// Pi is lazy: we only recreate the actor (next prompt respawns with the
+    /// new `--extension` list). ACP is still warmed immediately. If another
+    /// Pi session on the same (cwd, agent) is busy, this session is skipped
+    /// too — they share one pi.exe, so a partial restart would join the old
+    /// process and miss the new plugins.
     pub async fn apply_plugins(&self) -> (usize, usize) {
         let ids: Vec<String> = lock_ok(&self.registry).keys().cloned().collect();
+        let mut busy_mux: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for id in &ids {
+            let busy = {
+                let reg = lock_ok(&self.registry);
+                reg.get(id)
+                    .map(|e| {
+                        let s = lock_ok(&e.snap);
+                        s.busy || s.queue_len > 0 || s.perm_pending.is_some()
+                    })
+                    .unwrap_or(false)
+            };
+            if busy {
+                if let Some(k) = self.pi_mux_key(id) {
+                    busy_mux.insert(k);
+                }
+            }
+        }
         let mut restarted = 0usize;
         let mut skipped = 0usize;
         for id in ids {
@@ -414,14 +438,45 @@ impl ChatManager {
                 skipped += 1;
                 continue;
             }
+            if self
+                .pi_mux_key(&id)
+                .is_some_and(|k| busy_mux.contains(&k))
+            {
+                skipped += 1;
+                continue;
+            }
             self.destroy_runtime(&id);
             let agent = self.resolve_agent_for(&id);
+            let warm = eager_spawn(&agent);
             self.create_runtime(&id, agent);
-            if self.send(&id, RuntimeCmd::EnsureAcp).await.is_ok() {
+            if warm {
+                if self.send(&id, RuntimeCmd::EnsureAcp).await.is_ok() {
+                    restarted += 1;
+                }
+            } else {
                 restarted += 1;
             }
         }
         (restarted, skipped)
+    }
+
+    /// Pool key for a Pi session (cwd + agent). None for ACP / missing meta.
+    fn pi_mux_key(&self, session_id: &str) -> Option<(String, String)> {
+        let agent = self.resolve_agent_for(session_id);
+        if !agent.provider.eq_ignore_ascii_case("pi") {
+            return None;
+        }
+        let cwd = {
+            let mut stores = lock_ok(&self.stores);
+            let mut cwd = stores.sessions.workspace_path_for(session_id);
+            if cwd.is_empty() {
+                cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+            }
+            cwd
+        };
+        Some((cwd, agent.id))
     }
 
     /// Rail 删除会话: closeRuntime first, then delete from disk.
