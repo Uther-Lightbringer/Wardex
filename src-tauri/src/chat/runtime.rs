@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -38,6 +39,10 @@ use crate::store::StoreRegistry;
 
 pub const K_MAX_QUEUE_SIZE: usize = 10;
 pub const K_MAX_PARALLEL_ACP: usize = 20;
+/// Drop an idle Pi subprocess (keep the actor) after this much quiet time
+/// when the session is not the active chat. Tests use a short delay so the
+/// eviction path is exercised without a 2-minute wait.
+pub const K_IDLE_EVICT_MS: u64 = if cfg!(test) { 80 } else { 120_000 };
 /// Streaming buffer keeps only this tail after each flush (resume anchor +
 /// emptiness checks); the full text lives in the session store.
 pub const K_STREAM_BUFFER_KEEP: usize = 2000;
@@ -137,6 +142,28 @@ pub fn continuation_prompt(tail: &str) -> String {
     format!(
         "上一条回复因连接中断被截断。请紧接着已输出的内容继续，不要重复已输出的部分，不要重新开头，不要解释。已输出内容的结尾片段：\n…{tail}"
     )
+}
+
+/// Whether a live Pi subprocess should be dropped: not the active chat,
+/// not mid-turn, nothing queued / waiting / retrying / background.
+pub fn pi_idle_should_evict(
+    provider: &str,
+    process_alive: bool,
+    busy: bool,
+    queue_len: usize,
+    perm_pending: bool,
+    retry_active: bool,
+    has_bg_subagents: bool,
+    is_active: bool,
+) -> bool {
+    provider.eq_ignore_ascii_case("pi")
+        && process_alive
+        && !busy
+        && queue_len == 0
+        && !perm_pending
+        && !retry_active
+        && !has_bg_subagents
+        && !is_active
 }
 
 /// Attachment split rule (ChatController.cpp:947-953).
@@ -624,6 +651,8 @@ pub enum RuntimeCmd {
     ReminderTick(u64),
     CancelTimeout(u64),
     GuideTimeout(u64),
+    /// Idle-Pi eviction timer (gen invalidates stale sleeps, like RetryTick).
+    IdleEvictTick(u64),
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +728,7 @@ pub(crate) struct Actor {
     retry_active: bool,
     retry_gen: u64,
     reminder_gen: u64,
+    idle_gen: u64,
     continue_retries: u32,
     last_turn_error: String,
     perm_request_id: Option<i64>,
@@ -769,6 +799,7 @@ pub(crate) fn spawn_actor(
         retry_active: false,
         retry_gen: 0,
         reminder_gen: 0,
+        idle_gen: 0,
         continue_retries: 0,
         last_turn_error: String::new(),
         perm_request_id: None,
@@ -898,12 +929,8 @@ impl Actor {
             RuntimeCmd::ResendConfigOptions => self.resend_config_options(),
             RuntimeCmd::SwitchAgent(agent) => self.on_switch_agent(*agent).await,
             RuntimeCmd::EnsureAcp => self.ensure_acp().await,
-            RuntimeCmd::StopProcess => {
-                self.client = None;
-                self.acp_ready = false;
-                self.snap().acp_running = false;
-                self.emit_status(None);
-            }
+            RuntimeCmd::StopProcess => self.drop_process(),
+            RuntimeCmd::IdleEvictTick(gen) => self.idle_evict_tick(gen),
             RuntimeCmd::Shutdown => { /* intercepted in run() before dispatch */ }
             RuntimeCmd::FlushTick => {
                 if self.flush_pending {
@@ -1191,6 +1218,10 @@ impl Actor {
                             log::warn!("chat[{}] pending prompt failed: {e}", self.session_id);
                         }
                     }
+                } else {
+                    // Warmed / resumed with no in-flight turn: start the idle
+                    // clock (no-op unless provider is pi and later not active).
+                    self.schedule_idle_evict();
                 }
             }
             AcpEvent::StartFailed { error } => {
@@ -1728,6 +1759,7 @@ impl Actor {
                 });
             } else {
                 self.emit_status(None);
+                self.schedule_idle_evict();
             }
         }
     }
@@ -1847,6 +1879,7 @@ impl Actor {
                 effort_options: self.agent.effort_options.clone(),
                 default_effort: self.agent.default_effort.clone(),
                 env,
+                agent_id: self.agent.id.clone(),
                 cwd,
                 session_dir,
                 session_id: self.session_id.clone(),
@@ -2618,6 +2651,80 @@ impl Actor {
         self.busy = busy;
         self.touch_activity();
         self.sync_snap();
+        if busy {
+            self.cancel_idle_evict();
+        }
+    }
+
+    fn is_pi(&self) -> bool {
+        self.agent.provider.eq_ignore_ascii_case("pi")
+    }
+
+    fn is_active_session(&self) -> bool {
+        lock_ok(&self.shared).active_id == self.session_id
+    }
+
+    fn has_bg_subagents(&self) -> bool {
+        !self.bg_pending.is_empty()
+            || self
+                .subagents
+                .iter()
+                .any(|e| e.status == "pending" || e.status == "in_progress")
+    }
+
+    fn should_idle_evict(&self) -> bool {
+        pi_idle_should_evict(
+            &self.agent.provider,
+            self.client.is_some(),
+            self.busy,
+            self.queue.len(),
+            self.perm_request_id.is_some(),
+            self.retry_active,
+            self.has_bg_subagents(),
+            self.is_active_session(),
+        )
+    }
+
+    fn cancel_idle_evict(&mut self) {
+        self.idle_gen += 1;
+    }
+
+    fn schedule_idle_evict(&mut self) {
+        self.idle_gen += 1;
+        if !self.is_pi() || self.client.is_none() {
+            return;
+        }
+        let gen = self.idle_gen;
+        let tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(K_IDLE_EVICT_MS)).await;
+            let _ = tx.send(RuntimeCmd::IdleEvictTick(gen)).await;
+        });
+    }
+
+    fn drop_process(&mut self) {
+        self.cancel_idle_evict();
+        self.client = None;
+        self.acp_ready = false;
+        self.snap().acp_running = false;
+        self.emit_status(None);
+        self.emit("store://sessions", json!({}));
+    }
+
+    fn idle_evict_tick(&mut self, gen: u64) {
+        if gen != self.idle_gen {
+            return;
+        }
+        if self.should_idle_evict() {
+            log::info!("chat[{}] idle pi evicted", self.session_id);
+            self.drop_process();
+            return;
+        }
+        // Still the active chat (or otherwise not evictable): keep watching
+        // so a later switch-away is picked up without a manager nudge.
+        if self.is_pi() && self.client.is_some() && !self.busy {
+            self.schedule_idle_evict();
+        }
     }
 
     fn set_error(&mut self, e: String) {
@@ -2820,6 +2927,22 @@ mod tests {
         let p = continuation_prompt("TAIL-500");
         assert!(p.starts_with("上一条回复因连接中断被截断。"));
         assert!(p.ends_with("\n…TAIL-500"));
+    }
+
+    #[test]
+    fn pi_idle_evict_only_when_background_and_quiet() {
+        let yes = || {
+            pi_idle_should_evict("pi", true, false, 0, false, false, false, false)
+        };
+        assert!(yes(), "idle background pi is evictable");
+        assert!(!pi_idle_should_evict("pi", true, false, 0, false, false, false, true), "active chat keeps process");
+        assert!(!pi_idle_should_evict("kimi", true, false, 0, false, false, false, false), "acp not evicted");
+        assert!(!pi_idle_should_evict("pi", false, false, 0, false, false, false, false), "no process");
+        assert!(!pi_idle_should_evict("pi", true, true, 0, false, false, false, false), "busy");
+        assert!(!pi_idle_should_evict("pi", true, false, 1, false, false, false, false), "queued");
+        assert!(!pi_idle_should_evict("pi", true, false, 0, true, false, false, false), "perm pending");
+        assert!(!pi_idle_should_evict("pi", true, false, 0, false, true, false, false), "retry");
+        assert!(!pi_idle_should_evict("pi", true, false, 0, false, false, true, false), "bg subagents");
     }
 
     #[test]

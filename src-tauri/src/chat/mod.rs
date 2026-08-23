@@ -18,6 +18,7 @@ pub mod driver;
 pub mod manager;
 pub mod opencode_usage;
 pub mod pi;
+pub mod pi_mux;
 pub mod runtime;
 pub mod wire;
 

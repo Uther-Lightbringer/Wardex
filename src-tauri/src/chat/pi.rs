@@ -21,15 +21,18 @@ use serde_json::{json, Map, Value};
 use tokio::sync::mpsc;
 
 use crate::acp::events::TurnUsage;
-use crate::acp::{AcpError, AcpEvent, SpawnConfig, StdioTransport, Transport};
+use crate::acp::{AcpError, AcpEvent};
 use crate::chat::driver::{BoxFuture, ClientDriver, PiLaunch};
+use crate::chat::pi_mux::{MuxMsg, PiMux};
 
 /// Spawn `node <pluginDir>/packages/coding-agent/dist/rpc-entry.js
 /// --no-session` and take over the RPC loop. Mirrors AcpClient::spawn's
 /// contract: StartFailed is emitted into the event channel before Err on
 /// any pre-session failure.
 pub struct PiDriver {
-    transport: StdioTransport,
+    mux: Arc<PiMux>,
+    inbound: mpsc::Receiver<MuxMsg>,
+    session_id: String,
     tx: mpsc::Sender<AcpEvent>,
     /// contentIndex -> toolCallId (raw toolcall_* events carry no id except
     /// at start/end).
@@ -209,7 +212,7 @@ pub fn pi_binary_name() -> &'static str {
 /// '-', starting and ending alphanumeric. Wardex session uuids (hex+dashes)
 /// always pass; the guard makes a weird id degrade to --no-session (current
 /// ephemeral behavior) instead of a pi startup error.
-fn is_valid_pi_session_id(id: &str) -> bool {
+pub(crate) fn is_valid_pi_session_id(id: &str) -> bool {
     let b = id.as_bytes();
     if b.is_empty()
         || !b[0].is_ascii_alphanumeric()
@@ -360,6 +363,25 @@ pub fn probe_result(found: bool, plugin: Result<PathBuf, String>) -> Value {
     })
 }
 
+async fn wait_open_session(inbound: &mut mpsc::Receiver<MuxMsg>) -> bool {
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(8));
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return false,
+            msg = inbound.recv() => match msg {
+                Some(MuxMsg::Line(v))
+                    if v.get("command").and_then(Value::as_str) == Some("open_session") =>
+                {
+                    return v.get("success").and_then(Value::as_bool) == Some(true);
+                }
+                Some(MuxMsg::Line(_)) => continue,
+                Some(MuxMsg::Eof { .. }) | None => return false,
+            },
+        }
+    }
+}
+
 impl PiDriver {
     /// Spawn the compiled pi binary (`<binary> --mode rpc --no-session`),
     /// verify the process is up, then emit Started (the actor fires pending
@@ -382,49 +404,26 @@ impl PiDriver {
                 launch.binary.display()
             ));
         }
-        let mut args = vec!["--mode".to_string(), "rpc".to_string()];
-        // Session persistence (context recovery across respawns): pi saves
-        // the conversation tree to --session-dir and resumes it by
-        // --session-id (create-if-missing / resume-if-exists, main.ts
-        // createSessionManager). The dir is isolated per Wardex session; a
-        // missing dir or invalid id falls back to --no-session (ephemeral).
-        let persist = !launch.session_dir.is_empty() && is_valid_pi_session_id(&launch.session_id);
-        if persist {
-            args.push("--session-dir".to_string());
-            args.push(launch.session_dir.clone());
-            args.push("--session-id".to_string());
-            args.push(launch.session_id.clone());
-        } else {
-            args.push("--no-session".to_string());
-        }
-        // Route to the Wardex-rendered custom provider / model when set.
-        if !launch.provider_key.is_empty() {
-            args.push("--provider".to_string());
-            args.push(launch.provider_key.clone());
-        }
-        if !launch.model.is_empty() {
-            args.push("--model".to_string());
-            args.push(launch.model.clone());
-        }
-        for ext in &launch.extensions {
-            if !ext.trim().is_empty() {
-                args.push("--extension".to_string());
-                args.push(ext.clone());
+        let (in_tx, mut inbound) = mpsc::channel::<MuxMsg>(256);
+        let mux = match PiMux::attach(&launch, &launch.session_id, in_tx).await {
+            Ok((m, crate::chat::pi_mux::AttachKind::First)) => m,
+            Ok((m, crate::chat::pi_mux::AttachKind::Joined)) => {
+                if !wait_open_session(&mut inbound).await {
+                    m.detach(&launch.session_id).await;
+                    let (in_tx, rx) = mpsc::channel::<MuxMsg>(256);
+                    inbound = rx;
+                    match PiMux::attach_solo(&launch, &launch.session_id, in_tx).await {
+                        Ok(solo) => solo,
+                        Err(e) => return fail(format!("Pi 启动失败: {e}")),
+                    }
+                } else {
+                    m
+                }
             }
-        }
-        let config = SpawnConfig {
-            cli_path: launch.binary.to_string_lossy().into_owned(),
-            args,
-            env: launch.env,
-            cwd: launch.cwd,
+            Err(e) => return fail(format!("Pi 启动失败: {e}")),
         };
-        let transport = match StdioTransport::spawn(&config).await {
-            Ok(t) => t,
-            Err(e) => {
-                return fail(format!("Pi 启动失败: {e}"));
-            }
-        };
-        // No ACP handshake: the subprocess is ready as soon as it spawned.
+        // No ACP handshake: the subprocess is ready as soon as it spawned
+        // (or as soon as open_session was written for a joined session).
         let _ = tx.send(AcpEvent::Started { session_id: String::new() }).await;
         log::info!(
             "pi spawn extensions: {}",
@@ -435,7 +434,9 @@ impl PiDriver {
             }
         );
         let mut driver = Self {
-            transport,
+            mux,
+            inbound,
+            session_id: launch.session_id.clone(),
             tx,
             idx_to_id: HashMap::new(),
             args_buf: HashMap::new(),
@@ -457,13 +458,13 @@ impl PiDriver {
         // Pull Pi's live model list, current state, thinking levels, and
         // slash commands. Responses land in on_response and refresh the
         // configOptions / commands the chat page already knows how to render.
-        for cmd in [
-            "{\"type\":\"get_available_models\"}",
-            "{\"type\":\"get_available_thinking_levels\"}",
-            "{\"type\":\"get_state\"}",
-            "{\"type\":\"get_commands\"}",
+        for typ in [
+            "get_available_models",
+            "get_available_thinking_levels",
+            "get_state",
+            "get_commands",
         ] {
-            let _ = driver.transport.send_line(cmd).await;
+            let _ = driver.send_rpc(json!({ "type": typ })).await;
         }
         // Usage baseline: pi's get_session_stats reports the FULL session
         // total (cumulative, and once sessions persist it survives respawns).
@@ -471,11 +472,18 @@ impl PiDriver {
         // resume charges only its own delta, not the whole history. The
         // response lands in on_stats_response with no pending turn → it only
         // seeds the baseline, never emits TurnFinished.
-        let _ = driver
-            .transport
-            .send_line("{\"type\":\"get_session_stats\"}")
-            .await;
+        let _ = driver.send_rpc(json!({ "type": "get_session_stats" })).await;
         Ok(driver)
+    }
+
+    async fn send_rpc(&self, mut obj: Value) -> Result<(), AcpError> {
+        if let Some(map) = obj.as_object_mut() {
+            if !self.session_id.is_empty() {
+                map.insert("sessionId".into(), json!(self.session_id));
+            }
+        }
+        let line = serde_json::to_string(&obj)?;
+        self.mux.send_line(&line).await
     }
 
     async fn emit(&self, ev: AcpEvent) {
@@ -535,10 +543,9 @@ impl PiDriver {
         let allowed = crate::models::effective_efforts(&self.effort_options);
         let default = crate::models::pick_default_effort(&allowed, default_effort);
         self.current_level = default.to_string();
-        let line =
-            serde_json::to_string(&json!({ "type": "set_thinking_level", "level": default }))
-                .unwrap_or_default();
-        let _ = self.transport.send_line(&line).await;
+        let _ = self
+            .send_rpc(json!({ "type": "set_thinking_level", "level": default }))
+            .await;
         self.emit_config_options().await;
     }
 
@@ -656,12 +663,9 @@ impl PiDriver {
         if !allowed.is_empty() && !allowed.iter().any(|l| l == &self.current_level) {
             let next = allowed[0].clone();
             self.current_level = next.clone();
-            let line = serde_json::to_string(&json!({
-                "type": "set_thinking_level",
-                "level": next,
-            }))
-            .unwrap_or_default();
-            let _ = self.transport.send_line(&line).await;
+            let _ = self
+                .send_rpc(json!({ "type": "set_thinking_level", "level": next }))
+                .await;
         }
         self.emit_config_options().await;
     }
@@ -694,8 +698,7 @@ impl PiDriver {
             self.current_model_key = key;
         }
         let _ = self
-            .transport
-            .send_line("{\"type\":\"get_available_thinking_levels\"}")
+            .send_rpc(json!({ "type": "get_available_thinking_levels" }))
             .await;
         self.emit_config_options().await;
     }
@@ -724,10 +727,7 @@ impl PiDriver {
                     .await;
             }
         });
-        let sent = self
-            .transport
-            .send_line("{\"type\":\"get_session_stats\"}")
-            .await;
+        let sent = self.send_rpc(json!({ "type": "get_session_stats" })).await;
         if sent.is_err() {
             // Request failed outright — close the turn with no usage (the
             // fallback timer would only find an empty pending slot).
@@ -1048,23 +1048,41 @@ impl PiDriver {
     /// Test-only: send a raw RPC command line (e.g. get_state for smoke
     /// tests without quota cost). Not part of ClientDriver.
     pub async fn send_command_for_test(&self, line: &str) -> Result<(), AcpError> {
-        self.transport.send_line(line).await
+        let obj: Value = serde_json::from_str(line).unwrap_or(json!({}));
+        if obj.get("type").is_none() {
+            return self.mux.send_line(line).await;
+        }
+        self.send_rpc(obj).await
+    }
+}
+
+impl Drop for PiDriver {
+    fn drop(&mut self) {
+        let mux = Arc::clone(&self.mux);
+        let id = self.session_id.clone();
+        tokio::spawn(async move {
+            mux.detach(&id).await;
+        });
     }
 }
 
 impl ClientDriver for PiDriver {
     fn recv_once(&mut self) -> BoxFuture<'_, Result<bool, AcpError>> {
         Box::pin(async move {
-            let Some(line) = self.transport.recv_line().await? else {
-                let code = self.transport.exit_code().await.unwrap_or(-1);
-                self.emit(AcpEvent::ProcessExited { code }).await;
-                return Ok(false);
-            };
-            match serde_json::from_str::<Value>(&line) {
-                Ok(v) => self.handle_line(v).await,
-                Err(e) => log::warn!("pi: unparsable line: {e}"),
+            match self.inbound.recv().await {
+                Some(MuxMsg::Line(v)) => {
+                    self.handle_line(v).await;
+                    Ok(true)
+                }
+                Some(MuxMsg::Eof { code }) => {
+                    self.emit(AcpEvent::ProcessExited { code }).await;
+                    Ok(false)
+                }
+                None => {
+                    self.emit(AcpEvent::ProcessExited { code: -1 }).await;
+                    Ok(false)
+                }
             }
-            Ok(true)
         })
     }
 
@@ -1091,19 +1109,19 @@ impl ClientDriver for PiDriver {
             // its session lazily, so the spawn-time set_thinking_level may have
             // preceded it. Idempotent + clamped by pi.
             if !self.current_level.is_empty() {
-                let think = serde_json::to_string(&json!({
-                    "type": "set_thinking_level",
-                    "level": self.current_level,
-                }))?;
-                let _ = self.transport.send_line(&think).await;
+                let _ = self
+                    .send_rpc(json!({
+                        "type": "set_thinking_level",
+                        "level": self.current_level,
+                    }))
+                    .await;
             }
-            let line = serde_json::to_string(&cmd)?;
-            self.transport.send_line(&line).await
+            self.send_rpc(cmd).await
         })
     }
 
     fn cancel_turn(&mut self) -> BoxFuture<'_, Result<(), AcpError>> {
-        Box::pin(async move { self.transport.send_line("{\"type\":\"abort\"}").await })
+        Box::pin(async move { self.send_rpc(json!({ "type": "abort" })).await })
     }
 
     fn answer_permission<'a>(
@@ -1117,8 +1135,7 @@ impl ClientDriver for PiDriver {
                 return Ok(());
             };
             let resp = pi_ui_response(&pending, option_id, cancelled);
-            let line = serde_json::to_string(&resp).unwrap_or_default();
-            self.transport.send_line(&line).await
+            self.send_rpc(resp).await
         })
     }
 
@@ -1145,13 +1162,12 @@ impl ClientDriver for PiDriver {
                     }
                 }
                 self.current_model_key = value.to_string();
-                let line = serde_json::to_string(&json!({
+                self.send_rpc(json!({
                     "type": "set_model",
                     "provider": provider,
                     "modelId": model_id,
                 }))
-                .unwrap_or_default();
-                self.transport.send_line(&line).await?;
+                .await?;
                 self.emit_config_options().await;
                 return Ok(());
             }
@@ -1159,9 +1175,8 @@ impl ClientDriver for PiDriver {
                 return Ok(());
             }
             self.current_level = value.to_string();
-            let line = serde_json::to_string(&json!({ "type": "set_thinking_level", "level": value }))
-                .unwrap_or_default();
-            self.transport.send_line(&line).await?;
+            self.send_rpc(json!({ "type": "set_thinking_level", "level": value }))
+                .await?;
             self.emit_config_options().await;
             Ok(())
         })
@@ -1172,7 +1187,7 @@ impl ClientDriver for PiDriver {
     }
 
     fn stderr_tail(&self) -> String {
-        self.transport.stderr_tail()
+        self.mux.stderr_tail()
     }
 }
 

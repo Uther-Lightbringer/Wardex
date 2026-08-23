@@ -51,6 +51,15 @@ pub fn can_use_for_chat(agent: &Agent) -> bool {
     agent.enabled && provider::chat_capable(&agent.provider)
 }
 
+/// Whether create/open should spawn the agent subprocess immediately.
+///
+/// ACP CLIs still warm on session create/open (`session/load` + configOptions
+/// ready before the user types). Pi is lazy: the runtime actor is created
+/// (reminder timers live there) but `pi.exe` starts on the first prompt.
+fn eager_spawn(agent: &Agent) -> bool {
+    !agent.provider.eq_ignore_ascii_case("pi")
+}
+
 fn snapshot_of(agent: &Agent) -> AgentSnapshot {
     AgentSnapshot {
         id: agent.id.clone(),
@@ -242,7 +251,9 @@ impl ChatManager {
     }
 
     /// startNewSession (ChatController.cpp:688-721): default agent required,
-    /// session created + warmed, previous empty session discarded.
+    /// session created, previous empty session discarded. ACP agents are
+    /// warmed immediately; Pi only gets a runtime actor (process on first
+    /// prompt).
     pub async fn create_session(&self, project_dir: &str) -> Result<String, ChatError> {
         self.create_session_in_group(project_dir, "", None, None).await
     }
@@ -300,6 +311,7 @@ impl ChatManager {
             }
             id
         };
+        let warm = eager_spawn(&agent);
         self.create_runtime(&id, agent);
         if active {
             let prev = self.active_id();
@@ -309,7 +321,9 @@ impl ChatManager {
                 self.discard_if_empty(&prev).await;
             }
         }
-        self.send(&id, RuntimeCmd::EnsureAcp).await?; // warm in background
+        if warm {
+            self.send(&id, RuntimeCmd::EnsureAcp).await?; // warm ACP in background
+        }
         self.sink.emit("store://sessions", json!({}));
         Ok(id)
     }
@@ -331,15 +345,19 @@ impl ChatManager {
         }
         if self.entry_tx(session_id).is_none() {
             let agent = self.resolve_agent_for(session_id);
+            let warm = eager_spawn(&agent);
             self.create_runtime(session_id, agent);
-            self.send(session_id, RuntimeCmd::EnsureAcp).await?;
+            if warm {
+                self.send(session_id, RuntimeCmd::EnsureAcp).await?;
+            }
         }
         Ok(())
     }
 
     /// open_session's runtime half WITHOUT the active switch (monitor page
-    /// mini-chat): create + warm a runtime for a session that has meta but
-    /// no live runtime. Emits no events, touches no active/unread state.
+    /// mini-chat): create a runtime for a session that has meta but no live
+    /// runtime. ACP is warmed; Pi waits for the first prompt. Emits no
+    /// events, touches no active/unread state.
     pub async fn ensure_runtime(&self, session_id: &str) -> Result<(), ChatError> {
         {
             let mut stores = lock_ok(&self.stores);
@@ -349,8 +367,11 @@ impl ChatManager {
         }
         if self.entry_tx(session_id).is_none() {
             let agent = self.resolve_agent_for(session_id);
+            let warm = eager_spawn(&agent);
             self.create_runtime(session_id, agent);
-            self.send(session_id, RuntimeCmd::EnsureAcp).await?;
+            if warm {
+                self.send(session_id, RuntimeCmd::EnsureAcp).await?;
+            }
         }
         Ok(())
     }

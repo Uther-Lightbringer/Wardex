@@ -39,6 +39,7 @@ async fn pi_rpc_state_smoke() {
             effort_options: Vec::new(),
             default_effort: String::new(),
             env: Vec::new(),
+            agent_id: "smoke".to_string(),
             cwd: tmp.path().to_string_lossy().into_owned(),
             extensions: Vec::new(),
         },

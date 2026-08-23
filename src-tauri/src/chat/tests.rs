@@ -4,13 +4,14 @@
 // detect/backoff/cancel, interrupted-turn resume prompt synthesis, process
 // cap eviction, switchAgent same/cross provider, subagent tracking.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::acp::{AcpClient, MockTransport};
-use crate::chat::driver::{ClientDriver, Launch, Spawner};
+use crate::acp::{AcpClient, AcpError, AcpEvent, MockTransport};
+use crate::chat::driver::{BoxFuture, ClientDriver, Launch, Spawner};
 use crate::chat::manager::{ChatManager, SpawnerFactory};
 use crate::chat::runtime::{lock_ok, EventSink};
 use crate::store::{AgentPatch, Paths, StoreRegistry};
@@ -105,6 +106,111 @@ fn harness() -> Harness {
         mocks,
         tmp,
     }
+}
+
+/// Parked driver for Pi lazy-spawn / idle-evict tests: never produces
+/// protocol traffic, never exits. `recv_once` pending keeps the actor's
+/// select! idle. `prompt` completes the turn so finish_reply can run.
+struct IdleDriver {
+    tx: tokio::sync::mpsc::Sender<AcpEvent>,
+}
+
+impl ClientDriver for IdleDriver {
+    fn recv_once(&mut self) -> BoxFuture<'_, Result<bool, AcpError>> {
+        Box::pin(async {
+            std::future::pending::<()>().await;
+            Ok(false)
+        })
+    }
+    fn prompt<'a>(
+        &'a mut self,
+        _text: &'a str,
+        _image_paths: &'a [String],
+    ) -> BoxFuture<'a, Result<(), AcpError>> {
+        let tx = self.tx.clone();
+        Box::pin(async move {
+            let _ = tx
+                .send(AcpEvent::TurnFinished {
+                    stop_reason: "end_turn".into(),
+                    usage: None,
+                })
+                .await;
+            Ok(())
+        })
+    }
+    fn cancel_turn(&mut self) -> BoxFuture<'_, Result<(), AcpError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn answer_permission<'a>(
+        &'a mut self,
+        _request_id: i64,
+        _option_id: &'a str,
+        _cancelled: bool,
+    ) -> BoxFuture<'a, Result<(), AcpError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn set_mode<'a>(&'a mut self, _mode_id: &'a str) -> BoxFuture<'a, Result<(), AcpError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn set_config_option<'a>(
+        &'a mut self,
+        _config_id: &'a str,
+        _value: &'a str,
+    ) -> BoxFuture<'a, Result<(), AcpError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn image_supported(&self) -> bool {
+        true
+    }
+}
+
+fn pi_lazy_factory(spawns: Arc<AtomicUsize>) -> SpawnerFactory {
+    Arc::new(move |_session_id: &str| {
+        let spawns = spawns.clone();
+        let spawner: Spawner = Box::new(move |launch: Launch, tx| {
+            let spawns = spawns.clone();
+            Box::pin(async move {
+                let Launch::Pi(_) = launch else {
+                    panic!("pi lazy factory only supports Pi launches");
+                };
+                spawns.fetch_add(1, Ordering::SeqCst);
+                let _ = tx
+                    .send(AcpEvent::Started {
+                        session_id: String::new(),
+                    })
+                    .await;
+                Ok(Box::new(IdleDriver { tx }) as Box<dyn ClientDriver>)
+            })
+        });
+        spawner
+    })
+}
+
+/// Like `harness`, but the default agent stays provider "pi" and the spawner
+/// records Pi launches instead of speaking ACP.
+fn harness_pi() -> (Harness, Arc<AtomicUsize>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = Paths::new(tmp.path().to_path_buf());
+    let mut stores = StoreRegistry::init(paths.clone());
+    stores.agents.create_agent(&paths, "Pi").expect("create agent");
+    let stores = Arc::new(Mutex::new(stores));
+    let sink = Arc::new(RecordSink::default());
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let manager = Arc::new(ChatManager::with_factory(
+        stores.clone(),
+        sink.clone(),
+        pi_lazy_factory(spawns.clone()),
+    ));
+    (
+        Harness {
+            manager,
+            stores,
+            sink,
+            mocks: Arc::new(Mutex::new(Vec::new())),
+            tmp,
+        },
+        spawns,
+    )
 }
 
 async fn wait_for(mut pred: impl FnMut() -> bool) -> bool {
@@ -849,6 +955,83 @@ async fn overdue_reminder_fires_immediately() {
         })
     })
     .await);
+}
+
+/// Pi: create/open a session must not spawn; the first prompt does.
+#[tokio::test]
+async fn pi_create_and_open_do_not_spawn_until_prompt() {
+    let (h, spawns) = harness_pi();
+    let id = h.manager.create_session("").await.expect("create session");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(spawns.load(Ordering::SeqCst), 0, "create_session must not spawn pi");
+    assert!(
+        h.manager
+            .runtime_states()
+            .get(&id)
+            .is_some_and(|s| !s.acp_running),
+        "runtime exists but pi is not running"
+    );
+
+    h.manager.close_session(&id);
+    h.manager.open_session(&id).await.expect("open session");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(spawns.load(Ordering::SeqCst), 0, "open_session must not spawn pi");
+
+    h.manager
+        .send_prompt(&id, "hello", &[])
+        .await
+        .expect("send");
+    assert!(
+        wait_for(|| spawns.load(Ordering::SeqCst) == 1).await,
+        "first prompt spawns pi"
+    );
+    assert!(
+        wait_for(|| h.manager.runtime_states().get(&id).is_some_and(|s| s.acp_running)).await,
+        "pi marked running after first prompt"
+    );
+}
+
+/// Background Pi that has finished a turn is dropped after K_IDLE_EVICT_MS;
+/// the active chat's process stays; a later prompt respawns.
+#[tokio::test]
+async fn pi_idle_background_process_is_evicted_active_is_kept() {
+    let (h, spawns) = harness_pi();
+    let a = h.manager.create_session("").await.expect("session a");
+    h.manager.send_prompt(&a, "hello", &[]).await.expect("send a");
+    assert!(
+        wait_for(|| h.manager.runtime_states().get(&a).is_some_and(|s| s.acp_running && !s.busy)).await,
+        "session a finished and process still up while active"
+    );
+    tokio::time::sleep(Duration::from_millis(
+        crate::chat::runtime::K_IDLE_EVICT_MS * 3,
+    ))
+    .await;
+    assert!(
+        h.manager
+            .runtime_states()
+            .get(&a)
+            .is_some_and(|s| s.acp_running),
+        "active idle pi is not evicted"
+    );
+
+    let b = h.manager.create_session("").await.expect("session b");
+    assert_ne!(a, b);
+    assert_eq!(h.manager.active_id(), b);
+    assert!(
+        wait_for(|| h.manager.runtime_states().get(&a).is_some_and(|s| !s.acp_running)).await,
+        "background idle pi evicted"
+    );
+    assert_eq!(spawns.load(Ordering::SeqCst), 1, "b must not spawn");
+
+    h.manager.send_prompt(&a, "again", &[]).await.expect("send a again");
+    assert!(
+        wait_for(|| spawns.load(Ordering::SeqCst) == 2).await,
+        "prompt after eviction respawns pi"
+    );
+    assert!(
+        wait_for(|| h.manager.runtime_states().get(&a).is_some_and(|s| s.acp_running)).await,
+        "respawned process marked running"
+    );
 }
 
 // ---- small helpers ----

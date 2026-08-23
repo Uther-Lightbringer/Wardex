@@ -115,6 +115,8 @@ pub struct PiLaunch {
     /// spawn so thinking is ON by default.
     pub default_effort: String,
     pub env: EnvOverrides,
+    /// WarDex agent id: sessions with the same cwd + agent share one pi.exe.
+    pub agent_id: String,
     /// Child working directory (the session's project dir).
     pub cwd: String,
     /// Pi session persistence: --session-dir (isolated per-Wardex-session

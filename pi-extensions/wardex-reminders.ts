@@ -73,13 +73,12 @@ function newRow(title: string, sessionId: string, dueAtMs: number): TodoRow {
 	};
 }
 
-function requireCtx(): { sessionId: string; path: string } {
-	const sessionId = env("WARDEX_SESSION_ID");
+function requireTodosPath(): string {
 	const path = env("WARDEX_TODOS_PATH");
-	if (!sessionId || !path) {
-		throw new Error("WARDEX_SESSION_ID / WARDEX_TODOS_PATH 未设置，无法使用提醒工具");
+	if (!path) {
+		throw new Error("WARDEX_TODOS_PATH 未设置，无法使用提醒工具");
 	}
-	return { sessionId, path };
+	return path;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -96,9 +95,15 @@ export default function (pi: ExtensionAPI) {
 			minutes: Type.Number({ description: "Minutes from now until the reminder fires (must be > 0)" }),
 			content: Type.String({ description: "What to remind about" }),
 		}),
-		async execute(_id, params) {
+		async execute(_id, params, _signal, _onUpdate, ctx) {
 			try {
-				const { sessionId, path } = requireCtx();
+				const path = requireTodosPath();
+				const sessionId =
+					(ctx?.sessionManager?.getSessionId?.() as string | undefined)?.trim() ||
+					env("WARDEX_SESSION_ID");
+				if (!sessionId) {
+					throw new Error("无法确定会话 ID，无法使用提醒工具");
+				}
 				const minutes = params.minutes;
 				const content = (params.content ?? "").trim();
 				if (!(minutes > 0) || !content) {
@@ -126,7 +131,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 		async execute(_id, params) {
 			try {
-				const { path } = requireCtx();
+				const path = requireTodosPath();
 				const id = (params.id ?? "").trim();
 				if (!id) {
 					return { content: [{ type: "text" as const, text: "invalid arguments: id is required" }] };
@@ -149,9 +154,15 @@ export default function (pi: ExtensionAPI) {
 		label: "List Reminders",
 		description: "List all pending reminders of this chat session.",
 		parameters: Type.Object({}),
-		async execute() {
+		async execute(_id, _params, _signal, _onUpdate, ctx) {
 			try {
-				const { sessionId, path } = requireCtx();
+				const path = requireTodosPath();
+				const sessionId =
+					(ctx?.sessionManager?.getSessionId?.() as string | undefined)?.trim() ||
+					env("WARDEX_SESSION_ID");
+				if (!sessionId) {
+					throw new Error("无法确定会话 ID，无法使用提醒工具");
+				}
 				const rows = loadTodos(path).filter(
 					(r) => r.scope === "session" && r.sessionId === sessionId && r.notifyMode === "push" && !r.done,
 				);
