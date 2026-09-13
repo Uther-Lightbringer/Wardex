@@ -531,10 +531,53 @@ impl AgentTester {
             return None; // single flight: ignored
         }
         let _guard = FlightGuard(&self.in_flight);
-        if agent.provider == "pi" {
-            Some(self.test_pi(agent).await)
-        } else {
-            Some(self.run(agent).await)
+        match agent.provider.as_str() {
+            "pi" => Some(self.test_pi(agent).await),
+            "devin" => Some(self.test_devin(agent).await),
+            _ => Some(self.run(agent).await),
+        }
+    }
+
+    /// Devin has no CLI and no handshake: "test connection" is one
+    /// authenticated REST call (GET /v1/sessions?limit=1), which is what
+    /// actually proves the API Key, the Base URL and network reachability.
+    /// It is read-only on purpose — creating a session would burn ACU.
+    /// The key never reaches the transcript, only the URL and the outcome.
+    async fn test_devin(&self, agent: &Agent) -> TestResult {
+        let root = crate::chat::devin::api_root(&agent.base_url);
+        let path = "/v1/sessions?limit=1";
+        let mut transcript = vec![frame("req", format!("GET {root}{path}"))];
+        if agent.api_key.trim().is_empty() {
+            return TestResult {
+                ok: false,
+                message: "未配置 Devin API Key（在 https://app.devin.ai/settings/api-keys 生成 apk_… 密钥）"
+                    .to_string(),
+                transcript,
+            };
+        }
+        let api = crate::chat::devin::DevinApi::new(&agent.base_url, &agent.api_key);
+        match api.get(path).await {
+            Ok(v) => {
+                let count = v
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .map(Vec::len)
+                    .unwrap_or(0);
+                transcript.push(frame("res", format!("HTTP 200，返回 {count} 条会话")));
+                TestResult {
+                    ok: true,
+                    message: format!("成功：已连接 {root}"),
+                    transcript,
+                }
+            }
+            Err(e) => {
+                transcript.push(frame("res", e.clone()));
+                TestResult {
+                    ok: false,
+                    message: format!("失败 ({root}): {e}"),
+                    transcript,
+                }
+            }
         }
     }
 

@@ -1789,6 +1789,7 @@ impl Actor {
         let (fresh_launch, launch) = match self.build_launch() {
             Launch::Acp(l) => (l.start.resume_session_id.is_empty(), Launch::Acp(l)),
             Launch::Pi(p) => (true, Launch::Pi(p)),
+            Launch::Devin(d) => (d.resume_session_id.is_empty(), Launch::Devin(d)),
         };
         self.fresh_launch = fresh_launch;
         self.model_applied = false;
@@ -1909,6 +1910,19 @@ impl Actor {
                 session_dir,
                 session_id: self.session_id.clone(),
                 extensions,
+            });
+        }
+        // Devin runs in the cloud: no CLI, no env overrides, no MCP — only
+        // the API key and the remote session id to resume (chat/devin.rs).
+        if provider == "devin" {
+            let resume = {
+                let mut stores = lock_ok(&self.stores);
+                stores.sessions.acp_session_id_for(&self.session_id)
+            };
+            return Launch::Devin(crate::chat::driver::DevinLaunch {
+                api_key: self.agent.api_key.trim().to_string(),
+                base_url: self.agent.base_url.trim().to_string(),
+                resume_session_id: resume,
             });
         }
         let spec = provider::spec(&provider);
