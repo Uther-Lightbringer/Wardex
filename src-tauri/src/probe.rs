@@ -271,10 +271,16 @@ fn expanded_search_path(
 /// User-level PATH from HKCU\Environment ("Path" value). May be
 /// REG_EXPAND_SZ with %VAR% references — used verbatim, like the old
 /// QSettings NativeFormat read. Any registry failure degrades to None.
+#[cfg(windows)]
 fn user_path_from_registry() -> Option<String> {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let env = hkcu.open_subkey("Environment").ok()?;
     env.get_value::<String, _>("Path").ok()
+}
+
+#[cfg(not(windows))]
+fn user_path_from_registry() -> Option<String> {
+    None
 }
 
 /// First existing file among <name>, <name>.exe, <name>.cmd, <name>.bat in

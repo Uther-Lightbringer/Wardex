@@ -35,9 +35,6 @@ percent-encoding = "2"
 # PNG/JPEG codec only: clipboard paste downscale chain (media) and the 128px
 # avatar crop (prefs). No other image formats are needed.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-# HKCU\Environment user-PATH merge for CLI probing (probe.rs); the GUI
-# process PATH often lags the user shell.
-winreg = "0.56"
 # QProcess::splitCommand equivalent for agent extraArgs (provider.rs).
 shell-words = "1"
 # Logging facade for the ACP layer (bad-JSON drops, stderr drain, session/load
@@ -62,6 +59,11 @@ notify = "6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sqlparser = "0.62.0"
 tokio-postgres = "0.7.18"
+
+[target.'cfg(windows)'.dependencies]
+# HKCU\Environment user-PATH merge for CLI probing (probe.rs); the GUI
+# process PATH often lags the user shell.
+winreg = "0.56"
 
 [dev-dependencies]
 tempfile = "3"
