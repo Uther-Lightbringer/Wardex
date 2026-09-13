@@ -233,10 +233,11 @@ fn event_ids(detail: &Value) -> Vec<String> {
 }
 
 /// A message the user should see: everything Devin emits, minus the echo of
-/// the prompts WarDex itself sent.
+/// the prompts WarDex itself sent (`user_message` and, for the prompt that
+/// created the session, `initial_user_message`).
 fn is_agent_message(msg: &Value) -> bool {
     let ty = msg.get("type").and_then(Value::as_str).unwrap_or_default();
-    ty != "user_message"
+    !ty.ends_with("user_message")
 }
 
 /// Map the API's status_enum to a WarDex stop reason. None = the session is
@@ -487,6 +488,9 @@ mod tests {
     fn only_non_user_messages_are_forwarded() {
         assert!(is_agent_message(&json!({ "type": "devin_message" })));
         assert!(!is_agent_message(&json!({ "type": "user_message" })));
+        assert!(!is_agent_message(
+            &json!({ "type": "initial_user_message" })
+        ));
     }
 
     #[test]
