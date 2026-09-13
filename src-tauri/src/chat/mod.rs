@@ -14,6 +14,7 @@
 // HashMap<sessionId, Runtime> plus session-lifecycle entry points the Tauri
 // command layer calls.
 
+pub mod devin;
 pub mod driver;
 pub mod manager;
 pub mod opencode_usage;
