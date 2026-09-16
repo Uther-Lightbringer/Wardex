@@ -67,6 +67,24 @@ pub static REGISTRY: &[ProviderSpec] = &[
         install_hint: "Pi 为自包含二进制（bundle-pi.mjs / 安装包内置）。默认定位 workspace 同级 pi 目录，可在「Pi 插件目录」指定或设 WARDEX_PI_DIR",
         chat_capable: true,
     },
+    // Devin: a cloud agent reached over its REST session API (chat/devin.rs).
+    // No CLI, no child process, no env injection — the API key travels as an
+    // Authorization header, so apiKeyEnvs/baseUrlEnvs stay empty.
+    ProviderSpec {
+        id: "devin",
+        display_name: "Devin (云端)",
+        default_command: "",
+        acp_args: &[],
+        api_key_envs: &[],
+        base_url_envs: &[],
+        clear_envs: &[],
+        bearer_token_env: "",
+        official_key_prefix: "",
+        base_url_hint: "留空即用 https://api.devin.ai；仅在走自建代理时填写 API 根地址",
+        mode_map: &[],
+        install_hint: "无需安装 CLI：在 https://app.devin.ai/settings/api-keys 生成 apk_… 密钥填入 API Key 即可",
+        chat_capable: true,
+    },
     ProviderSpec {
         id: "kimi",
         display_name: "Kimi CLI",
@@ -309,9 +327,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_has_six_records_in_order() {
+    fn registry_has_seven_records_in_order() {
         let ids: Vec<&str> = ids().collect();
-        assert_eq!(ids, ["pi", "kimi", "claude", "codex", "opencode", "custom"]);
+        assert_eq!(
+            ids,
+            ["pi", "devin", "kimi", "claude", "codex", "opencode", "custom"]
+        );
         // Every record: fixed chat_capable, non-empty display/hints.
         for s in REGISTRY {
             assert!(s.chat_capable, "{} chat_capable", s.id);
@@ -383,6 +404,17 @@ mod tests {
         assert!(pi.base_url_envs.is_empty());
         assert!(pi.clear_envs.is_empty());
         assert!(pi.mode_map.is_empty());
+
+        // devin: cloud REST agent — no CLI command, no env injection (the
+        // key rides the Authorization header instead).
+        let devin = spec("devin").expect("devin");
+        assert_eq!(devin.default_command, "");
+        assert!(devin.acp_args.is_empty());
+        assert!(devin.api_key_envs.is_empty());
+        assert!(devin.base_url_envs.is_empty());
+        assert!(devin.clear_envs.is_empty());
+        assert!(devin.mode_map.is_empty());
+        assert!(env_overrides(devin, "apk_secret", "https://api.devin.ai", true).is_empty());
     }
 
     #[test]

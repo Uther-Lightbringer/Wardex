@@ -69,6 +69,8 @@ const spec = computed(() => agents.specOf(draft.provider));
 const providerOptions = computed(() => agents.specs.map((s) => s.displayName));
 const providerIndex = computed(() => agents.specs.findIndex((s) => s.id === draft.provider));
 const isCustom = computed(() => draft.provider === 'custom');
+// Devin 是云端会话，没有本地 CLI / 插件目录 / MCP 下发，只需 API Key。
+const isDevin = computed(() => draft.provider === 'devin');
 
 // Preset base URLs (OpenAI-compatible roots). Picking one fills the Base URL
 // field; the field stays free-text so any custom endpoint still works.
@@ -298,6 +300,7 @@ function onProviderChange(i: number): void {
 async function probe(autoFill: boolean, preferredPath = ''): Promise<void> {
   const s = agents.specOf(draft.provider);
   if (!s || s.id === 'custom') return; // custom never probes
+  if (s.id === 'devin') return; // cloud agent: nothing local to look for
   if (s.id === 'pi') {
     const preferred = preferredPath || draft.piDir.trim();
     const r = await agents.probePi(preferred);
@@ -325,7 +328,7 @@ async function probe(autoFill: boolean, preferredPath = ''): Promise<void> {
 /** Probe status line (builtin providers with a selected row only). */
 const probeLine = computed<{ text: string; cls: string } | null>(() => {
   const s = spec.value;
-  if (!selectedId.value || !s || s.id === 'custom') return null;
+  if (!selectedId.value || !s || s.id === 'custom' || s.id === 'devin') return null;
   // pi: 编译二进制是否可用 + 插件目录状态。
   if (s.id === 'pi') {
     const r = agents.probeCache['pi'] as unknown as (PiProbeResult & { found?: boolean }) | undefined;
@@ -429,7 +432,7 @@ async function testConnection(): Promise<void> {
   // Builtin (non-pi) providers with a bare CLI path resolve it first and ask
   // for a second click once the probe has landed (§9.2). pi resolves its
   // binary/plugin dir on the backend instead.
-  if (s.id !== 'pi' && isBareCliPath(s, draft.cliPath)) {
+  if (s.id !== 'pi' && s.id !== 'devin' && isBareCliPath(s, draft.cliPath)) {
     statusMsg.value = '正在解析 CLI 路径，完成后请再点测试连接';
     void probe(true);
     return;
@@ -637,6 +640,8 @@ const pageKeysOn = computed(() => nav.page === 'config');
               {{ spec.installHint }}
             </div>
 
+            <!-- Devin 在云端选模型/思考档位，本地只需 Base URL + API Key -->
+            <template v-if="!isDevin">
             <div class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Model</span>
               <div class="cfg__baseurl-row">
@@ -702,6 +707,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
             <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               勾选该 Agent 可用的思考强度档位；对话页强度下拉只显示这些（思考恒开启）。全不勾 = 全部档位可用；kimi 保存时写入 config.toml 的 support_efforts，opencode 生成模型 variants，pi 由驱动注入思考档位下拉
             </div>
+            </template>
 
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               {{ spec.baseUrlHint }}
@@ -719,6 +725,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
               </div>
             </div>
 
+            <template v-if="!isDevin">
             <div v-if="draft.provider === 'pi'" class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Pi 插件目录</span>
               <input
@@ -783,6 +790,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
             >
               {{ probeLine.text }}
             </div>
+            </template>
 
             <div class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">API Key</span>
@@ -795,6 +803,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
               />
             </div>
 
+            <template v-if="!isDevin">
             <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               额外参数（追加在 ACP 启动参数后；custom 时即为完整启动参数）
             </div>
@@ -814,6 +823,7 @@ const pageKeysOn = computed(() => nav.page === 'config');
               :style="{ fontSize: prefs.fs(12) + 'px' }"
               @input="markDirty"
             ></textarea>
+            </template>
 
             <div class="cfg__avatar-row" :class="{ disabled: !selectedId }">
               <img class="cfg__avatar" :src="agentAvatarUrl" draggable="false" />

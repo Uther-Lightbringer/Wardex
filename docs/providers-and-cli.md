@@ -87,6 +87,25 @@ pub struct ProviderSpec {
   provider；opencode 没有 base-url 环境变量约定，自定义端点要写到 opencode.json 的
   provider 配置里，因此 `baseUrlEnvs` 为空、agent 的 baseUrl 栏对它不生效。
 
+### 1.1b devin：云端 provider（不是 CLI）
+
+`devin` 在注册表里是一条「空壳」记录：`defaultCommand` / `acpArgs` / `apiKeyEnvs` /
+`baseUrlEnvs` / `clearEnvs` / `modeMap` 全为空，因为它没有本地进程可启动，也就没有
+环境变量可注入。Agent 只用两个字段：`apiKey`（Devin 的 `apk_…`，在
+https://app.devin.ai/settings/api-keys 生成）和可选的 `baseUrl`（留空 =
+`https://api.devin.ai`，仅自建代理时填）。
+
+运行时不走 ACP：`chat/runtime.rs` 的 `build_launch` 在解析 CLI 之前直接返回
+`Launch::Devin`，由 `chat/devin.rs` 的 `DevinDriver` 通过 REST 会话 API 驱动
+（`POST /v1/sessions` 建会话、`POST /v1/sessions/{id}/message` 追加消息、轮询
+`GET /v1/sessions/{id}` 取新消息与 `status_enum`）。远端会话 id 复用会话记录的
+`acpSessionId` 字段，重启后继续同一个 Devin 会话。API Key 只作为
+`Authorization: Bearer` 请求头发送，不落进程环境、日志或测试 transcript。
+
+因此配置页对 devin 隐藏 CLI 路径 / 检测 CLI / 额外参数 / MCP / 模型与思考强度，
+「测试连接」改为一次只读的 `GET /v1/sessions?limit=1`（不建会话，不消耗 ACU）；
+权限请求、mode、token 用量对它是空的。
+
 ### 1.2 claude 的 ANTHROPIC_AUTH_TOKEN 中转 key 特例
 
 参照：`ProviderRegistry.h:22-25`、`ProviderRegistry.cpp:42-45`、注入逻辑

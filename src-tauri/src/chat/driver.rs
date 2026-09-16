@@ -132,10 +132,23 @@ pub struct PiLaunch {
     pub skills: Vec<String>,
 }
 
-/// Everything a spawn needs: an ACP subprocess or the embedded pi agent.
+/// Everything the Devin cloud agent needs: it has no local process, only an
+/// API key and (optionally) a remote session to resume.
+pub struct DevinLaunch {
+    pub api_key: String,
+    /// Empty = https://api.devin.ai.
+    pub base_url: String,
+    /// Remote Devin session id stored on the WarDex session; empty creates a
+    /// new Devin session on the first prompt.
+    pub resume_session_id: String,
+}
+
+/// Everything a spawn needs: an ACP subprocess, the embedded pi agent, or a
+/// remote Devin session.
 pub enum Launch {
     Acp(SessionLaunch),
     Pi(PiLaunch),
+    Devin(DevinLaunch),
 }
 
 /// Factory producing a started client bound to a fresh event channel. The
@@ -159,6 +172,10 @@ pub fn production_spawner() -> Spawner {
                 }
                 Launch::Pi(p) => {
                     let client = crate::chat::pi::PiDriver::spawn(p, tx).await?;
+                    Ok(Box::new(client) as Box<dyn ClientDriver>)
+                }
+                Launch::Devin(d) => {
+                    let client = crate::chat::devin::DevinDriver::spawn(d, tx).await?;
                     Ok(Box::new(client) as Box<dyn ClientDriver>)
                 }
             }
