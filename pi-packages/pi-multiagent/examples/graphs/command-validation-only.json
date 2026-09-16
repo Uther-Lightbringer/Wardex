@@ -1,0 +1,35 @@
+{
+  "objective": "Run trusted validation commands and preserve observed proof with no structured edit/write tools.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true,
+    "allowShellTools": true
+  },
+  "steps": [
+    {
+      "id": "validation-proof",
+      "agent": {
+        "ref": "package:validator"
+      },
+      "task": "Run these trusted validation commands from the repository root: `git status -sb` and `git diff --check`. Report pass/fail/deferred per command with cwd, important output, and failure bucket. Do not edit, install, publish, deploy, delete, or run network commands."
+    },
+    {
+      "id": "final-proof",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "validation-proof"
+      ],
+      "task": "Summarize observed command results, deferred commands, failure buckets, and residual risk. Use only observed validation-proof output when summarizing command results."
+    }
+  ],
+  "limits": {
+    "concurrency": 1,
+    "timeoutSecondsPerStep": 9000
+  }
+}

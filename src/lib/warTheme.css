@@ -38,8 +38,8 @@
   --war-blue-row: #32509633;      /* 选中行蓝底 */
   --war-blue-row-2: #32509640;
 
-  /* Markdown 正文语义变量（ChatBubble .md-body，FilePreviewDialog 预览共用；
-     war 值 = 原硬编码金色系，pure 覆盖见下方纯净风格区） */
+  /* Markdown 阅读色（ChatBubble .md-body + FilePreviewDialog 的 Markdown 渲染态；
+     与文件预览 CodeMirror 语法高亮无关。war = 金色系，pure 覆盖见下方） */
   --md-heading: var(--war-gold);
   --md-heading-font: SimSun, serif;
   --md-strong: var(--war-gold-bright);
@@ -229,21 +229,21 @@ html[data-theme='pure'] {
   --war-dialog-bg: rgb(var(--war-page-rgb, 255, 255, 255));
   --war-input-border: #c8cfd9;
 
-  /* Markdown 正文（.md-body）：常规浅色阅读配色。代码底色用半透明深色
-     而非写死灰，随「页面颜色」设置自适应；标题/加粗回近黑，链接回蓝。 */
-  --md-heading: #161b22;
+  /* Markdown 阅读色（聊天气泡）：浅底上要能一眼分开标题/代码/链接。
+     行内代码不再用发灰的蓝；列表记号/引用条也不再接近背景。代码底随页面色自适应。 */
+  --md-heading: #0d1117;
   --md-heading-font: inherit;
-  --md-strong: #161b22;
+  --md-strong: #0d1117;
   --md-em: inherit;
-  --md-link: #2f6fd0;
-  --md-link-hover: #2456a8;
-  --md-code-bg: rgba(15, 23, 42, 0.06);
-  --md-code-text: #476582;
-  --md-pre-bg: rgba(15, 23, 42, 0.05);
-  --md-pre-border: #d4dae2;
-  --md-marker: #9aa3b2;
-  --md-quote-border: #c8cfd9;
-  --md-table-head: #161b22;
+  --md-link: #0969da;
+  --md-link-hover: #0550ae;
+  --md-code-bg: rgba(15, 23, 42, 0.10);
+  --md-code-text: #163a5f;
+  --md-pre-bg: rgba(15, 23, 42, 0.06);
+  --md-pre-border: #c5cdd6;
+  --md-marker: #57606a;
+  --md-quote-border: #8b949e;
+  --md-table-head: #0d1117;
 
   /* 状态/角色色：浅底上换深色版 */
   --war-term-border: #74ab8f;
@@ -446,6 +446,53 @@ html[data-theme='pure'] .cw__atts-chip:hover {
 
 html[data-theme='pure'] .cw .md-body .codeblock__copy {
   background: rgba(255, 255, 255, 0.9);
+}
+
+html[data-theme='pure'] .md-body .codeblock__copy {
+  cursor: pointer;
+  border-color: var(--war-btn-border);
+  color: var(--war-btn-text);
+}
+
+html[data-theme='pure'] .md-body .codeblock__copy:hover {
+  color: var(--md-link);
+  border-color: var(--md-link);
+}
+
+/* 标题与正文都是近黑，靠底边把层级拉开 */
+html[data-theme='pure'] .md-body h1,
+html[data-theme='pure'] .md-body h2 {
+  border-bottom: 1px solid var(--war-border);
+  padding-bottom: 4px;
+}
+
+html[data-theme='pure'] .md-body .md-selection {
+  background: rgba(47, 111, 208, 0.12);
+  border-color: rgba(47, 111, 208, 0.28);
+}
+
+/* 文件预览 Markdown 渲染态：共用 --md-* 色，但按读文档排，不按聊天气泡挤。 */
+html[data-theme='pure'] .pv__md.md-body {
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+html[data-theme='pure'] .pv__md.md-body p {
+  margin: 8px 0;
+  line-height: 1.7;
+}
+
+html[data-theme='pure'] .pv__md.md-body pre {
+  padding: 10px 12px;
+}
+
+html[data-theme='pure'] .pv__md.md-body h1 {
+  font-size: 1.45em;
+}
+
+html[data-theme='pure'] .pv__md.md-body h2 {
+  font-size: 1.28em;
 }
 
 /* ---- 聊天主流程（phase 1）：气泡去深色贴图，改浅色半透明圆角 ----

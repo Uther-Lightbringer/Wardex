@@ -1,0 +1,37 @@
+{
+  "objective": "Inline-only read-only fan-in over two focused surfaces.",
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "read-readme",
+      "agent": {
+        "system": "Read only README.md. Report inline-agent UX gaps. Do not edit. Omitted tools still resolve to mandatory read/discovery."
+      },
+      "task": "Assess whether README teaches inline agents, run_status, step_result, and retained-artifact handling clearly. Return three findings and two fixes."
+    },
+    {
+      "id": "read-skill",
+      "agent": {
+        "system": "Read only skills/pi-multiagent/SKILL.md. Report inline-agent UX gaps. Do not edit. Omitted tools still resolve to mandatory read/discovery."
+      },
+      "task": "Assess whether the package skill teaches a parent to hand-author a useful graph with low friction. Return three findings and two fixes."
+    },
+    {
+      "id": "summary",
+      "agent": {
+        "system": "Synthesize upstream evidence only. Omitted tools still resolve to mandatory read/discovery; inspect an upstream artifact path only if needed."
+      },
+      "needs": [
+        "read-readme",
+        "read-skill"
+      ],
+      "task": "Return GO or NEEDS-WORK for inline agent experience, top changes, validation graph, and non-goals."
+    }
+  ],
+  "limits": {
+    "concurrency": 2,
+    "timeoutSecondsPerStep": 9000
+  }
+}

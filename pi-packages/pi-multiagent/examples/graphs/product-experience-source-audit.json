@@ -1,0 +1,50 @@
+{
+  "objective": "Read-only product-experience audit of the first-success, trust, recovery, and repeat-use path for agent_team from public source and operator copy.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "first-success",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Audit README.md, skills/pi-multiagent/SKILL.md, and examples/graphs/single-specialist-read-only.json for the shortest safe first-success path. Do not edit or run commands. Return friction points, exact source paths, and replacement-copy opportunities."
+    },
+    {
+      "id": "trust-recovery",
+      "agent": {
+        "ref": "package:critic"
+      },
+      "task": "Stress-test authority, message, cancel, cleanup, artifact, and failure-recovery copy for ways a human or parent model could over-trust child output or delete evidence too early. Do not edit. Return the highest-risk confusion points and missing denial copy."
+    },
+    {
+      "id": "operator-loop",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Audit result-format copy, README supervision guidance, and graph cookbook supervision guidance for an API/headless operator who has no pushed notices. Do not edit. Return gaps in run_status waitSeconds, step_result, preview, cursor, and cleanup guidance."
+    },
+    {
+      "id": "experience-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "first-success",
+        "trust-recovery",
+        "operator-loop"
+      ],
+      "task": "Synthesize a product-experience source audit with first-success blockers, trust/recovery risks, repeat-use improvements, and the smallest source changes that would improve the journey without adding runtime machinery."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

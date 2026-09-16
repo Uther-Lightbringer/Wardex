@@ -101,9 +101,6 @@ struct PendingUi {
     pi_id: String,
     method: String,
     prefill: String,
-    /// Sentinel confirm ([plugins.apply] title): approval also applies plugin
-    /// changes (frontend hooks the answer → plugins_apply).
-    plugin_apply: bool,
 }
 
 /// Shape the existing permission dialog understands (toolCall.title + options).
@@ -323,6 +320,139 @@ pub fn locate_extensions_dir() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Root of bundled third-party Pi packages (`pi-packages/<pkg>/`). Same
+/// priority chain as locate_extensions_dir: WARDEX_PI_PACKAGES_DIR → bundled
+/// `resources/pi-packages` → repo-root `pi-packages/`.
+pub fn locate_pi_packages_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("WARDEX_PI_PACKAGES_DIR") {
+        let p = PathBuf::from(dir.trim());
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let bundled = exe_dir.join("resources").join("pi-packages");
+            if bundled.is_dir() {
+                return Some(bundled);
+            }
+        }
+        let mut dir = exe.parent();
+        let mut hops = 0;
+        while let Some(d) = dir {
+            if hops > 6 {
+                break;
+            }
+            if d.join("src-tauri").is_dir() {
+                let candidate = d.join("pi-packages");
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+            }
+            dir = d.parent();
+            hops += 1;
+        }
+    }
+    None
+}
+
+/// pi-multiagent package (agent_team graph orchestration tool + skill).
+/// Returns (extension entry, skill dir) when the bundled copy exists.
+pub fn multiagent_package_files() -> Option<(PathBuf, PathBuf)> {
+    let root = locate_pi_packages_dir()?.join("pi-multiagent");
+    let ext = root.join("extensions").join("multiagent").join("index.ts");
+    let skill = root.join("skills").join("pi-multiagent");
+    if ext.is_file() && skill.is_dir() {
+        Some((ext, skill))
+    } else {
+        None
+    }
+}
+
+/// Names of bundled pi-packages (subdirs of pi-packages/ that carry an
+/// extensions/ tree).
+fn bundled_pi_package_names() -> Vec<String> {
+    let Some(root) = locate_pi_packages_dir() else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    rd.flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("extensions").is_dir())
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
+}
+
+/// True when a settings.json `packages` entry names one of the bundled
+/// pi-packages. Handles both the string form ("npm:pi-multiagent",
+/// "npm:pi-multiagent@0.9.8", bare "pi-multiagent") and the object form
+/// ({ "source": "npm:pi-multiagent", ... }).
+fn package_entry_matches(entry: &serde_json::Value, names: &[String]) -> bool {
+    let source = entry
+        .as_str()
+        .or_else(|| entry.get("source").and_then(|s| s.as_str()));
+    let Some(source) = source else {
+        return false;
+    };
+    let spec = source.strip_prefix("npm:").unwrap_or(source);
+    if spec.contains(['/', '\\']) && !spec.starts_with('@') {
+        return false; // git URLs / paths never collide with a bare npm name
+    }
+    let spec = spec.trim_start_matches('@'); // scoped pkgs: compare after scope too
+    let bare = spec.rsplit('/').next().unwrap_or(spec);
+    names
+        .iter()
+        .any(|n| bare == n || bare.starts_with(&format!("{n}@")))
+}
+
+/// Bundled pi-packages take precedence over pi-global installs: pi exits(1)
+/// at startup when an injected `--extension` conflicts (tool/flag name
+/// clash) with a package listed in ~/.pi/agent/settings.json `packages`
+/// (main.ts reportDiagnostics). Strip matching entries so only the bundled
+/// copy loads; installed files under ~/.pi/agent/npm stay but are inert.
+pub fn delist_bundled_packages_from_pi_settings() {
+    let names = bundled_pi_package_names();
+    if names.is_empty() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let path = home.join(".pi").join("agent").join("settings.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return; // no global settings — nothing to delist
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return;
+    };
+    let Some(packages) = root.get_mut("packages").and_then(|p| p.as_array_mut()) else {
+        return;
+    };
+    let before = packages.len();
+    packages.retain(|e| !package_entry_matches(e, &names));
+    if packages.len() == before {
+        return;
+    }
+    if packages.is_empty() {
+        root.as_object_mut().map(|o| o.remove("packages"));
+    }
+    match serde_json::to_string_pretty(&root) {
+        Ok(out) => {
+            if let Err(e) = std::fs::write(&path, out) {
+                log::warn!("pi settings.json delist failed: {e}");
+            } else {
+                log::info!(
+                    "pi settings.json: delisted global packages shadowed by bundled pi-packages ({})",
+                    names.join(", ")
+                );
+            }
+        }
+        Err(e) => log::warn!("pi settings.json delist render failed: {e}"),
+    }
 }
 
 /// Legacy fixed extension list — superseded by crate::plugins::extension_files
@@ -1047,7 +1177,6 @@ impl PiDriver {
                 pi_id: pi_id.to_string(),
                 method: method.to_string(),
                 prefill,
-                plugin_apply,
             },
         );
         let mut params = pi_ui_permission_params(method, &obj);
@@ -1332,6 +1461,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn package_entry_matches_bundled_names() {
+        let names = vec!["pi-multiagent".to_string()];
+        let yes = [
+            json!("npm:pi-multiagent"),
+            json!("npm:pi-multiagent@0.9.8"),
+            json!("pi-multiagent"),
+            json!({ "source": "npm:pi-multiagent", "autoload": true }),
+            json!("npm:@some-scope/pi-multiagent"),
+        ];
+        for e in yes {
+            assert!(package_entry_matches(&e, &names), "{e}");
+        }
+        let no = [
+            json!("npm:other-pkg"),
+            json!("npm:pi-multiagent-utils"),
+            json!("git:https://example.com/pi-multiagent.git"),
+            json!(42),
+        ];
+        for e in no {
+            assert!(!package_entry_matches(&e, &names), "{e}");
+        }
+    }
+
+    #[test]
     fn confirm_params_and_response() {
         let mut obj = Map::new();
         obj.insert("title".into(), json!("Dangerous!"));
@@ -1344,7 +1497,6 @@ mod tests {
             pi_id: "u1".into(),
             method: "confirm".into(),
             prefill: String::new(),
-            plugin_apply: false,
         };
         let yes = pi_ui_response(&pending, "allow", false);
         assert_eq!(yes["confirmed"], true);
@@ -1368,7 +1520,6 @@ mod tests {
             pi_id: "u2".into(),
             method: "select".into(),
             prefill: String::new(),
-            plugin_apply: false,
         };
         let picked = pi_ui_response(&pending, "beta", false);
         assert_eq!(picked["value"], "beta");
@@ -1382,6 +1533,16 @@ mod tests {
         assert!(dir.join("wardex-reminders.ts").is_file(), "missing reminders extension");
         assert!(dir.join("wardex-codegraph.ts").is_file(), "missing codegraph extension");
         assert!(dir.join("wardex-plugins.ts").is_file(), "missing plugin-manager extension");
+    }
+
+    #[test]
+    fn multiagent_package_bundled_in_repo() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest.parent().expect("repo root");
+        let pkg = root.join("pi-packages").join("pi-multiagent");
+        assert!(pkg.join("package.json").is_file(), "missing pi-multiagent package");
+        assert!(pkg.join("extensions").join("multiagent").join("index.ts").is_file());
+        assert!(pkg.join("skills").join("pi-multiagent").join("SKILL.md").is_file());
     }
 
     #[test]

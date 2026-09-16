@@ -1,0 +1,50 @@
+{
+  "objective": "Map independent local evidence surfaces and reduce them into one read-only decision.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "map-runtime",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map the primary behavior/source surface, schemas or config if relevant, and likely contract owners for the concrete delegated question. Do not run commands or edit. Return mapper rows with fields: surface, owner or canonical path, evidence, risk or mismatch, validation gap, and smallest next action."
+    },
+    {
+      "id": "map-docs",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Map public docs, examples, operator guidance, and model-facing copy that describe the concrete delegated question. Do not edit. Return mapper rows with fields: surface, owner or canonical path, evidence, risk or mismatch, validation gap, and smallest next action."
+    },
+    {
+      "id": "map-tests",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map tests, fixtures, and validation surfaces that would prove or disprove the concrete delegated question. Do not run commands or edit. Return mapper rows with fields: surface, owner or canonical path, evidence, risk or mismatch, validation gap, and smallest next action."
+    },
+    {
+      "id": "reduce-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "map-runtime",
+        "map-docs",
+        "map-tests"
+      ],
+      "task": "Reduce all mapper evidence into one reducer packet with fields: decision, canonical owners, deduped findings, conflicts, failed or blocked mapper evidence, observed validation versus claimed validation, smallest next action, and residual risk. Return GO, NEEDS-WORK, or BLOCKED. Return observed evidence and unresolved decisions."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

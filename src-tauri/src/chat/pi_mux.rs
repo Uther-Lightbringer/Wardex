@@ -132,6 +132,12 @@ impl PiMux {
                 args.push(ext.clone());
             }
         }
+        for skill in &launch.skills {
+            if !skill.trim().is_empty() {
+                args.push("--skill".to_string());
+                args.push(skill.clone());
+            }
+        }
         let config = SpawnConfig {
             cli_path: launch.binary.to_string_lossy().into_owned(),
             args,

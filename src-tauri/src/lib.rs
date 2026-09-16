@@ -206,8 +206,9 @@ async fn open_session(state: State<'_, AppState>, session_id: String) -> Result<
     state.chat.open_session(&session_id).await.map_err(err)
 }
 
-/// Monitor page mini-chat: create/warm the runtime for a session that has
-/// meta but no live runtime, WITHOUT switching the active session.
+/// Monitor page mini-chat: create the runtime for a session that has meta
+/// but no live runtime, WITHOUT switching the active session. ACP agents
+/// are warmed; Pi waits for the first prompt.
 #[tauri::command]
 async fn ensure_runtime(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     state.chat.ensure_runtime(&session_id).await.map_err(err)
@@ -354,10 +355,10 @@ fn plugin_data_get(
     state: State<'_, AppState>,
     id: String,
     scope: String,
-    projectDir: String,
+    project_dir: String,
 ) -> Result<Value, String> {
     let stores = lock(&state.stores);
-    let path = plugins::data_file(&stores.paths, &id, &scope, &projectDir)?;
+    let path = plugins::data_file(&stores.paths, &id, &scope, &project_dir)?;
     Ok(plugins::read_data(&stores.paths, &path))
 }
 
@@ -367,11 +368,11 @@ fn plugin_data_set(
     state: State<'_, AppState>,
     id: String,
     scope: String,
-    projectDir: String,
+    project_dir: String,
     doc: Value,
 ) -> Result<(), String> {
     let stores = lock(&state.stores);
-    let path = plugins::data_file(&stores.paths, &id, &scope, &projectDir)?;
+    let path = plugins::data_file(&stores.paths, &id, &scope, &project_dir)?;
     plugins::write_data(&stores.paths, &path, &doc)
 }
 
@@ -564,23 +565,34 @@ async fn clear_queue(state: State<'_, AppState>, session_id: String) -> Result<(
     state.chat.clear_queue(&session_id).await.map_err(err)
 }
 
-#[tauri::command]
-fn session_messages(state: State<'_, AppState>, session_id: String) -> Vec<Value> {
-    let mut rows = state.chat.session_messages(&session_id);
-    // Command rows persisted mid-run are stale after an app restart (the
-    // runner is gone); never show a "streaming" command as running forever.
-    if !state.runs.has_active_run(&session_id) {
-        for r in &mut rows {
-            if let Some(obj) = r.as_object_mut() {
-                if obj.get("kind").and_then(Value::as_str) == Some("command")
-                    && obj.get("status").and_then(Value::as_str) == Some("streaming")
-                {
-                    obj.insert("status".to_string(), Value::String("interrupted".to_string()));
+// Runs on the blocking pool: long sessions serialize multi-MB message JSON;
+// on the main thread that stalled the whole UI (window "无响应").
+#[tauri::command(async)]
+async fn session_messages(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<Value>, String> {
+    let chat = state.chat.clone();
+    let runs = state.runs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut rows = chat.session_messages(&session_id);
+        // Command rows persisted mid-run are stale after an app restart (the
+        // runner is gone); never show a "streaming" command as running forever.
+        if !runs.has_active_run(&session_id) {
+            for r in &mut rows {
+                if let Some(obj) = r.as_object_mut() {
+                    if obj.get("kind").and_then(Value::as_str) == Some("command")
+                        && obj.get("status").and_then(Value::as_str) == Some("streaming")
+                    {
+                        obj.insert("status".to_string(), Value::String("interrupted".to_string()));
+                    }
                 }
             }
         }
-    }
-    rows
+        rows
+    })
+    .await
+    .map_err(err)
 }
 
 /// Terminal command (Composer `!` prefix, cmd.rs): spawn cmd.exe in the
@@ -646,18 +658,32 @@ fn unread_sessions(state: State<'_, AppState>) -> Vec<String> {
 // Commands: sessions / search
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-fn list_sessions(state: State<'_, AppState>) -> Value {
-    let stores = lock(&state.stores);
-    serde_json::to_value(stores.sessions.list()).unwrap_or(Value::Null)
+// Blocking pool: serializes the full session index; also keeps the stores
+// lock off the main thread when another thread is mid-write.
+#[tauri::command(async)]
+async fn list_sessions(state: State<'_, AppState>) -> Result<Value, String> {
+    let stores = state.stores.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let stores = lock(&stores);
+        serde_json::to_value(stores.sessions.list()).unwrap_or(Value::Null)
+    })
+    .await
+    .map_err(err)
 }
 
+// Blocking pool (see list_sessions): the frontend saw ~1s stalls during
+// project switching and the main-thread wait froze the window.
 #[tauri::command(async)]
-fn sessions_for_project(state: State<'_, AppState>, project_dir: String) -> Value {
-    // Switch-lag instrumentation: the frontend sees ~1s stalls here; split
-    // lock-wait from body time to find who holds the stores mutex.
+async fn sessions_for_project(
+    state: State<'_, AppState>,
+    project_dir: String,
+) -> Result<Value, String> {
+    let stores = state.stores.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+    // Switch-lag instrumentation: split lock-wait from body time to find who
+    // holds the stores mutex.
     let t0 = std::time::Instant::now();
-    let stores = lock(&state.stores);
+    let stores = lock(&stores);
     let t_lock = t0.elapsed();
     let v = serde_json::to_value(stores.sessions.sessions_for_project(&project_dir))
         .unwrap_or(Value::Null);
@@ -666,6 +692,9 @@ fn sessions_for_project(state: State<'_, AppState>, project_dir: String) -> Valu
         log::info!("[perf] sessions_for_project lock={t_lock:?} body={:?}", total - t_lock);
     }
     v
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -1101,9 +1130,12 @@ async fn search_java_interfaces(root: String, query: String) -> Result<Value, St
     Ok(serde_json::to_value(result).map_err(err)?)
 }
 
-#[tauri::command]
-fn git_branch(dir: String) -> String {
-    store::workspace::git_branch_for(&dir)
+// Blocking pool: spawns a git subprocess; a slow git must not freeze the UI.
+#[tauri::command(async)]
+async fn git_branch(dir: String) -> String {
+    tauri::async_runtime::spawn_blocking(move || store::workspace::git_branch_for(&dir))
+        .await
+        .unwrap_or_default()
 }
 
 /// Commit history for the version-control panel (inspect/git.rs). Runs on the
@@ -1222,9 +1254,16 @@ async fn save_clipboard_image(
 
 /// Grouped view: pending session rows for `session_id`, pending project rows
 /// for `project_dir`, pending global rows, and every done row.
-#[tauri::command]
-fn todos_list(state: State<'_, AppState>, session_id: String, project_dir: String) -> Value {
-    let mut stores = lock(&state.stores);
+// Blocking pool: reload() re-reads todo files from disk under the stores lock.
+#[tauri::command(async)]
+async fn todos_list(
+    state: State<'_, AppState>,
+    session_id: String,
+    project_dir: String,
+) -> Result<Value, String> {
+    let stores = state.stores.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+    let mut stores = lock(&stores);
     let paths = stores.paths.clone();
     stores.todos.reload(&paths);
     let (session, project, global) = stores.todos.pending_grouped();
@@ -1235,6 +1274,9 @@ fn todos_list(state: State<'_, AppState>, session_id: String, project_dir: Strin
         "global": global,
         "done": done,
     })
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -1357,10 +1399,16 @@ fn prompt_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
     stores.prompts.remove(&paths, &id).map_err(err)
 }
 
-#[tauri::command]
-fn usage_report(state: State<'_, AppState>) -> Value {
-    let stores = lock(&state.stores);
-    serde_json::to_value(stores.usage.report()).unwrap_or(Value::Null)
+// Blocking pool: report() aggregates over every usage record on disk.
+#[tauri::command(async)]
+async fn usage_report(state: State<'_, AppState>) -> Result<Value, String> {
+    let stores = state.stores.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let stores = lock(&stores);
+        serde_json::to_value(stores.usage.report()).unwrap_or(Value::Null)
+    })
+    .await
+    .map_err(err)
 }
 
 /// Per-session usage for the 会话信息 panel: one in-memory aggregation over
@@ -1371,15 +1419,21 @@ fn session_usage(state: State<'_, AppState>, session_id: String) -> Value {
     serde_json::to_value(stores.usage.for_session(&session_id)).unwrap_or(Value::Null)
 }
 
-#[tauri::command]
-fn usage_backfill(state: State<'_, AppState>, app: AppHandle) -> Value {
-    let mut stores = lock(&state.stores);
-    let result = usage_backfill::backfill(&mut stores);
+// Blocking pool: backfill scans usage/session files on disk.
+#[tauri::command(async)]
+async fn usage_backfill(state: State<'_, AppState>, app: AppHandle) -> Result<Value, String> {
+    let stores = state.stores.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut stores = lock(&stores);
+        usage_backfill::backfill(&mut stores)
+    })
+    .await;
+    let result = result.map_err(err)?;
     if result.added > 0 {
         // 让当前打开的会话立即重挂历史用量（chat store 监听后重新拉取消息）。
         let _ = app.emit("usage://backfilled", json!({}));
     }
-    serde_json::to_value(result).unwrap_or(Value::Null)
+    Ok(serde_json::to_value(result).unwrap_or(Value::Null))
 }
 
 #[tauri::command]

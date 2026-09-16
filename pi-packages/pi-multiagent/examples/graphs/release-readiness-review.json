@@ -1,0 +1,55 @@
+{
+  "objective": "Review package release readiness with source mapping and trusted proof commands. Human-owned release actions stay outside this graph.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true,
+    "allowShellTools": true
+  },
+  "steps": [
+    {
+      "id": "release-map",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map local package metadata, changelog, README, examples, skills, extension/package surfaces, and release unknowns. Do not inspect owner-private publish choreography unless the parent copied those local control-plane paths into scope. Do not run commands or edit. Do not version-bump, commit, tag, push, publish, delete, install, deploy, or create GitHub Releases. Return paths, release-surface facts, and unknowns."
+    },
+    {
+      "id": "release-proof",
+      "agent": {
+        "ref": "package:validator"
+      },
+      "task": "Run these trusted release proof commands from the repository root: `git status -sb`, `pnpm run gate`, `npm pack --dry-run --json`, and `git diff --check`. Do not edit, version-bump, commit, tag, push, publish, delete, install, deploy, run unapproved network commands, or create GitHub Releases. Return pass/fail/deferred with exact command, cwd, important output, and failure bucket."
+    },
+    {
+      "id": "release-audit",
+      "agent": {
+        "ref": "package:reviewer"
+      },
+      "after": [
+        "release-map",
+        "release-proof"
+      ],
+      "task": "Review upstream release-map and release-proof terminal evidence, including failed, blocked, or missing proof, for release-critical drift in package contents, docs, examples, tests, release workflow, npm identity, and GitHub Release choreography. Separate observed validation from claimed or missing validation. Do not run commands or edit. Do not version-bump, commit, tag, push, publish, delete, install, deploy, or create GitHub Releases. Return findings first with exact paths."
+    },
+    {
+      "id": "readiness-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "release-map",
+        "release-proof",
+        "release-audit"
+      ],
+      "task": "Return GO, NEEDS-WORK, or BLOCKED for release readiness after all lanes terminalize, including failed or blocked lane evidence. Preserve observed commands, missing commands, package identity, and not-executed human-owned next actions, including npm publish, GitHub Release creation, and gh release view verification. Do not invent validation or claim publication. Do not version-bump, commit, tag, push, publish, delete, install, deploy, or create GitHub Releases."
+    }
+  ],
+  "limits": {
+    "concurrency": 1,
+    "timeoutSecondsPerStep": 9000
+  }
+}

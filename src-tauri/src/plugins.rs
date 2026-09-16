@@ -287,7 +287,7 @@ pub fn extension_files(paths: &Paths, use_codegraph: bool) -> Vec<PathBuf> {
 /// The plugin manager's extension file for WORKSHOP sessions — the only
 /// extension they load (plus WARDEX_WORKSHOP=1 env so it can inject the
 /// authoring system prompt via before_agent_start).
-pub fn workshop_extension_file(paths: &Paths) -> Option<PathBuf> {
+pub fn workshop_extension_file(_paths: &Paths) -> Option<PathBuf> {
     locate_extensions_dir()
         .map(|d| d.join("wardex-plugins.ts"))
         .filter(|p| p.is_file())
@@ -402,7 +402,7 @@ pub fn data_file(
 }
 
 /// Read a plugin's whole data document (empty object when absent).
-pub fn read_data(paths: &Paths, path: &Path) -> serde_json::Value {
+pub fn read_data(_paths: &Paths, path: &Path) -> serde_json::Value {
     fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())

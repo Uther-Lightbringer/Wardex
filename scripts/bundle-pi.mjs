@@ -179,3 +179,6 @@ for (const f of [exe, 'photon_rs_bg.wasm', 'package.json', 'README.md', 'CHANGEL
 }
 
 console.log(`[bundle-pi] 完成。产物：${outRoot}`);
+// Explicit 0: on Windows the last robocopy (exit 1 = files copied) can
+// otherwise leak into this process's exit code and abort the caller.
+process.exit(0);

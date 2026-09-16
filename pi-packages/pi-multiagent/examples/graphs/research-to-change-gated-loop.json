@@ -1,0 +1,56 @@
+{
+  "objective": "Run one read-only research-to-change loop iteration for an ambiguous local package change and produce a human-gated implementation recommendation without mutation.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "evidence-scout",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Gather current repo evidence, affected files, runtime boundaries, tests, docs, and unknowns for the concrete parent-copied package change question. Do not run commands or edit."
+    },
+    {
+      "id": "change-plan",
+      "agent": {
+        "ref": "package:planner"
+      },
+      "needs": [
+        "evidence-scout"
+      ],
+      "task": "Turn evidence into an implementation contract with canonical owners, rejected weak alternatives, tests, docs, and validation obligations. Do not edit."
+    },
+    {
+      "id": "gate-critique",
+      "agent": {
+        "ref": "package:critic"
+      },
+      "needs": [
+        "change-plan"
+      ],
+      "task": "Decide whether the implementation contract is safe to propose to the human. Return block/proceed-with-conditions/proceed and mandatory proof. This is not an implementation lane. Do not edit."
+    },
+    {
+      "id": "final-report",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "evidence-scout",
+        "change-plan",
+        "gate-critique"
+      ],
+      "task": "Close this gated loop iteration by reporting the proposed change, no-go conditions, human decision question, owned files and validation plan for a later authorized mutation run, validation plan, risks, and next action after all lanes terminalize, including failed or blocked lane evidence. Return observed evidence and unresolved decisions."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

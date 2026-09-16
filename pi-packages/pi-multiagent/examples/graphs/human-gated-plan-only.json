@@ -1,0 +1,56 @@
+{
+  "objective": "Produce a read-only implementation plan and human approval checkpoint without mutation.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "scope-map",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map the affected local surface, owners, tests, docs, risks, and unknowns for the concrete parent-copied planning question. Do not run commands or edit."
+    },
+    {
+      "id": "implementation-plan",
+      "agent": {
+        "ref": "package:planner"
+      },
+      "needs": [
+        "scope-map"
+      ],
+      "task": "Prepare the smallest coherent implementation contract, owned files, exclusions, validation plan, and human decision question. Do not edit."
+    },
+    {
+      "id": "premortem",
+      "agent": {
+        "ref": "package:critic"
+      },
+      "needs": [
+        "implementation-plan"
+      ],
+      "task": "Stress-test the plan for trust, coupling, data loss, stale copy, validation gaps, and hidden approval needs. Do not edit."
+    },
+    {
+      "id": "final-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "scope-map",
+        "implementation-plan",
+        "premortem"
+      ],
+      "task": "Return the proposed plan, blockers, human decision question, owned files, and validation plan for a later run. Make clear that no mutation was authorized or performed."
+    }
+  ],
+  "limits": {
+    "concurrency": 2,
+    "timeoutSecondsPerStep": 9000
+  }
+}

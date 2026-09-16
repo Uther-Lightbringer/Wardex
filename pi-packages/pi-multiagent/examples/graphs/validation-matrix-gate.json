@@ -1,0 +1,51 @@
+{
+  "objective": "Run independent trusted command lanes and synthesize one proof decision.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true,
+    "allowShellTools": true
+  },
+  "steps": [
+    {
+      "id": "validation-a",
+      "agent": {
+        "ref": "package:validator"
+      },
+      "task": "Run trusted validation lane A from the repository root: `git status -sb`. Report pass/fail/deferred per command with cwd, important output, and failure bucket. Do not edit, install, publish, deploy, delete, or run network commands."
+    },
+    {
+      "id": "validation-b",
+      "agent": {
+        "ref": "package:validator"
+      },
+      "task": "Run trusted validation lane B from the repository root: `git diff --check`. Report pass/fail/deferred per command with cwd, important output, and failure bucket. Do not edit, install, publish, deploy, delete, or run network commands."
+    },
+    {
+      "id": "validation-c",
+      "agent": {
+        "ref": "package:validator"
+      },
+      "task": "Run trusted validation lane C from the repository root: `node --version`. Report pass/fail/deferred per command with cwd, important output, and failure bucket. Do not edit, install, publish, deploy, delete, or run network commands."
+    },
+    {
+      "id": "final-proof",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "validation-a",
+        "validation-b",
+        "validation-c"
+      ],
+      "task": "Synthesize the validation matrix after all lanes terminalize. Return pass, fail, or deferred with a row per lane, observed commands, failure buckets, contradictions, missing proof, and residual risk. Build the matrix only from observed validator outputs. If any required lane is missing, failed, blocked, timed out, lacks command-backed evidence, mark the matrix NOT PASSED instead of inventing proof."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

@@ -1874,6 +1874,24 @@ impl Actor {
             .into_iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
+            // Bundled pi-multiagent (agent_team graph orchestration): extension
+            // entry + model-facing skill, shipped as a static resource.
+            let skills: Vec<String> = crate::chat::pi::multiagent_package_files()
+                .map(|(ext, skill)| {
+                    vec![
+                        ext.to_string_lossy().into_owned(),
+                        skill.to_string_lossy().into_owned(),
+                    ]
+                })
+                .unwrap_or_default();
+            let skills_ext: Vec<String> = crate::chat::pi::multiagent_package_files()
+                .map(|(ext, _)| vec![ext.to_string_lossy().into_owned()])
+                .unwrap_or_default();
+            let extensions = extensions.into_iter().chain(skills_ext).collect();
+            // Bundled pi-packages win over pi-global installs: delist same-named
+            // npm: entries from ~/.pi/agent/settings.json, else pi exits(1) on
+            // tool/flag conflicts between the two copies.
+            crate::chat::pi::delist_bundled_packages_from_pi_settings();
             let (todos_path, project_dir) = {
                 let mut stores = lock_ok(&self.stores);
                 (
@@ -1909,6 +1927,7 @@ impl Actor {
                 session_dir,
                 session_id: self.session_id.clone(),
                 extensions,
+                skills,
             });
         }
         let spec = provider::spec(&provider);

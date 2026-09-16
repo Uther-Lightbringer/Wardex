@@ -1,0 +1,53 @@
+{
+  "objective": "Audit three package subtrees by launching each lane from its own working directory.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "extension-audit",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "cwd": "extensions/multiagent",
+      "task": "Launch from extensions/multiagent and inspect the extension/runtime subtree for the delegated package question. Return paths, facts, risks, and unknowns. Use upstream artifact paths when they are part of the task."
+    },
+    {
+      "id": "skill-audit",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "cwd": "skills/pi-multiagent",
+      "task": "Launch from skills/pi-multiagent and inspect the skill and cookbook subtree for the delegated package question. Return docs/model-copy findings, risks, and unknowns. Use upstream artifact paths when they are part of the task."
+    },
+    {
+      "id": "examples-audit",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "cwd": "examples/graphs",
+      "task": "Launch from examples/graphs and inspect graph examples for the delegated package question. Return example paths, contract risks, and unknowns. Use upstream artifact paths when they are part of the task."
+    },
+    {
+      "id": "audit-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "extension-audit",
+        "skill-audit",
+        "examples-audit"
+      ],
+      "task": "Synthesize the cwd-launched lane evidence into one decision packet with canonical owners, conflicts, validation gaps, smallest next action, and residual risk."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

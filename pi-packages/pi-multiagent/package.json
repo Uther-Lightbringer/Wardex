@@ -1,0 +1,76 @@
+{
+  "name": "pi-multiagent",
+  "version": "0.9.8",
+  "type": "module",
+  "description": "Adds the agent_team delegation tool and pi-multiagent skill to Pi.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "multiagent",
+    "subagent",
+    "agent-tool"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tiziano-AI/pi-multiagent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Tiziano-AI/pi-multiagent/issues"
+  },
+  "homepage": "https://github.com/Tiziano-AI/pi-multiagent#readme",
+  "packageManager": "pnpm@11.1.2",
+  "engines": {
+    "node": ">=20.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "agents/*.md",
+    "assets/*.webp",
+    "examples/**/*.json",
+    "skills/**/*.md",
+    "extensions/**/*.ts"
+  ],
+  "scripts": {
+    "test": "node --import ./tests/node-test-ref-timers.mjs --no-warnings --experimental-strip-types --loader ./tests/pi-peer-loader.mjs --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "smoke:fake-pi": "node --no-warnings --experimental-strip-types --loader ./tests/pi-peer-loader.mjs tests/smoke-fake-pi.ts",
+    "smoke:pi": "node --no-warnings --experimental-strip-types tests/smoke-pi.ts",
+    "check:pack": "node --experimental-strip-types tests/check-pack.ts",
+    "check:pi-load": "node --no-warnings --experimental-strip-types --loader ./tests/pi-peer-loader.mjs tests/check-package-load.ts",
+    "check:public-docs": "node --experimental-strip-types tests/check-public-docs.ts",
+    "check:source-size": "node --experimental-strip-types tests/check-source-size.ts",
+    "check:release:offline": "node --experimental-strip-types tests/check-release-ready.ts --offline",
+    "check:release:npm": "node --experimental-strip-types tests/check-release-ready.ts --npm",
+    "check:release": "pnpm run check:release:offline && pnpm run check:release:npm",
+    "gate": "pnpm run typecheck && pnpm test && pnpm run smoke:fake-pi && pnpm run check:pack && pnpm run check:pi-load && pnpm run check:public-docs && pnpm run check:source-size"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.74.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-tui": ">=0.74.0",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/multiagent/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "image": "https://unpkg.com/pi-multiagent/assets/pi-multiagent-gallery.webp"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.74.0",
+    "@earendil-works/pi-coding-agent": "^0.74.0",
+    "@earendil-works/pi-tui": "^0.74.0",
+    "@types/node": "^25.6.1",
+    "typebox": "^1.1.38",
+    "typescript": "^6.0.3"
+  }
+}

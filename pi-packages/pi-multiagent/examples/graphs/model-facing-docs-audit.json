@@ -1,0 +1,58 @@
+{
+  "objective": "Read-only audit of agent_team model-facing invocation clarity across tool copy, schema descriptions, skill guidance, catalog routing, cookbook, examples, and tests.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "tool-surface",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Review extensions/multiagent tool description, prompt guidelines, schemas, result-format copy, and repair diagnostics for low-cognitive-load action selection. Do not edit or run commands. Return at most five findings with paths, impact, and concise replacement copy."
+    },
+    {
+      "id": "skill-cookbook",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Review skills/pi-multiagent/SKILL.md and skills/pi-multiagent/references/graph-cookbook.md for first-success clarity, pure graphFile examples, supervision guidance, and unnecessary model-facing detail. Do not edit. Return at most five findings and concrete docs changes."
+    },
+    {
+      "id": "catalog-routing",
+      "agent": {
+        "ref": "package:critic"
+      },
+      "task": "Stress-test bundled agent descriptions/tags and packaged graph chooser for routing ambiguity, role overlap, validation-vs-review confusion, and graph bloat. Do not edit. Return risks and falsifying catalog queries."
+    },
+    {
+      "id": "examples-tests",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Review examples/graphs and tests that protect public docs, package load, catalog routing, graph planning, and result microcopy. Do not run commands. Return at most five missing checks or brittle checks to replace with structured checks."
+    },
+    {
+      "id": "final-opportunities",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "tool-surface",
+        "skill-cookbook",
+        "catalog-routing",
+        "examples-tests"
+      ],
+      "task": "Synthesize a prioritized read-only improvement report. Prefer lower model cognitive load, just-in-time repair copy, artifact-first supervision, and no new knobs unless evidence shows a real orchestration need."
+    }
+  ],
+  "limits": {
+    "concurrency": 4,
+    "timeoutSecondsPerStep": 9000
+  }
+}

@@ -1214,10 +1214,10 @@ const visibleAtts = computed(() =>
 
 <style>
 /* markdown body (unscoped: v-html content). Colors come from the --md-*
-   semantic variables in warTheme.css (war = WC3 gold tone 四.7, pure =
-   light reading palette) so both themes share these rules. Kept compact —
-   body text styling only, no layout interference with the bubble frame.
-   Shared with FilePreviewDialog's preview pane (same .md-body class). */
+   reading variables in warTheme.css (war = WC3 gold, pure = high-contrast
+   light). Compact: body text only, no bubble-frame layout. File preview's
+   *rendered* markdown pane reuses .md-body; CodeMirror syntax highlighting
+   is a separate surface (lib/cmHighlight.ts). */
 .md-body > :first-child {
   margin-top: 0;
 }

@@ -1,0 +1,70 @@
+{
+  "objective": "Read-only tree-reduce source review where independent mappers feed intermediate reducers before one final decision.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "map-runtime",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map the runtime source relevant to the parent-copied review question. Do not edit or run commands. Return component, owner, canonical path, evidence, risk, and unknowns."
+    },
+    {
+      "id": "map-docs",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Map README, skill, cookbook, examples, and public tests relevant to the parent-copied review question. Do not edit. Return docs owner, promised behavior, mismatch risk, and missing proof."
+    },
+    {
+      "id": "map-tests",
+      "agent": {
+        "ref": "package:reviewer"
+      },
+      "task": "Review tests and fixtures relevant to the parent-copied review question. Do not edit or run commands. Return what behavior is covered, what is helper-only, what denial branches are missing, and residual proof gaps."
+    },
+    {
+      "id": "reduce-source",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "map-runtime",
+        "map-docs"
+      ],
+      "task": "Reduce runtime and docs mapper evidence into one source-contract packet: survivor owner, conflicting promises, affected paths, and smallest safe next action. Preserve contradictions instead of resolving them silently."
+    },
+    {
+      "id": "reduce-proof",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "map-tests"
+      ],
+      "task": "Reduce test mapper evidence into one proof packet: public behavior covered, expected denials covered, helper-only proof, missing gates, and residual risk."
+    },
+    {
+      "id": "final-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "reduce-source",
+        "reduce-proof"
+      ],
+      "task": "Combine the intermediate reducers into a final tree-reduce decision. Return recommended action, evidence rows, conflicts, validation gaps, and what a narrower follow-up graph should inspect if needed."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

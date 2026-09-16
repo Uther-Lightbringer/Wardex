@@ -1,0 +1,50 @@
+{
+  "objective": "Read-only evidence-trace audit that follows one claimed behavior from source contract through runtime copy, artifacts, and validation proof.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "trace-contract",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Trace the parent-copied behavior claim through schemas, planning, runtime state, result formatting, and rendering source. Do not edit or run commands. Return canonical owners, state transitions, and unclear edges."
+    },
+    {
+      "id": "trace-artifacts",
+      "agent": {
+        "ref": "package:reviewer"
+      },
+      "task": "Review artifact and output-retention paths relevant to the parent-copied behavior claim. Do not edit or run commands. Return where evidence is written, where it is summarized, what cleanup deletes, and what proof should be preserved."
+    },
+    {
+      "id": "trace-operator-copy",
+      "agent": {
+        "ref": "package:docs-auditor"
+      },
+      "task": "Review README, skill, cookbook, and result-format operator copy for the parent-copied behavior claim. Do not edit. Return stale copy, missing headless/API guidance, and wording that could overstate proof."
+    },
+    {
+      "id": "trace-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "trace-contract",
+        "trace-artifacts",
+        "trace-operator-copy"
+      ],
+      "task": "Synthesize an evidence trace with one row per source-to-artifact-to-copy link. Mark each link pass, mismatch, missing proof, or deferred, and recommend the smallest validation command set."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

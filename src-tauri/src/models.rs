@@ -420,6 +420,18 @@ pub fn render_pi_provider(agent: &Agent) -> String {
             // pi exposes thinking levels only for reasoning-capable models
             // (ai/src/models.ts getSupportedThinkingLevels).
             ("reasoning".to_string(), Value::Bool(true)),
+            // pi's openai-completions auto-detect treats unknown providers as
+            // "standard OpenAI" and sends the system prompt with role
+            // "developer" when reasoning=true; many compatible endpoints
+            // (e.g. api.kimi.com) reject it with 400. Force "system" instead
+            // (ai/src/api/openai-completions.ts convertMessages).
+            (
+                "compat".to_string(),
+                Value::Object(Map::from_iter([(
+                    "supportsDeveloperRole".to_string(),
+                    Value::Bool(false),
+                )])),
+            ),
         ]))]),
     );
     let mut providers = Map::new();
@@ -552,6 +564,24 @@ mod tests {
             effort_options,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn render_pi_provider_disables_developer_role() {
+        let agent = Agent {
+            id: "agent-1".to_string(),
+            model: "k3-256k".to_string(),
+            base_url: "https://api.kimi.com/coding/v1".to_string(),
+            ..Default::default()
+        };
+        let rendered = render_pi_provider(&agent);
+        let v: Value = serde_json::from_str(&rendered).unwrap();
+        let provider = &v["providers"]["wardex-pi-api-kimi-com"];
+        assert_eq!(provider["baseUrl"], "https://api.kimi.com/coding/v1");
+        let model = &provider["models"][0];
+        assert_eq!(model["reasoning"], true);
+        // kimi's endpoint 400s on role "developer"; force "system"
+        assert_eq!(model["compat"]["supportsDeveloperRole"], false);
     }
 
     #[test]

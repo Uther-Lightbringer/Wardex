@@ -127,6 +127,9 @@ pub struct PiLaunch {
     pub session_id: String,
     /// Absolute paths to WarDex-bundled Pi extensions (`--extension`, repeatable).
     pub extensions: Vec<String>,
+    /// Absolute paths to skill dirs (`--skill`, repeatable; each dir is scanned
+    /// for SKILL.md). Currently the bundled pi-multiagent skill.
+    pub skills: Vec<String>,
 }
 
 /// Everything a spawn needs: an ACP subprocess or the embedded pi agent.

@@ -1,14 +1,16 @@
 <script setup lang="ts">
-// File preview dialog (features/chat.md §6.5): frame_popup modal, Esc closes.
+// File preview dialog (features/chat.md §6.5): frame_popup modal (war) or
+// light CSS panel (pure), Esc closes.
 // Entry flow: preview_file → >2MB asks first (继续打开 / 外部打开 / 取消);
-// binary/unreadable asks 系统默认方式打开. Three bodies: text (CodeMirror 6
-// with line numbers + syntax highlighting, editable, save when dirty;
-// 256KB-truncated files are read-only), markdown (rendered ⇄ raw-editable
-// toggle, unsaved edits kept), image (asset-protocol img, fit width with
-// scroll). Text writes back as UTF-8 via
-// save_preview (backend refuses binary/image). Edge/corner drag resizes
-// (min 380×480, clamped to the window), persisted on pointerup. Closing
-// tears down every copy of the content.
+// binary/unreadable asks 系统默认方式打开. Three bodies, visually independent:
+//   text     — CodeMirror 6 (line numbers + syntax highlighting; theme from
+//              lib/cmHighlight.ts, not markdown --md-* colours)
+//   markdown — rendered ⇄ raw-editable toggle; rendered pane uses .md-body
+//              reading colours, looser document layout in pure
+//   image    — asset-protocol img, fit width with scroll
+// Text writes back as UTF-8 via save_preview (backend refuses binary/image).
+// Edge/corner drag resizes (min 380×480, clamped to the window), persisted
+// on pointerup. Closing tears down every copy of the content.
 import { computed, nextTick, ref, watch } from 'vue';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { EditorView as CmEditorView } from 'codemirror';
@@ -16,6 +18,7 @@ import type { Compartment } from '@codemirror/state';
 import { cmd, openPath } from '../../lib/tauri';
 import { copyText } from '../../lib/clipboard';
 import { renderMarkdown, handleMdLinkClick } from '../../lib/markdown';
+import { themeOf } from '../../lib/themes';
 import { useChatStore } from '../../stores/chat';
 import { usePrefsStore } from '../../stores/prefs';
 import WarDialog from '../war/WarDialog.vue';
@@ -36,6 +39,8 @@ interface PreviewOutcome {
 
 const chat = useChatStore();
 const prefs = usePrefsStore();
+/** 纯净风格：去 frame_popup 贴图，走浅色 CSS 面板（与 WarDialog/FolderBrowser 一致）。 */
+const plain = computed(() => themeOf(prefs.uiStyle).kind === 'plain');
 
 type Phase = 'closed' | 'ask-size' | 'ask-open' | 'view';
 const phase = ref<Phase>('closed');
@@ -135,6 +140,8 @@ function onEdit(): void {
 // `raw` via the update listener so save/dirty logic stays unchanged.
 // The whole CM stack is dynamically imported so the main bundle stays
 // lean — it loads on the first code/text preview only.
+// Syntax colours come from lib/cmHighlight.ts (war=Dracula, pure=light
+// high-contrast) and are independent of markdown `--md-*` reading styles.
 const cmHost = ref<HTMLElement | null>(null);
 let cm: CmEditorView | null = null;
 let cmWrap: Compartment | null = null;
@@ -148,12 +155,13 @@ async function buildEditor(): Promise<void> {
   if (kind.value !== 'text' || !cmHost.value) return;
   const host = cmHost.value;
   const doc = raw.value;
+  const isPlain = plain.value;
   const mods = await Promise.all([
     import('codemirror'),
     import('@codemirror/state'),
     import('@codemirror/language'),
     import('@codemirror/language-data'),
-    import('thememirror'),
+    import('../../lib/cmHighlight'),
   ]).catch((e) => {
     console.error('CodeMirror core failed to load', e);
     return null;
@@ -162,7 +170,7 @@ async function buildEditor(): Promise<void> {
     if (build === cmBuild) statusLine.value = '编辑器加载失败，请查看控制台';
     return;
   }
-  const [cmMod, stateMod, langMod, dataMod, themeMod] = mods;
+  const [cmMod, stateMod, langMod, dataMod, highlightMod] = mods;
   const { EditorView, basicSetup } = cmMod;
   const { EditorState, Compartment } = stateMod;
   let lang = null;
@@ -181,6 +189,8 @@ async function buildEditor(): Promise<void> {
     cmWrap = new Compartment();
     cmReadOnly = new Compartment();
   }
+  // Chrome last so it wins over the syntax theme's pane colours: transparent
+  // bg lets `.pv__body` show through; gutter follows war/pure.
   const cmTheme = EditorView.theme(
     {
       '&': {
@@ -193,7 +203,8 @@ async function buildEditor(): Promise<void> {
         padding: '4px 8px 4px 0',
       },
       '.cm-gutters': {
-        backgroundColor: '#00000040',
+        backgroundColor: isPlain ? 'rgba(15, 23, 42, 0.04)' : '#00000040',
+        ...(isPlain ? { color: 'var(--war-text-muted)' } : {}),
         border: 'none',
         borderRight: '1px solid var(--war-border)',
         fontFamily: 'Consolas, monospace',
@@ -202,8 +213,14 @@ async function buildEditor(): Promise<void> {
         fontFamily: 'Consolas, monospace',
         lineHeight: '18px',
       },
+      ...(isPlain
+        ? {
+            '.cm-activeLine': { backgroundColor: 'rgba(15, 23, 42, 0.05)' },
+            '.cm-activeLineGutter': { backgroundColor: 'rgba(15, 23, 42, 0.05)' },
+          }
+        : {}),
     },
-    { dark: true },
+    { dark: !isPlain },
   );
   cm = new EditorView({
     parent: host,
@@ -211,8 +228,8 @@ async function buildEditor(): Promise<void> {
       doc,
       extensions: [
         basicSetup,
+        highlightMod.previewSyntax(isPlain),
         cmTheme,
-        themeMod.dracula,
         ...(lang ? [lang] : []),
         cmWrap.of(wrap.value ? EditorView.lineWrapping : []),
         cmReadOnly!.of([
@@ -242,7 +259,7 @@ async function buildEditor(): Promise<void> {
   cm.focus();
 }
 
-watch([phase, kind], ([p, k]) => {
+watch([phase, kind, () => prefs.uiStyle], ([p, k]) => {
   if (p === 'view' && k === 'text') void nextTick(buildEditor);
   else {
     cmBuild++;
@@ -633,15 +650,16 @@ function onAnyDown(e: MouseEvent): void {
   </WarDialog>
 
   <!-- preview body -->
-  <div v-if="phase === 'view'" class="pv-mask" @mousedown.self="close">
+  <div v-if="phase === 'view'" class="pv-mask" :class="{ 'is-plain': plain }" @mousedown.self="close">
     <div
       class="pv"
+      :class="{ 'is-plain': plain }"
       :style="{ width: dlgW + 'px', height: dlgH + 'px', left: dlgX + 'px', top: dlgY + 'px' }"
       @mousedown="onEdgeDown"
     >
-      <div class="pv__frame"></div>
+      <div v-if="!plain" class="pv__frame"></div>
       <div class="pv__inner">
-        <div class="pv__title war-outline-black" :style="{ fontSize: prefs.fs(14) + 'px' }">
+        <div class="pv__title" :class="{ 'war-outline-black': !plain }" :style="{ fontSize: prefs.fs(14) + 'px' }">
           {{ fileName }}
         </div>
 
@@ -783,7 +801,7 @@ function onAnyDown(e: MouseEvent): void {
 }
 
 .pv__tool.save {
-  color: #80f0a0;
+  color: var(--war-copied);
 }
 
 .pv__status {
@@ -895,5 +913,56 @@ function onAnyDown(e: MouseEvent): void {
 .pv__ctx-item.dis:hover {
   background: transparent;
   color: var(--war-text-faint);
+}
+
+/* ---- 纯净风格：去 frame_popup 贴图，浅色圆角面板 ---- */
+.pv-mask.is-plain {
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.pv.is-plain {
+  background: var(--war-dialog-bg);
+  border: 1px solid var(--war-panel-border);
+  border-radius: 12px;
+  box-shadow: 0 12px 40px var(--war-panel-shadow);
+}
+
+.pv.is-plain .pv__inner {
+  inset: 0;
+  padding: 14px 16px 12px;
+  background: transparent;
+  border-radius: 12px;
+}
+
+.pv.is-plain .pv__title {
+  color: var(--war-text);
+  font-family: inherit;
+  text-shadow: none;
+}
+
+.pv.is-plain .pv__tool,
+.pv.is-plain .pv__status {
+  font-family: inherit;
+}
+
+.pv.is-plain .pv__md {
+  font-family: inherit;
+  padding: 12px 16px;
+}
+
+.pv.is-plain .pv__editor {
+  font-family: Consolas, 'Cascadia Mono', 'Segoe UI Mono', monospace;
+}
+
+.pv.is-plain .pv__ctx {
+  border-color: var(--war-panel-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px var(--war-panel-shadow);
+  font-family: inherit;
+}
+
+.pv.is-plain .pv__ctx-item:hover {
+  background: var(--war-row-hover);
+  color: var(--war-text);
 }
 </style>

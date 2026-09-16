@@ -1,0 +1,68 @@
+{
+  "objective": "Review a completed change or release candidate for observed proof without granting mutation authority.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true,
+    "allowShellTools": true
+  },
+  "steps": [
+    {
+      "id": "proof-map",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map the completed-work scope, claimed validation, touched public surfaces, and likely proof gaps from local files and upstream evidence. Do not run commands. Return paths, claims, unknowns, and the exact validation commands the parent named, if any."
+    },
+    {
+      "id": "validation",
+      "agent": {
+        "ref": "package:validator"
+      },
+      "needs": [
+        "proof-map"
+      ],
+      "task": "Run these trusted validation commands from the repository root: `git status -sb` and `git diff --check`. Use the upstream proof map as context for selecting relevant proof output. Do not edit, install, publish, delete, or run network commands. Return pass/fail/deferred with exact command, cwd, and failure bucket."
+    },
+    {
+      "id": "normal-review",
+      "agent": {
+        "ref": "package:reviewer"
+      },
+      "needs": [
+        "proof-map"
+      ],
+      "task": "Review the completed artifact and proof map for correctness, contract drift, public-copy drift, trust boundaries, missing tests, and validation evidence. Do not run commands or edit. Return findings first, or no findings with residual risk."
+    },
+    {
+      "id": "risk-pass",
+      "agent": {
+        "ref": "package:critic"
+      },
+      "needs": [
+        "proof-map"
+      ],
+      "task": "Adversarially stress-test the completed path and proof map for high-risk gaps only. Do not duplicate ordinary review. Return blocking risks, falsifying checks, and proceed/needs-work summary."
+    },
+    {
+      "id": "final-decision",
+      "agent": {
+        "ref": "package:synthesizer"
+      },
+      "after": [
+        "proof-map",
+        "validation",
+        "normal-review",
+        "risk-pass"
+      ],
+      "task": "Synthesize upstream evidence into GO, NEEDS-WORK, or BLOCKED. Separate observed validation from claimed validation, preserve conflicts, list exact remaining proof gaps, and do not infer success when validation was deferred."
+    }
+  ],
+  "limits": {
+    "concurrency": 3,
+    "timeoutSecondsPerStep": 9000
+  }
+}

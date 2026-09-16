@@ -67,7 +67,7 @@ npm run tauri build      # 打包 release + NSIS 安装器（不含 Pi）
 npm run build:with-pi    # 先 bundle Pi，再 tauri build（正式发版）
 ```
 
-绿色便携版（升版本 + 编当前源码 + 打 zip，不含 NSIS）：
+绿色便携版（升版本 + `tauri build --no-bundle` 编当前源码 + 打 zip，不含 NSIS；不要用裸 `cargo build --release`，否则 exe 会去连 localhost 开发服务器）：
 
 ```bat
 build-portable.bat

@@ -1,0 +1,23 @@
+{
+  "objective": "Answer one scoped local repository question with a single read-only specialist.",
+  "library": {
+    "sources": [
+      "package"
+    ]
+  },
+  "authority": {
+    "allowFilesystemRead": true
+  },
+  "steps": [
+    {
+      "id": "inspect",
+      "agent": {
+        "ref": "package:scout"
+      },
+      "task": "Map the named local surface for the concrete parent-copied question. Return paths, confirmed facts, unknowns, and the next check. Do not run commands or edit."
+    }
+  ],
+  "limits": {
+    "timeoutSecondsPerStep": 9000
+  }
+}
