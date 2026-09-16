@@ -4849,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "wardex-tauri"
-version = "0.0.13"
+version = "0.0.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
