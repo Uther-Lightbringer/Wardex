@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import * as crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -21,10 +22,11 @@ import type {
 	AgentMessage,
 	AgentState,
 	AgentTool,
+	AgentToolResult,
 	PrepareNextTurnContext,
 	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText } from "@earendil-works/pi-ai";
+import { contentText, validateToolArguments } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -917,6 +919,30 @@ export class AgentSession {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	/**
+	 * Execute a registered tool directly — no LLM, no conversation side
+	 * effects. Used by host shells (e.g. WarDex plugin panels) to call
+	 * extension tools synchronously over RPC. The tool runs with the session's
+	 * extension runner context so lifecycle-aware extensions behave normally.
+	 */
+	async invokeTool(
+		name: string,
+		args: Record<string, unknown>,
+		signal?: AbortSignal,
+		onUpdate?: (partial: AgentToolResult<any>) => void,
+	): Promise<AgentToolResult<any>> {
+		const tool = this._toolRegistry.get(name);
+		if (!tool) {
+			throw new Error(`工具不存在: ${name}`);
+		}
+		const prepared = (tool.prepareArguments ? tool.prepareArguments(args) : args) as Record<string, unknown>;
+		const validated = validateToolArguments(tool, {
+			name,
+			arguments: prepared,
+		} as Parameters<typeof validateToolArguments>[1]);
+		return tool.execute("direct-" + crypto.randomUUID(), validated, signal, onUpdate);
 	}
 
 	/**
