@@ -45,6 +45,7 @@ const argvPi = process.argv[2];
 const candidates = [
   argvPi && resolve(argvPi),
   process.env.WARDEX_PI_DIR,
+  join(repoRoot, 'third_party', 'pi'), // 仓库内置 vendored 副本（git subtree）
   join(repoRoot, '..', 'pi'), // workspace 同级（C:\workspace\pi）
 ];
 const piRoot = candidates.find((c) => c && existsSync(join(c, 'packages/coding-agent')));
