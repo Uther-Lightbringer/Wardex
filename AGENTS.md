@@ -22,7 +22,9 @@
 
 Pi 不依赖 Node 端：用 **bun 编译成自包含二进制**（`bundle-pi.mjs`），产物是「`pi.exe` + 资产目录」，运行时不需要 Node。
 
-- **打自包含运行时**：`npm run bundle:pi`（node scripts/bundle-pi.mjs）。在 workspace 同级 `pi/`（或 `WARDEX_PI_DIR` / 参数指定）里跑 `bun build --compile` + `copy-binary-assets`，收敛到 `pi-runtime/packages/coding-agent/dist/`。
+- **pi 源码内置**：`third_party/pi` 是 Wardex-Pi fork（`github.com:Uther-Lightbringer/Wardex-Pi`）的 **git subtree** 内嵌副本，clone 本仓库即带 pi 源码。同步：`git subtree pull --prefix third_party/pi <Wardex-Pi-url> main --squash`（拉 fork 新提交）；在 `third_party/pi` 里改的代码可 `git subtree push` 推回 fork（也可直接在本仓库提交，下次 pull 照常合并）。workspace 同级旧目录 `C:\workspace\pi` 仅为兜底/独立开发用。
+- **vendored 副本首次构建**：`cd third_party/pi && npm install --ignore-scripts && npm run build:offline`（离线，不 fetch models.dev）。模型数据 `packages/ai/src/providers/data/`（含 `.manifest.json`）pi 上游 gitignore 但**本仓库已 force-add 提交**，clone 后即可离线构建；若上游更新需重新生成，`npm run hydrate:model-data`（联网）后把该目录变更一并提交。
+- **打自包含运行时**：`npm run bundle:pi`（node scripts/bundle-pi.mjs）。源码定位优先级：参数 → `WARDEX_PI_DIR` → **`third_party/pi`（内置）** → workspace 同级 `pi/`。跑 `bun build --compile` + `copy-binary-assets`，收敛到 `pi-runtime/packages/coding-agent/dist/`。
 - **打包进安装包**：`npm run build:with-pi`（先 bundle-pi 再 tauri build）。`tauri.conf.json` 的 `bundle.resources` 把 `pi-runtime/packages/coding-agent/dist` 映射到安装包 `resources/pi/packages/coding-agent/dist`，并把 `pi-extensions/` 映射到 `resources/pi-extensions`（spawn Pi 时 `--extension` 注入提醒 / codegraph 工具）。
 - **Pi extensions**：`pi-extensions/*.ts`（WarDex 仓库，不是 Pi 核心）。运行时定位（`chat/pi.rs` `locate_extensions_dir`）：`WARDEX_PI_EXTENSIONS_DIR` → 打包内置 `resources/pi-extensions` → 仓库根 `pi-extensions/`。spawn 注入 `WARDEX_SESSION_ID` / `WARDEX_TODOS_PATH` / `WARDEX_PROJECT_DIR`。
 - **Bundled pi-packages**：`pi-packages/<pkg>/`（如 pi-multiagent：agent_team 编排工具 + skill）。打包进 `resources/pi-packages`，spawn 时把 `<pkg>/extensions/*/index.ts` 作为 `--extension` 注入、skill 目录一并挂上。**自带包优先于 pi 全局安装**：spawn 时会把 `~/.pi/agent/settings.json` `packages` 里同名的 `npm:` 条目摘除（`chat/pi.rs` `delist_bundled_packages_from_pi_settings`），否则 pi 启动时两份扩展工具/flag 重名冲突，直接 exit(1)（前端表现为「已中断」）。
