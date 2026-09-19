@@ -53,6 +53,10 @@ Pi 进程随 WarDex **一起拉起**，不再是「首条消息才 spawn」：
 - 回收：闲置/切走的会话仍由 runtime 空闲回收退出（`K_IDLE_EVICT_MS` 2 分钟，`should_idle_evict`），预热不会永久占用进程。
 - 启动失败**不静默**：`chat://status` 在前端按 `sessionId` 过滤，后台会话（预热 / 项目待办 / 监控小窗 / 插件重放）的 spawn 失败永远到不了用户眼前。因此 `runtime.rs` 的 StartFailed handler 对「非活跃且非 busy」的失败额外 emit `wardex://agentStartFailed`，`App.vue` 监听后弹 `StartFailureDialog.vue`（会话 / Agent / 项目 / 错误详情 + 「打开该会话」）。活跃会话的失败仍只走聊天气泡，不多弹一层。
 
+### 模型能力：models.json 的 `input` 必须声明 image
+
+`models.rs::render_pi_provider` 把 Agent 的 baseUrl/model/apiKey 渲染进 `~/.pi/agent/models.json`（自定义 provider `wardex-pi-<host>`）。**模型条目必须带 `input: ["text","image"]`**：pi 侧 `provider-composer.ts::modelFromJson` 对缺省字段默认 `["text"]`，而 text-only 模型会让 pi 丢掉所有图片——`transform-messages.ts` 把用户粘贴的截图换成 `(image omitted: model does not support images)`、`core/tools/read.ts` 把被读的图片换成 `[Current model does not support images…]`。`PiDriver::image_supported()` 恒为 true（前端不拦截），所以漏声明时表现为「截图明明贴上去了，我却看不到」而非报错。该文件每次 spawn 前都会重写，改完渲染代码重启 WarDex 即生效（不用手改磁盘）。
+
 ### 自带扩展与包
 
 - **`pi-extensions/*.ts`**（WarDex 仓库）：spawn Pi 时 `--extension` 注入（提醒 / codegraph 工具）。定位：`WARDEX_PI_EXTENSIONS_DIR` → `resources/pi-extensions` → 仓库根 `pi-extensions/`。spawn 注入 `WARDEX_SESSION_ID` / `WARDEX_TODOS_PATH` / `WARDEX_PROJECT_DIR`

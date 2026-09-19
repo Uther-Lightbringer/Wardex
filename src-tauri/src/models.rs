@@ -417,6 +417,19 @@ pub fn render_pi_provider(agent: &Agent) -> String {
         "models".to_string(),
         Value::Array(vec![Value::Object(Map::from_iter([
             ("id".to_string(), Value::String(model.to_string())),
+            // pi models.json models DEFAULT to text-only
+            // (coding-agent/src/core/provider-composer.ts modelFromJson:
+            // `definition.input ?? ["text"]`), and a text-only model makes pi
+            // strip every image — the read tool replaces the file with
+            // "[Current model does not support images…]" and
+            // transform-messages.ts swaps the user's pasted screenshot for
+            // "(image omitted…)". Wardex already sends images unconditionally
+            // (PiDriver::image_supported() == true), so the custom model must
+            // declare the image modality or pictures never reach the model.
+            (
+                "input".to_string(),
+                Value::Array(vec![Value::String("text".to_string()), Value::String("image".to_string())]),
+            ),
             // pi exposes thinking levels only for reasoning-capable models
             // (ai/src/models.ts getSupportedThinkingLevels).
             ("reasoning".to_string(), Value::Bool(true)),
@@ -582,6 +595,28 @@ mod tests {
         assert_eq!(model["reasoning"], true);
         // kimi's endpoint 400s on role "developer"; force "system"
         assert_eq!(model["compat"]["supportsDeveloperRole"], false);
+    }
+
+    /// pi defaults a models.json model to text-only, which makes it strip every
+    /// image (read tool + user attachments). The declared modality must
+    /// include "image" or screenshots never reach the model.
+    #[test]
+    fn render_pi_provider_declares_image_input() {
+        let agent = Agent {
+            id: "agent-1".to_string(),
+            model: "step-5-preview".to_string(),
+            base_url: "https://api.stepfun.com/step_plan/v1".to_string(),
+            ..Default::default()
+        };
+        let rendered = render_pi_provider(&agent);
+        let v: Value = serde_json::from_str(&rendered).unwrap();
+        let model = &v["providers"]["wardex-pi-api-stepfun-com"]["models"][0];
+        assert_eq!(
+            model["input"],
+            serde_json::json!(["text", "image"]),
+            "text-only is pi's default and drops every image"
+        );
+        assert_eq!(model["id"], "step-5-preview");
     }
 
     #[test]
