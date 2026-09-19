@@ -186,6 +186,49 @@ fn pi_counting_factory(spawns: Arc<AtomicUsize>) -> SpawnerFactory {
     })
 }
 
+/// Spawner that always fails, the way the real Pi driver does: StartFailed
+/// into the event channel first (spawner contract), then Err out of the
+/// closure.
+fn pi_failing_factory() -> SpawnerFactory {
+    Arc::new(move |_session_id: &str| {
+        let spawner: Spawner = Box::new(move |launch: Launch, tx| {
+            Box::pin(async move {
+                let Launch::Pi(_) = launch else {
+                    panic!("pi failing factory only supports Pi launches");
+                };
+                let _ = tx
+                    .send(AcpEvent::StartFailed {
+                        error: "boom".to_string(),
+                    })
+                    .await;
+                Err(AcpError::Spawn("boom".to_string()))
+            })
+        });
+        spawner
+    })
+}
+
+fn harness_pi_failing() -> Harness {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let paths = Paths::new(tmp.path().to_path_buf());
+    let mut stores = StoreRegistry::init(paths.clone());
+    stores.agents.create_agent(&paths, "Pi").expect("create agent");
+    let stores = Arc::new(Mutex::new(stores));
+    let sink = Arc::new(RecordSink::default());
+    let manager = Arc::new(ChatManager::with_factory(
+        stores.clone(),
+        sink.clone(),
+        pi_failing_factory(),
+    ));
+    Harness {
+        manager,
+        stores,
+        sink,
+        mocks: Arc::new(Mutex::new(Vec::new())),
+        tmp,
+    }
+}
+
 /// Like `harness`, but the default agent stays provider "pi" and the spawner
 /// records Pi launches instead of speaking ACP.
 fn harness_pi() -> (Harness, Arc<AtomicUsize>) {
@@ -1059,6 +1102,67 @@ async fn pi_prewarm_last_session_spawns_once() {
     tokio::time::sleep(Duration::from_millis(80)).await;
     assert_eq!(spawns.load(Ordering::SeqCst), 3, "second prewarm must not respawn");
     assert_eq!(h.manager.active_id(), "", "prewarm must not activate a session");
+}
+
+/// A start failure nobody is looking at must still be seen: the frontend
+/// drops `chat://status` for non-active sessions, so the backend raises a
+/// `wardex://agentStartFailed` modal event instead of failing silently.
+/// Driven through the real startup path (prewarm of the last-used session).
+#[tokio::test]
+async fn pi_prewarm_failure_raises_modal_event() {
+    let h = harness_pi_failing();
+    let a = h.manager.create_session("").await.expect("create session");
+    // Drop the runtime and unset the active session the way closing does, so
+    // the prewarm target is a background session.
+    h.manager.close_session(&a);
+    let warmed = h
+        .manager
+        .prewarm_last_session()
+        .await
+        .expect("prewarm target");
+    assert_eq!(warmed, a, "prewarm picks the last-used session");
+    assert!(
+        wait_for(|| {
+            h.sink
+                .find(|e| e.0 == "wardex://agentStartFailed")
+                .len()
+                == 1
+        })
+        .await,
+        "prewarm spawn failure must surface as a modal event"
+    );
+    let (_, payload) = h
+        .sink
+        .find(|e| e.0 == "wardex://agentStartFailed")
+        .remove(0);
+    assert_eq!(payload["sessionId"].as_str(), Some(a.as_str()));
+    assert_eq!(payload["agentName"].as_str(), Some("Pi"));
+    assert_eq!(payload["error"].as_str(), Some("boom"));
+    assert!(payload["sessionTitle"].as_str().is_some());
+}
+
+/// …but the active session keeps the old behaviour: its failure belongs in the
+/// chat (status line + error bubble), no modal on top of it.
+#[tokio::test]
+async fn pi_active_session_failure_stays_in_the_chat() {
+    let h = harness_pi_failing();
+    h.manager.create_session("").await.expect("create session");
+    assert!(
+        wait_for(|| {
+            h.sink
+                .find(|e| e.0 == "chat://status" && e.1["lastError"] == "boom")
+                .len()
+                >= 1
+        })
+        .await,
+        "active session shows the failure in its own status"
+    );
+    assert!(
+        h.sink
+            .find(|e| e.0 == "wardex://agentStartFailed")
+            .is_empty(),
+        "active session must not raise a modal on top of the chat error"
+    );
 }
 
 /// Background Pi that has finished a turn is dropped after K_IDLE_EVICT_MS;

@@ -51,6 +51,7 @@ Pi 进程随 WarDex **一起拉起**，不再是「首条消息才 spawn」：
 - 建/开会话：`manager.rs` `eager_spawn` 对所有 chat-capable provider 返回 true（Pi 也预热），`create_session` / `open_session` / `ensure_runtime` / `apply_plugins` 都会立刻 spawn。
 - 握手竞态：actor 的 run loop 是 `biased` select，命令通道先于事件通道；`runtime.rs` 的 `spawn_pending` 标志保证「prompt 在 Started 之前到达」时只 stash（`pending_prompt`）而不二次 spawn，Started  handler 负责补发。
 - 回收：闲置/切走的会话仍由 runtime 空闲回收退出（`K_IDLE_EVICT_MS` 2 分钟，`should_idle_evict`），预热不会永久占用进程。
+- 启动失败**不静默**：`chat://status` 在前端按 `sessionId` 过滤，后台会话（预热 / 项目待办 / 监控小窗 / 插件重放）的 spawn 失败永远到不了用户眼前。因此 `runtime.rs` 的 StartFailed handler 对「非活跃且非 busy」的失败额外 emit `wardex://agentStartFailed`，`App.vue` 监听后弹 `StartFailureDialog.vue`（会话 / Agent / 项目 / 错误详情 + 「打开该会话」）。活跃会话的失败仍只走聊天气泡，不多弹一层。
 
 ### 自带扩展与包
 
