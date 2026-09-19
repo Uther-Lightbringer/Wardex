@@ -41,6 +41,11 @@ pub struct PiDriver {
     args_buf: HashMap<String, String>,
     /// toolCallId -> tool name (deltas don't repeat it).
     names: HashMap<String, String>,
+    /// toolCallId -> last known arguments object. pi's `tool_execution_*`
+    /// events carry `args` only on start/update — the final end event omits
+    /// them — so they are remembered here and replayed on every emit (the
+    /// frontend replaces the whole segment per update).
+    tool_args: HashMap<String, Value>,
     /// Stop reason of the last turn (agent_settled closes with it).
     last_stop: String,
     /// Cumulative session token usage (pi only reports totals via
@@ -575,6 +580,7 @@ impl PiDriver {
             idx_to_id: HashMap::new(),
             args_buf: HashMap::new(),
             names: HashMap::new(),
+            tool_args: HashMap::new(),
             last_stop: String::new(),
             stats_cum: None,
             pending: Arc::new(tokio::sync::Mutex::new(None)),
@@ -952,8 +958,24 @@ impl PiDriver {
                 None,
             );
         }
+        // RPC wire shape at toolcall_end: {contentIndex, toolCall} — pi's
+        // toJsonEvent strips `partial` from these events, but keeps the
+        // merged toolCall block (id + name + final arguments).
+        if let Some(block) = ev.get("toolCall").and_then(Value::as_object) {
+            let id = block
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let name = block
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            return (id, name, block.get("arguments").cloned());
+        }
         // Normalized shape: {contentIndex, partial} — the toolCall block
-        // inside the partial assistant message.
+        // inside the partial assistant message (interactive/TUI only).
         if let Some(partial) = ev.get("partial") {
             if let Some(blocks) = partial.get("content").and_then(Value::as_array) {
                 let mut block = blocks.get(idx).or_else(|| blocks.last());
@@ -1009,6 +1031,9 @@ impl PiDriver {
         self.args_buf.insert(id.clone(), String::new());
         let mut extra = Map::new();
         if let Some(a) = args {
+            if !a.is_null() {
+                self.tool_args.insert(id.clone(), a.clone());
+            }
             if a.is_object() {
                 extra.insert("rawInput".to_string(), a);
             }
@@ -1069,6 +1094,9 @@ impl PiDriver {
         };
         let mut extra = Map::new();
         if let Some(a) = args {
+            if !a.is_null() {
+                self.tool_args.insert(id.clone(), a.clone());
+            }
             if a.is_object() {
                 extra.insert("rawInput".to_string(), a);
             }
@@ -1078,6 +1106,12 @@ impl PiDriver {
 
     /// tool_execution_*: status + streamed output. `payload` is partialResult
     /// (accumulated) or result (final) — text from its content blocks.
+    ///
+    /// This is the ONLY path that reports tools in RPC mode: `toJsonEvent`
+    /// strips `partial` from message_update events, so `toolcall_*` arrive as
+    /// `{contentIndex}` and can't be attributed. `args` rides along on
+    /// start/update (not on end) — remember it so the completed row still
+    /// shows the call parameters instead of an empty payload.
     async fn on_tool_exec(&mut self, obj: &Map<String, Value>, status: &str, payload: Option<&Value>) {
         let id = obj
             .get("toolCallId")
@@ -1093,23 +1127,18 @@ impl PiDriver {
             .unwrap_or_default()
             .to_string();
         self.names.insert(id.clone(), name.clone());
-        let mut extra = Map::new();
-        let mut text = String::new();
-        if let Some(p) = payload {
-            if let Some(blocks) = p.get("content").and_then(Value::as_array) {
-                for b in blocks {
-                    if let Some(t) = b.get("text").and_then(Value::as_str) {
-                        text.push_str(t);
-                    }
-                }
-            } else if let Some(t) = p.get("text").and_then(Value::as_str) {
-                text.push_str(t);
+        // Remember the call arguments (start/update carry them, end does not).
+        // Bounded so a long session can't accumulate every call's args; only
+        // calls still streaming need the replay.
+        if self.tool_args.len() >= 256 {
+            self.tool_args.clear();
+        }
+        if let Some(a) = obj.get("args") {
+            if !a.is_null() {
+                self.tool_args.insert(id.clone(), a.clone());
             }
         }
-        if !text.is_empty() {
-            extra.insert("rawOutput".to_string(), Value::String(text));
-        }
-        extra.insert("status".to_string(), Value::String(status.to_string()));
+        let extra = tool_update_payload(self.tool_args.get(&id), status, &tool_result_text(payload));
         self.emit_tool(&id, &name, extra).await;
     }
 
@@ -1344,6 +1373,46 @@ impl ClientDriver for PiDriver {
 
     fn stderr_tail(&self) -> String {
         self.mux.stderr_tail()
+    }
+}
+
+/// Extra fields merged into a ToolCallUpdate: `rawInput` (call parameters)
+/// plus `rawOutput`/`status` when there is something to report. Parameters
+/// are serialized to pretty JSON **text** so `truncate_tool_payloads`
+/// (string-only) and the ProcessDialog payload view both apply.
+fn tool_update_payload(args: Option<&Value>, status: &str, output: &str) -> Map<String, Value> {
+    let mut extra = Map::new();
+    if let Some(a) = args {
+        let text = match a {
+            Value::String(s) => s.clone(),
+            Value::Null => String::new(),
+            other => serde_json::to_string_pretty(other).unwrap_or_default(),
+        };
+        if !text.is_empty() {
+            extra.insert("rawInput".to_string(), Value::String(text));
+        }
+    }
+    if !output.is_empty() {
+        extra.insert("rawOutput".to_string(), Value::String(output.to_string()));
+    }
+    extra.insert("status".to_string(), Value::String(status.to_string()));
+    extra
+}
+
+/// Text of a tool result payload (partialResult / result): the concatenated
+/// `content` block texts, or a plain `text` field.
+fn tool_result_text(payload: Option<&Value>) -> String {
+    let Some(p) = payload else { return String::new() };
+    if let Some(blocks) = p.get("content").and_then(Value::as_array) {
+        let mut text = String::new();
+        for b in blocks {
+            if let Some(t) = b.get("text").and_then(Value::as_str) {
+                text.push_str(t);
+            }
+        }
+        text
+    } else {
+        p.get("text").and_then(Value::as_str).unwrap_or_default().to_string()
     }
 }
 
@@ -1587,5 +1656,67 @@ mod tests {
         assert_eq!(cmds.len(), 1);
         assert_eq!(cmds[0]["name"], "skill:foo");
         assert_eq!(cmds[0]["description"], "Foo skill");
+    }
+
+    /// pi's tool_execution_end omits `args` (only start/update carry them), so
+    /// the completed row must still show the remembered parameters — otherwise
+    /// the process dialog's payload is empty for every finished tool call.
+    #[test]
+    fn tool_update_payload_keeps_remembered_arguments() {
+        let args = json!({ "path": "src/App.vue", "limit": 200 });
+        let start = tool_update_payload(Some(&args), "in_progress", "");
+        let input = start
+            .get("rawInput")
+            .and_then(Value::as_str)
+            .expect("rawInput text");
+        assert!(input.contains("src/App.vue"), "params must reach the payload");
+        assert!(start.get("rawOutput").is_none(), "no output yet");
+
+        // End event: no args of its own, output arrives — parameters replayed
+        // from the driver's memory.
+        let end = tool_update_payload(Some(&args), "completed", "1: import ...");
+        assert_eq!(
+            end.get("rawInput").and_then(Value::as_str),
+            Some(input),
+            "completed row keeps the call parameters"
+        );
+        assert_eq!(end.get("rawOutput").and_then(Value::as_str), Some("1: import ..."));
+        assert_eq!(end.get("status").and_then(Value::as_str), Some("completed"));
+    }
+
+    /// RPC wire shape: toJsonEvent strips `partial`, so toolcall_end arrives
+    /// as {contentIndex, toolCall}. Without that key the id is never resolved
+    /// and the tool row is dropped entirely.
+    #[test]
+    fn toolcall_end_wire_shape_yields_id_and_arguments() {
+        let ev = json!({
+            "type": "toolcall_end",
+            "contentIndex": 0,
+            "toolCall": {
+                "type": "toolCall",
+                "id": "call_1|fc_1",
+                "name": "read",
+                "arguments": { "path": "AGENTS.md" }
+            }
+        });
+        let (id, name, args) =
+            PiDriver::toolcall_id_and_name(ev.as_object().expect("object"), 0);
+        assert_eq!(id, "call_1|fc_1");
+        assert_eq!(name, "read");
+        assert_eq!(
+            args.and_then(|a| a.get("path").and_then(Value::as_str).map(str::to_string)),
+            Some("AGENTS.md".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_result_text_reads_blocks_or_plain_text() {
+        let blocks = json!({ "content": [
+            { "type": "text", "text": "a" },
+            { "type": "text", "text": "b" },
+        ]});
+        assert_eq!(tool_result_text(Some(&blocks)), "ab");
+        assert_eq!(tool_result_text(Some(&json!({ "text": "plain" }))), "plain");
+        assert_eq!(tool_result_text(None), "");
     }
 }

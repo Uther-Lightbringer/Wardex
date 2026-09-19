@@ -182,6 +182,21 @@ pub fn is_subagent_tool_name(name: &str) -> bool {
 /// other adapters may stream deltas — try the last block, then the
 /// concatenation (ChatController.cpp:507-528).
 pub fn parse_tool_input(tool: &Map<String, Value>) -> Option<Map<String, Value>> {
+    // Object form first: ACP adapters send `rawInput`/`arguments` as a JSON
+    // object, pi as pretty JSON text (chat/pi.rs on_tool_exec).
+    for key in ["rawInput", "arguments"] {
+        match tool.get(key) {
+            Some(Value::Object(o)) if !o.is_empty() => return Some(o.clone()),
+            Some(Value::String(s)) => {
+                if let Ok(Value::Object(o)) = serde_json::from_str::<Value>(s) {
+                    if !o.is_empty() {
+                        return Some(o);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     let mut last = String::new();
     let mut all = String::new();
     if let Some(Value::Array(content)) = tool.get("content") {
@@ -3094,6 +3109,24 @@ mod tests {
         ]});
         let map = tool.as_object().expect("object").clone();
         assert!(parse_tool_input(&map).is_none());
+    }
+
+    /// pi sends the arguments as an object (`rawInput`) or pretty JSON text;
+    /// the subagent title/prompt extraction must read those too.
+    #[test]
+    fn parse_tool_input_reads_object_and_text_forms() {
+        let obj = json!({ "toolCallId": "t1", "rawInput": { "prompt": "查一下天气" } });
+        let map = obj.as_object().expect("object").clone();
+        let input = parse_tool_input(&map).expect("parsed");
+        assert_eq!(input.get("prompt").and_then(Value::as_str), Some("查一下天气"));
+
+        let text = json!({ "rawInput": "{\"description\":\"扫描仓库\"}" });
+        let map = text.as_object().expect("object").clone();
+        let input = parse_tool_input(&map).expect("parsed");
+        assert_eq!(
+            input.get("description").and_then(Value::as_str),
+            Some("扫描仓库")
+        );
     }
 
     #[test]

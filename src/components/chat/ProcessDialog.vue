@@ -32,11 +32,20 @@ function toolName(s: ChatSegment): string {
 }
 
 const PAYLOAD_MAX = 64 * 1024; // in-memory payload is already capped upstream
-function payload(s: ChatSegment): string {
-  const v = s.rawInput ?? s.arguments ?? s.content ?? s.output ?? '';
-  let text = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+function fmtPayload(v: unknown): string {
+  let text = typeof v === 'string' ? v : v == null ? '' : JSON.stringify(v, null, 2);
   if (text.length > PAYLOAD_MAX) text = text.slice(0, PAYLOAD_MAX) + '\n…（已截断）';
   return text;
+}
+
+/** Call parameters: ACP sends rawInput/arguments, pi sends rawInput as JSON text. */
+function inputText(s: ChatSegment): string {
+  return fmtPayload(s.rawInput ?? s.arguments ?? s.content ?? s.output ?? '');
+}
+
+/** Tool result: ACP `rawOutput` (string or text blocks), pi's tool_execution_end. */
+function outputText(s: ChatSegment): string {
+  return fmtPayload(s.rawOutput ?? s.result ?? '');
 }
 
 function close(): void {
@@ -150,10 +159,26 @@ watch(
                   <div class="pd__step-head" :style="{ fontSize: prefs.fs(12) + 'px' }" @click="toggle(i)">
                     {{ openIdx[i] ? '▼' : '▶' }} · {{ toolName(s) }}
                     <span v-if="s.status" class="pd__status">[{{ s.status }}]</span>
+                    <!-- 有参数/结果时给个可见的提示，避免以为只有工具名 -->
+                    <span v-if="!openIdx[i] && (inputText(s) || outputText(s))" class="pd__hint">
+                      {{ inputText(s) ? '参数' : '' }}{{ inputText(s) && outputText(s) ? ' · ' : '' }}
+                      {{ outputText(s) ? '结果' : '' }} ▾
+                    </span>
                   </div>
-                  <pre v-if="openIdx[i]" class="pd__payload" :style="{ fontSize: prefs.fs(11) + 'px' }">{{
-                    payload(s)
-                  }}</pre>
+                  <template v-if="openIdx[i]">
+                    <div v-if="inputText(s)" class="pd__payload-label" :style="{ fontSize: prefs.fs(10) + 'px' }">
+                      调用参数
+                    </div>
+                    <pre v-if="inputText(s)" class="pd__payload" :style="{ fontSize: prefs.fs(11) + 'px' }">{{
+                      inputText(s)
+                    }}</pre>
+                    <div v-if="outputText(s)" class="pd__payload-label" :style="{ fontSize: prefs.fs(10) + 'px' }">
+                      执行结果
+                    </div>
+                    <pre v-if="outputText(s)" class="pd__payload pd__payload--out" :style="{ fontSize: prefs.fs(11) + 'px' }">{{
+                      outputText(s)
+                    }}</pre>
+                  </template>
                 </div>
               </template>
             </div>
@@ -307,6 +332,22 @@ watch(
   overflow-wrap: break-word;
   margin-top: 4px;
   user-select: text;
+}
+
+.pd__hint {
+  color: var(--war-text-dim);
+  margin-left: 8px;
+  font-size: 11px;
+}
+
+.pd__payload-label {
+  color: var(--war-gold);
+  margin: 6px 0 0;
+  opacity: 0.85;
+}
+
+.pd__payload--out {
+  color: #9fb6a4;
 }
 
 .pd__payload {
