@@ -96,9 +96,16 @@ impl CommandRunner {
             }
         }
 
-        let mut spawn = Command::new("cmd");
-        spawn.args(["/d", "/s", "/c"])
-            .arg(command)
+        let mut spawn = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/d", "/s", "/c"]).arg(command);
+            c
+        } else {
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c").arg(command);
+            c
+        };
+        spawn
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -191,10 +198,16 @@ impl CommandRunner {
             (rs.pid, rs.killed.clone())
         };
         killed.store(true, Ordering::SeqCst);
-        let mut tk = Command::new("taskkill");
-        tk.args(["/F", "/T", "/PID"])
-            .arg(pid.to_string())
-            .stdin(std::process::Stdio::null())
+        let mut tk = if cfg!(windows) {
+            let mut c = Command::new("taskkill");
+            c.args(["/F", "/T", "/PID"]).arg(pid.to_string());
+            c
+        } else {
+            let mut c = Command::new("kill");
+            c.arg("-9").arg(pid.to_string());
+            c
+        };
+        tk.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         #[cfg(windows)]

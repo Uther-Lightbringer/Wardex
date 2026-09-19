@@ -153,11 +153,19 @@ impl CodegraphRunner {
                 vec![cli.to_string_lossy().into_owned(), "mcp".to_string(), "-d".to_string(), db],
             ));
         }
-        // Fallback: run the shim through cmd (relies on PATH + shim).
-        Some((
-            "cmd".to_string(),
-            vec!["/c".to_string(), "codegraph".to_string(), "mcp".to_string(), "-d".to_string(), db],
-        ))
+        // Fallback: run the shim itself (through cmd on Windows, where the
+        // .cmd shim cannot be CreateProcess'd; directly elsewhere).
+        if cfg!(windows) {
+            Some((
+                "cmd".to_string(),
+                vec!["/c".to_string(), "codegraph".to_string(), "mcp".to_string(), "-d".to_string(), db],
+            ))
+        } else {
+            Some((
+                shim.to_string_lossy().into_owned(),
+                vec!["mcp".to_string(), "-d".to_string(), db],
+            ))
+        }
     }
 
     /// Status payload for the Ctrl+\ overlay (installed flag is set by the
@@ -347,10 +355,14 @@ impl CaptureOut {
 /// garbage and codegraph's mkdir fails), which is why builds used to fail.
 /// 600s ceiling so a hung build can never wedge the app.
 async fn run_cli_capture(program: &Path, args: &[&str]) -> Result<CaptureOut, String> {
-    let mut c = tokio::process::Command::new("cmd.exe");
-    c.args(["/d", "/s", "/c"])
-        .arg(program)
-        .args(args)
+    let mut c = if cfg!(windows) {
+        let mut c = tokio::process::Command::new("cmd.exe");
+        c.args(["/d", "/s", "/c"]).arg(program);
+        c
+    } else {
+        tokio::process::Command::new(program)
+    };
+    c.args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
