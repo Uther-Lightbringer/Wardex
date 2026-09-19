@@ -245,12 +245,12 @@ fn expanded_search_path(
     home: Option<&Path>,
 ) -> Vec<String> {
     let mut parts: Vec<String> = system_path
-        .split(';')
+        .split(PATH_SEP)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect();
     if let Some(user_path) = user_path {
-        for p in user_path.split(';').filter(|s| !s.is_empty()) {
+        for p in user_path.split(PATH_SEP).filter(|s| !s.is_empty()) {
             if !parts.iter().any(|x| x.eq_ignore_ascii_case(p)) {
                 parts.insert(0, p.to_string());
             }
@@ -271,11 +271,21 @@ fn expanded_search_path(
 /// User-level PATH from HKCU\Environment ("Path" value). May be
 /// REG_EXPAND_SZ with %VAR% references — used verbatim, like the old
 /// QSettings NativeFormat read. Any registry failure degrades to None.
+#[cfg(windows)]
 fn user_path_from_registry() -> Option<String> {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let env = hkcu.open_subkey("Environment").ok()?;
     env.get_value::<String, _>("Path").ok()
 }
+
+/// No per-user PATH registry outside Windows; the process PATH is all we have.
+#[cfg(not(windows))]
+fn user_path_from_registry() -> Option<String> {
+    None
+}
+
+/// PATH entry separator for the current platform.
+const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
 
 /// First existing file among <name>, <name>.exe, <name>.cmd, <name>.bat in
 /// each dir, dirs in order (CliProbe.cpp:310-327). pub(crate): shared with
@@ -361,7 +371,7 @@ async fn check_version(path: &Path) -> Result<Option<String>, ProbeError> {
     cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     if let Some(dir) = path.parent() {
         let system_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{};{}", native_separators(&dir.to_string_lossy()), system_path));
+        cmd.env("PATH", format!("{}{PATH_SEP}{}", native_separators(&dir.to_string_lossy()), system_path));
     }
 
     let child = cmd.spawn()?;
@@ -1080,7 +1090,7 @@ async fn model_call(
 /// bare/.exe/.cmd/.bat. Shared by testAgent and the ACP transport.
 pub(crate) fn find_executable(name: &str) -> Option<String> {
     let path = std::env::var("PATH").unwrap_or_default();
-    let dirs: Vec<String> = path.split(';').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    let dirs: Vec<String> = path.split(PATH_SEP).filter(|s| !s.is_empty()).map(str::to_string).collect();
     // Spawn resolution must only return files Windows can actually execute
     // (QStandardPaths::findExecutable semantics): an extensionless npm shim
     // script (e.g. `claude-code-acp` next to `claude-code-acp.cmd`) is NOT
@@ -1088,7 +1098,7 @@ pub(crate) fn find_executable(name: &str) -> Option<String> {
     // which_on_path (existence probing for CliProbe), skip the bare name
     // unless it already carries an extension.
     let has_ext = Path::new(name).extension().is_some();
-    let candidates: Vec<String> = if has_ext {
+    let candidates: Vec<String> = if has_ext || !cfg!(windows) {
         vec![name.to_string()]
     } else {
         vec![
@@ -1200,19 +1210,16 @@ mod tests {
         // Old prepend loop: each missing user entry is prepended in turn.
         let dirs = expanded_search_path(
             "codex",
-            r"A;B",
-            Some(r"B;C;D"),
+            &format!("A{PATH_SEP}B"),
+            Some(&format!("B{PATH_SEP}C{PATH_SEP}D")),
             Some(Path::new(r"C:\Users\u")),
         );
         assert_eq!(dirs, vec!["D", "C", "A", "B"]);
         // kimi additionally front-inserts ~/.kimi-code/bin (only once).
-        let dirs = expanded_search_path(
-            "kimi",
-            r"A;C:\Users\u\.kimi-code\bin",
-            None,
-            Some(Path::new(r"C:\Users\u")),
-        );
-        assert_eq!(dirs, vec!["A", r"C:\Users\u\.kimi-code\bin"]);
+        let home = Path::new("/Users/u");
+        let kimi_bin = home.join(".kimi-code").join("bin").to_string_lossy().into_owned();
+        let dirs = expanded_search_path("kimi", &format!("A{PATH_SEP}{kimi_bin}"), None, Some(home));
+        assert_eq!(dirs, vec!["A".to_string(), kimi_bin]);
     }
 
     #[test]

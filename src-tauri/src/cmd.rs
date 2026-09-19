@@ -96,9 +96,16 @@ impl CommandRunner {
             }
         }
 
-        let mut spawn = Command::new("cmd");
-        spawn.args(["/d", "/s", "/c"])
-            .arg(command)
+        let mut spawn = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/d", "/s", "/c"]).arg(command);
+            c
+        } else {
+            let mut c = Command::new("/bin/sh");
+            c.arg("-c").arg(command);
+            c
+        };
+        spawn
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -107,6 +114,11 @@ impl CommandRunner {
         #[cfg(windows)]
         {
             spawn.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        // Own process group so kill() can take the whole `sh -c` tree down.
+        #[cfg(unix)]
+        {
+            spawn.process_group(0);
         }
         let mut child = spawn.spawn().map_err(|e| format!("无法启动命令: {e}"))?;
         let stdout = child.stdout.take().ok_or_else(|| "stdout 不可用".to_string())?;
@@ -158,6 +170,11 @@ impl CommandRunner {
             );
         }
 
+        let _ = app.emit(
+            "term://start",
+            json!({ "sessionId": session_id, "runId": run_id, "rowId": row_id }),
+        );
+
         let runs = self.runs.clone();
         let session_owned = session_id.to_string();
         let run_owned = run_id.clone();
@@ -191,10 +208,16 @@ impl CommandRunner {
             (rs.pid, rs.killed.clone())
         };
         killed.store(true, Ordering::SeqCst);
-        let mut tk = Command::new("taskkill");
-        tk.args(["/F", "/T", "/PID"])
-            .arg(pid.to_string())
-            .stdin(std::process::Stdio::null())
+        let mut tk = if cfg!(windows) {
+            let mut c = Command::new("taskkill");
+            c.args(["/F", "/T", "/PID"]).arg(pid.to_string());
+            c
+        } else {
+            let mut c = Command::new("kill");
+            c.arg("-9").arg(format!("-{pid}"));
+            c
+        };
+        tk.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         #[cfg(windows)]

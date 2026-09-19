@@ -332,6 +332,13 @@ export const useChatStore = defineStore('chat', {
         // The backend owns the row's authoritative content; the frontend
         // only streams text into the live DOM node (R1, same as acp://chunk)
         // and keeps rowId → runId for the cancel button.
+        await listen<{ sessionId: string; runId: string; rowId: string }>('term://start', (e) => {
+          if (e.payload.sessionId !== this.sessionId) return;
+          const { rowId, runId } = e.payload;
+          if (this.runsByRow[rowId] !== runId) {
+            this.runsByRow = { ...this.runsByRow, [rowId]: runId };
+          }
+        }),
         await listen<{ sessionId: string; runId: string; rowId: string; text: string }>(
           'term://output',
           (e) => {
