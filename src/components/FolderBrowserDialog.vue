@@ -34,8 +34,20 @@ interface FolderEntry {
 
 const drives = ref<string[]>(['C:\\']);
 
-/** parent_of (browse.rs): C:\a\b → C:\a, C:\a → C:\, root → null. */
+/** POSIX-rooted path ("/" or "/Users/...") vs Windows drive-rooted ("C:\\..."). */
+function isPosixPath(p: string): boolean {
+  return p.trim().startsWith('/');
+}
+
+/** parent_of (browse.rs): C:\a\b → C:\a, C:\a → C:\, root → null;
+ * POSIX: /a/b → /a, /a → /, / → null. */
 function parentOf(dir: string): string | null {
+  if (isPosixPath(dir)) {
+    const d = dir.trim().replace(/\/+$/, '');
+    if (!d) return null;
+    const i = d.lastIndexOf('/');
+    return i <= 0 ? '/' : d.slice(0, i);
+  }
   const d = dir.trim().replace(/[\\/]+$/, '');
   if (!/^[A-Za-z]:/.test(d) || d.length < 3) return null;
   const rest = d.slice(2);
@@ -66,6 +78,10 @@ const pathInput = ref<HTMLInputElement | null>(null);
 /** Normalize a typed path: C:/a/b/ → C:\a\b, c:\ → C:\. Returns '' when the
  * shape is not a drive-rooted path at all. */
 function normalizePath(raw: string): string {
+  if (isPosixPath(raw)) {
+    const p = raw.trim().replace(/\/{2,}/g, '/').replace(/\/+$/, '');
+    return p || '/';
+  }
   let d = raw.trim().replace(/\//g, '\\').replace(/\\+$/, '');
   const m = /^([A-Za-z]):($|\\)/.exec(d);
   if (!m) return '';
@@ -93,7 +109,9 @@ function cancelPathEdit(): void {
 async function confirmPathEdit(): Promise<void> {
   const target = normalizePath(pathDraft.value);
   if (!target) {
-    pathError.value = '路径格式无效（示例：C:\\workspace）';
+    pathError.value = isPosixPath(currentPath.value)
+      ? '路径格式无效（示例：/Users/name/workspace）'
+      : '路径格式无效（示例：C:\\workspace）';
     pathInput.value?.focus();
     return;
   }
@@ -112,8 +130,10 @@ async function confirmPathEdit(): Promise<void> {
   pathEditing.value = false;
   pathError.value = '';
   currentPath.value = target;
-  const drive = target.slice(0, 1).toUpperCase() + ':\\';
-  if (drives.value.includes(drive)) currentDrive.value = drive;
+  const drive = isPosixPath(target)
+    ? [...drives.value].filter((d) => target === d || target.startsWith(d.replace(/\/+$/, '') + '/')).sort((a, b) => b.length - a.length)[0]
+    : target.slice(0, 1).toUpperCase() + ':\\';
+  if (drive && drives.value.includes(drive)) currentDrive.value = drive;
   void nextTick(() => listEl.value?.focus());
 }
 
@@ -229,7 +249,9 @@ watch(
       // Resync the drive dropdown with the remembered path.
       const driveOfPath = /^[A-Za-z]:/.test(currentPath.value)
         ? currentPath.value.slice(0, 1).toUpperCase() + ':\\'
-        : '';
+        : isPosixPath(currentPath.value) && drives.value.includes('/')
+          ? '/'
+          : '';
       if (driveOfPath && drives.value.includes(driveOfPath)) {
         currentDrive.value = driveOfPath;
       } else if (!drives.value.includes(currentDrive.value)) {
@@ -294,8 +316,9 @@ watch(
                 v-model="newName"
                 class="war-inline-input fb__create-input"
                 @input="createError = ''"
-                @keydown.enter.prevent="confirmCreate"
+                @keydown.enter.prevent.stop="confirmCreate"
                 @keydown.esc.stop="cancelCreate"
+                @keydown.stop
                 @click.stop
               />
             </div>
