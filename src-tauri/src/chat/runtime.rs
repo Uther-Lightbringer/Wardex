@@ -707,6 +707,13 @@ pub(crate) struct Actor {
     busy: bool,
     user_stop: bool,
     acp_ready: bool,
+    /// A spawn (warm start or a lazy first prompt) has been issued and the
+    /// child is still handshaking: `Started` has not arrived yet. The actor
+    /// blocks inside the spawner, so this window is only observable between
+    /// commands — with the run loop's `biased` select a prompt queued during
+    /// it would otherwise be handled before `Started` and re-enter
+    /// `ensure_acp`, tearing down a healthy child to spawn a second one.
+    spawn_pending: bool,
     pending_prompt: Option<(String, Vec<String>)>,
     pending_guide: Option<QueuedItem>,
     queue: VecDeque<QueuedItem>,
@@ -783,6 +790,7 @@ pub(crate) fn spawn_actor(
         busy: false,
         user_stop: false,
         acp_ready: false,
+        spawn_pending: false,
         fresh_launch: false,
         model_applied: false,
         pending_prompt: None,
@@ -859,12 +867,14 @@ impl Actor {
                 // the event channel by recv_once and is handled next turn.
                 self.client = None;
                 self.acp_ready = false;
+                self.spawn_pending = false;
                 self.snap().acp_running = false;
             }
             Err(e) => {
                 log::warn!("chat[{}] transport error: {e}", self.session_id);
                 self.client = None;
                 self.acp_ready = false;
+                self.spawn_pending = false;
                 self.snap().acp_running = false;
             }
         }
@@ -945,6 +955,7 @@ impl Actor {
                 if gen == self.turn_gen && self.busy && self.user_stop {
                     self.client = None;
                     self.acp_ready = false;
+                    self.spawn_pending = false;
                     self.snap().acp_running = false;
                     self.mark_interrupted();
                     self.emit_turn("interrupted", "cancelled", None);
@@ -1093,6 +1104,7 @@ impl Actor {
             // prompt() would reject the guide while turnBusy is set.
             self.client = None;
             self.acp_ready = false;
+            self.spawn_pending = false;
             self.snap().acp_running = false;
             self.mark_interrupted();
             self.set_busy(false);
@@ -1124,6 +1136,7 @@ impl Actor {
             self.pending_prompt = None;
             self.client = None;
             self.acp_ready = false;
+            self.spawn_pending = false;
             self.snap().acp_running = false;
             self.mark_interrupted();
             self.emit_turn("interrupted", "cancelled", None);
@@ -1132,6 +1145,7 @@ impl Actor {
         } else if self.client.is_some() {
             self.client = None;
             self.acp_ready = false;
+            self.spawn_pending = false;
             self.snap().acp_running = false;
         }
         // A pending permission request belongs to the dead process.
@@ -1171,6 +1185,7 @@ impl Actor {
         match ev {
             AcpEvent::Started { session_id } => {
                 self.acp_ready = true;
+                self.spawn_pending = false;
                 self.snap().acp_running = true;
                 // 用量补源（见 UsageReader）：kimi/claude/codex 定位本地会话
                 // 档案；opencode 定位本地 SQLite 会话累计值。
@@ -1226,6 +1241,11 @@ impl Actor {
             }
             AcpEvent::StartFailed { error } => {
                 self.acp_ready = false;
+                self.spawn_pending = false;
+                // The stashed first prompt never reached a child: drop it, the
+                // row becomes the failure bubble below (the next user message
+                // retries the spawn).
+                self.pending_prompt = None;
                 self.snap().acp_running = false;
                 self.set_error(error.clone());
                 if self.busy {
@@ -1241,6 +1261,14 @@ impl Actor {
                     self.finish_reply();
                 }
                 self.emit_status(None);
+                if !self.busy && !self.is_active_session() {
+                    // Nobody is looking at this session's chat: the frontend
+                    // drops `chat://status` for non-active sessions, so a dead
+                    // background agent (startup prewarm, project-due session,
+                    // monitor mini-chat, plugin re-apply) would fail silently.
+                    // Surface it as a modal instead.
+                    self.emit_start_failed_dialog(&error);
+                }
             }
             AcpEvent::ModeChanged { mode } => {
                 // current_mode_update / set_mode ack: patch the mode picker's
@@ -1424,6 +1452,7 @@ impl Actor {
             AcpEvent::ProcessExited { code } => {
                 log::info!("chat[{}] ACP process exited (code {code})", self.session_id);
                 self.acp_ready = false;
+                self.spawn_pending = false;
                 if self.busy {
                     // A dying process takes any pending rate-limit retry with
                     // it; the interrupted/continue logic decides the rest.
@@ -1782,6 +1811,12 @@ impl Actor {
         if self.client.is_some() && self.acp_ready {
             return;
         }
+        if self.spawn_pending {
+            // Warm start in flight: the child is handshaking. Respawning now
+            // would kill a healthy process (solo-pi mux would even leak a
+            // second binary). The Started handler fires any pending prompt.
+            return;
+        }
         self.client = None;
         self.acp_ready = false;
         self.snap().acp_running = false;
@@ -1792,6 +1827,7 @@ impl Actor {
         };
         self.fresh_launch = fresh_launch;
         self.model_applied = false;
+        self.spawn_pending = true;
         enforce_process_cap(&self.registry, &self.session_id);
         self.emit_status(None); // 连接 ACP…
 
@@ -1804,6 +1840,7 @@ impl Actor {
             Err(e) => {
                 // AcpClient::spawn / PiDriver::spawn already emitted
                 // StartFailed (spawner contract); just log here.
+                self.spawn_pending = false;
                 log::warn!("chat[{}] ACP spawn failed: {e}", self.session_id);
                 self.snap().acp_running = false;
             }
@@ -2750,6 +2787,7 @@ impl Actor {
         self.cancel_idle_evict();
         self.client = None;
         self.acp_ready = false;
+        self.spawn_pending = false;
         self.snap().acp_running = false;
         self.emit_status(None);
         self.emit("store://sessions", json!({}));
@@ -2865,12 +2903,36 @@ impl Actor {
         );
     }
 
+    /// 后台会话 spawn 失败的可见化：`chat://status` 在前端按 sessionId 过滤，
+    /// 非活跃会话的错误永远到不了用户眼前（启动预热、项目待办会话、监控小窗、
+    /// 插件重放都可能发生在后台）。这里单发一个弹框事件。
+    fn emit_start_failed_dialog(&mut self, error: &str) {
+        let (title, project_dir) = {
+            let mut stores = lock_ok(&self.stores);
+            let title = stores
+                .sessions
+                .meta_for(&self.session_id)
+                .map(|m| m.title.clone())
+                .unwrap_or_default();
+            (title, stores.sessions.project_dir_of(&self.session_id))
+        };
+        self.emit(
+            "wardex://agentStartFailed",
+            json!({
+                "sessionId": self.session_id,
+                "agentName": self.agent.name,
+                "sessionTitle": title,
+                "projectDir": project_dir,
+                "error": error,
+            }),
+        );
+    }
+
     /// 用量补源读取：kimi/claude/codex 为档案增量求和，opencode 为
     /// SQLite 会话累计差值；reader 未定位或无新增返回 None。
     fn read_archive_usage(&mut self) -> Option<TurnUsage> {
         self.archive_usage.as_mut()?.read_new()
     }
-
     fn emit_turn(&self, status: &str, stop_reason: &str, usage: Option<&TurnUsage>) {
         let mut payload =
             json!({ "sessionId": self.session_id, "status": status, "stopReason": stop_reason });

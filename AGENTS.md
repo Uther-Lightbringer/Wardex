@@ -43,6 +43,15 @@ Pi 是 WarDex 内置的 coding agent 后端。不依赖 Node 端：用 **bun 编
 
 `chat/pi.rs` `locate_plugin_dir`：Agent 配置的「Pi 插件目录」→ `WARDEX_PI_DIR` → 打包内置 `resources/pi` → workspace 同级 `pi/` → `third_party/pi`。**注意 dev 模式（tauri dev）同级旧目录优先于 vendored 副本**，改了 `third_party/pi` 但本机还留着 `C:\workspace\pi\...\dist\pi.exe` 时 dev 跑的是旧版——确认 vendored 链路没问题后删掉旧目录（或至少删它的 dist）。
 
+### 启动时机（不再懒启动）
+
+Pi 进程随 WarDex **一起拉起**，不再是「首条消息才 spawn」：
+
+- 应用启动：`lib.rs` setup 起一个 task 调 `ChatManager::prewarm_last_session`——取 `updatedAt` 最新且未 shelved 的会话，建 runtime 并发 `EnsureAcp`（不切 active、不发会话事件；用户仍从主菜单开始）。全新安装（无任何会话）时什么都不做，改为在建/开会话时预热。
+- 建/开会话：`manager.rs` `eager_spawn` 对所有 chat-capable provider 返回 true（Pi 也预热），`create_session` / `open_session` / `ensure_runtime` / `apply_plugins` 都会立刻 spawn。
+- 握手竞态：actor 的 run loop 是 `biased` select，命令通道先于事件通道；`runtime.rs` 的 `spawn_pending` 标志保证「prompt 在 Started 之前到达」时只 stash（`pending_prompt`）而不二次 spawn，Started  handler 负责补发。
+- 回收：闲置/切走的会话仍由 runtime 空闲回收退出（`K_IDLE_EVICT_MS` 2 分钟，`should_idle_evict`），预热不会永久占用进程。
+
 ### 自带扩展与包
 
 - **`pi-extensions/*.ts`**（WarDex 仓库）：spawn Pi 时 `--extension` 注入（提醒 / codegraph 工具）。定位：`WARDEX_PI_EXTENSIONS_DIR` → `resources/pi-extensions` → 仓库根 `pi-extensions/`。spawn 注入 `WARDEX_SESSION_ID` / `WARDEX_TODOS_PATH` / `WARDEX_PROJECT_DIR`

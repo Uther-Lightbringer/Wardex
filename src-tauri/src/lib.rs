@@ -1887,6 +1887,16 @@ pub fn run() {
             let t = std::time::Instant::now();
             let sink: Arc<dyn EventSink> = Arc::new(TauriSink(app.handle().clone()));
             let chat = Arc::new(ChatManager::new(stores.clone(), sink));
+            // Startup prewarm: bring the last-used session's agent process up
+            // with the app, so launching WarDex also launches pi (or the ACP
+            // CLI) instead of paying for it on the first prompt. Idle
+            // eviction reclaims it if the user goes elsewhere.
+            {
+                let chat = chat.clone();
+                tauri::async_runtime::spawn(async move {
+                    chat.prewarm_last_session().await;
+                });
+            }
             // App-level due tick for todos (popup rows → notification; project
             // rows → auto new session). 30s cadence; push rows are the
             // per-session runtimes' own timers.

@@ -53,11 +53,15 @@ pub fn can_use_for_chat(agent: &Agent) -> bool {
 
 /// Whether create/open should spawn the agent subprocess immediately.
 ///
-/// ACP CLIs still warm on session create/open (`session/load` + configOptions
-/// ready before the user types). Pi is lazy: the runtime actor is created
-/// (reminder timers live there) but `pi.exe` starts on the first prompt.
+/// Every provider warms on session create/open — Pi included. Pi used to be
+/// lazy (runtime actor only, `pi.exe` on the first prompt); it now comes up
+/// together with the chat session so the first prompt doesn't pay the
+/// spawn/RPC-bootstrap cost, and `prewarm_last_session` does the same at
+/// app start. Idle / background runtimes are still reclaimed by the runtime's
+/// idle eviction (runtime.rs `should_idle_evict`), so warming costs nothing
+/// permanent. A disabled agent or an unregistered provider is never warmed.
 fn eager_spawn(agent: &Agent) -> bool {
-    !agent.provider.eq_ignore_ascii_case("pi")
+    can_use_for_chat(agent)
 }
 
 fn snapshot_of(agent: &Agent) -> AgentSnapshot {
@@ -251,9 +255,9 @@ impl ChatManager {
     }
 
     /// startNewSession (ChatController.cpp:688-721): default agent required,
-    /// session created, previous empty session discarded. ACP agents are
-    /// warmed immediately; Pi only gets a runtime actor (process on first
-    /// prompt).
+    /// session created, previous empty session discarded. Every provider (Pi
+    /// included) is warmed immediately, so the agent process — `pi.exe` or an
+    /// ACP CLI — is already up before the user types.
     pub async fn create_session(&self, project_dir: &str) -> Result<String, ChatError> {
         self.create_session_in_group(project_dir, "", None, None).await
     }
@@ -356,8 +360,8 @@ impl ChatManager {
 
     /// open_session's runtime half WITHOUT the active switch (monitor page
     /// mini-chat): create a runtime for a session that has meta but no live
-    /// runtime. ACP is warmed; Pi waits for the first prompt. Emits no
-    /// events, touches no active/unread state.
+    /// runtime. The agent process is warmed for every provider (Pi included).
+    /// Emits no events, touches no active/unread state.
     pub async fn ensure_runtime(&self, session_id: &str) -> Result<(), ChatError> {
         {
             let mut stores = lock_ok(&self.stores);
@@ -374,6 +378,49 @@ impl ChatManager {
             }
         }
         Ok(())
+    }
+
+    /// App-startup prewarm: bring up the agent process for the session the
+    /// user was last in, so launching WarDex also launches its agent (pi.exe
+    /// for provider "pi"). Called once from `lib.rs` setup — no active
+    /// switch, no session-list events, no persisted state change; the
+    /// frontend still starts on the main menu and decides what to open. If
+    /// the user goes somewhere else, the idle eviction reclaims the process.
+    ///
+    /// Returns the prewarmed session id (None when there is no usable
+    /// session / agent, e.g. a fresh install with no chat history).
+    pub async fn prewarm_last_session(&self) -> Option<String> {
+        let id = self.last_session_id()?;
+        if self.entry_tx(&id).is_some() {
+            return Some(id); // already live (frontend opened it first)
+        }
+        let agent = self.resolve_agent_for(&id);
+        if !can_use_for_chat(&agent) {
+            return None;
+        }
+        self.create_runtime(&id, agent.clone());
+        let ok = self.send(&id, RuntimeCmd::EnsureAcp).await.is_ok();
+        log::info!(
+            "chat[{id}] startup prewarm ({}) {}",
+            agent.provider,
+            if ok { "spawned" } else { "runtime gone" }
+        );
+        ok.then_some(id)
+    }
+
+    /// Session the startup prewarm targets: highest `updatedAt` among the
+    /// non-shelved rows (shelved = monitor-hidden, never the user's last
+    /// working context). Idle sessions with no project still work — the
+    /// runtime falls back to the app's cwd for the child process.
+    fn last_session_id(&self) -> Option<String> {
+        let stores = lock_ok(&self.stores);
+        stores
+            .sessions
+            .list()
+            .iter()
+            .filter(|r| !r.shelved)
+            .max_by_key(|r| r.updated_at)
+            .map(|r| r.id.clone())
     }
 
     /// closeRuntime (ChatController.cpp:258-267).
@@ -397,11 +444,10 @@ impl ChatManager {
     /// Sessions resume from their --session-dir/--session-id, so conversation
     /// context survives the respawn.
     ///
-    /// Pi is lazy: we only recreate the actor (next prompt respawns with the
-    /// new `--extension` list). ACP is still warmed immediately. If another
-    /// Pi session on the same (cwd, agent) is busy, this session is skipped
-    /// too — they share one pi.exe, so a partial restart would join the old
-    /// process and miss the new plugins.
+    /// Pi is no longer lazy: it is respawned here like any other provider.
+    /// If another session on the same (cwd, agent) is busy, this session is
+    /// skipped too — they share one pi.exe, so a partial restart would join
+    /// the old process and miss the new plugins.
     pub async fn apply_plugins(&self) -> (usize, usize) {
         let ids: Vec<String> = lock_ok(&self.registry).keys().cloned().collect();
         let mut busy_mux: std::collections::HashSet<(String, String)> =
@@ -447,13 +493,8 @@ impl ChatManager {
             }
             self.destroy_runtime(&id);
             let agent = self.resolve_agent_for(&id);
-            let warm = eager_spawn(&agent);
             self.create_runtime(&id, agent);
-            if warm {
-                if self.send(&id, RuntimeCmd::EnsureAcp).await.is_ok() {
-                    restarted += 1;
-                }
-            } else {
+            if self.send(&id, RuntimeCmd::EnsureAcp).await.is_ok() {
                 restarted += 1;
             }
         }

@@ -8,6 +8,7 @@
 // three-stage transition (770ms up / popUp SFX 1280ms gate / 750ms drop).
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { getVersion } from '@tauri-apps/api/app';
+import { listen } from '@tauri-apps/api/event';
 import { isTauri } from './lib/tauri';
 import { DEFAULT_BG } from './lib/background';
 import { themeOf } from './lib/themes';
@@ -21,12 +22,14 @@ import TodoPage from './pages/TodoPage.vue';
 import UsagePage from './pages/UsagePage.vue';
 import MonitorPage from './pages/MonitorPage.vue';
 import FolderBrowserDialog from './components/FolderBrowserDialog.vue';
+import StartFailureDialog from './components/StartFailureDialog.vue';
 import { preloadSfx } from './lib/sfx';
 import { useNavStore, type PageId } from './stores/nav';
 import { useUiStore } from './stores/ui';
 import { hexToRgbTriple, usePrefsStore } from './stores/prefs';
 import { useProjectsStore } from './stores/projects';
 import { useChatStore } from './stores/chat';
+import type { StartFailure } from './stores/ui';
 
 const nav = useNavStore();
 const ui = useUiStore();
@@ -111,6 +114,17 @@ function onFolderChosen(path: string): void {
   });
 }
 
+/** 弹框里「打开该会话」：把用户直接送到那个失败的后台会话。 */
+function onStartFailureOpenSession(sessionId: string): void {
+  ui.closeStartFailure();
+  void chat.openSession(sessionId).then((ok) => {
+    if (ok) void nav.goOverlay('chat');
+    else ui.showBanner('无法打开该会话');
+  });
+}
+
+let unlistenStartFailure: (() => void) | null = null;
+
 onMounted(() => {
   preloadSfx();
   void prefs.load();
@@ -118,8 +132,21 @@ onMounted(() => {
   onResize();
   if (isTauri) void getVersion().then((v) => (version.value = v));
   window.addEventListener('resize', onResize);
+  // 后台会话 agent 启动失败（启动预热等）：后端单发事件，这里弹框 ——
+  // `chat://status` 按 sessionId 过滤，非活跃会话的错误到不了用户眼前。
+  if (isTauri) {
+    void listen<StartFailure>('wardex://agentStartFailed', (e) => {
+      ui.showStartFailure(e.payload);
+    }).then((off) => {
+      unlistenStartFailure = off;
+    });
+  }
 });
-onBeforeUnmount(() => window.removeEventListener('resize', onResize));
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', onResize);
+  unlistenStartFailure?.();
+  unlistenStartFailure = null;
+});
 </script>
 
 <template>
@@ -165,6 +192,13 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize));
 
     <!-- 打开项目 folder browser -->
     <FolderBrowserDialog v-model:open="ui.folderDialogOpen" @folder-chosen="onFolderChosen" />
+
+    <!-- 后台会话 agent 启动失败（启动预热 / 项目待办 / 监控小窗） -->
+    <StartFailureDialog
+      :failure="ui.startFailure"
+      @close="ui.closeStartFailure()"
+      @open-session="onStartFailureOpenSession"
+    />
   </div>
 </template>
 

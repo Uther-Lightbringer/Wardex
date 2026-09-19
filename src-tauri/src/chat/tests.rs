@@ -108,7 +108,7 @@ fn harness() -> Harness {
     }
 }
 
-/// Parked driver for Pi lazy-spawn / idle-evict tests: never produces
+/// Parked driver for the Pi eager-spawn / idle-evict tests: never produces
 /// protocol traffic, never exits. `recv_once` pending keeps the actor's
 /// select! idle. `prompt` completes the turn so finish_reply can run.
 struct IdleDriver {
@@ -164,7 +164,7 @@ impl ClientDriver for IdleDriver {
     }
 }
 
-fn pi_lazy_factory(spawns: Arc<AtomicUsize>) -> SpawnerFactory {
+fn pi_counting_factory(spawns: Arc<AtomicUsize>) -> SpawnerFactory {
     Arc::new(move |_session_id: &str| {
         let spawns = spawns.clone();
         let spawner: Spawner = Box::new(move |launch: Launch, tx| {
@@ -199,7 +199,7 @@ fn harness_pi() -> (Harness, Arc<AtomicUsize>) {
     let manager = Arc::new(ChatManager::with_factory(
         stores.clone(),
         sink.clone(),
-        pi_lazy_factory(spawns.clone()),
+        pi_counting_factory(spawns.clone()),
     ));
     (
         Harness {
@@ -957,38 +957,108 @@ async fn overdue_reminder_fires_immediately() {
     .await);
 }
 
-/// Pi: create/open a session must not spawn; the first prompt does.
+/// Pi: create/open must spawn immediately (no lazy start), and a prompt
+/// that lands while the warm child is still handshaking reuses that process
+/// instead of tearing it down for a second spawn.
 #[tokio::test]
-async fn pi_create_and_open_do_not_spawn_until_prompt() {
+async fn pi_create_and_open_spawn_immediately() {
     let (h, spawns) = harness_pi();
     let id = h.manager.create_session("").await.expect("create session");
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(spawns.load(Ordering::SeqCst), 0, "create_session must not spawn pi");
     assert!(
-        h.manager
+        wait_for(|| spawns.load(Ordering::SeqCst) == 1).await,
+        "create_session must spawn pi immediately"
+    );
+    assert!(
+        wait_for(|| h
+            .manager
             .runtime_states()
             .get(&id)
-            .is_some_and(|s| !s.acp_running),
-        "runtime exists but pi is not running"
+            .is_some_and(|s| s.acp_running))
+        .await,
+        "pi marked running right after create"
     );
 
-    h.manager.close_session(&id);
-    h.manager.open_session(&id).await.expect("open session");
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    assert_eq!(spawns.load(Ordering::SeqCst), 0, "open_session must not spawn pi");
-
-    h.manager
-        .send_prompt(&id, "hello", &[])
+    // Same session from scratch: prompt fired before Started must not respawn.
+    let (h2, spawns2) = harness_pi();
+    let id2 = h2.manager.create_session("").await.expect("create session 2");
+    h2.manager
+        .send_prompt(&id2, "hello", &[])
         .await
         .expect("send");
     assert!(
-        wait_for(|| spawns.load(Ordering::SeqCst) == 1).await,
-        "first prompt spawns pi"
+        wait_for(|| spawns2.load(Ordering::SeqCst) == 1).await,
+        "prompt during handshake keeps a single spawn"
     );
     assert!(
-        wait_for(|| h.manager.runtime_states().get(&id).is_some_and(|s| s.acp_running)).await,
-        "pi marked running after first prompt"
+        wait_for(|| h2
+            .manager
+            .session_messages(&id2)
+            .iter()
+            .any(|r| r.get("content").and_then(Value::as_str) == Some("hello")))
+        .await,
+        "stashed prompt is delivered by the Started handler"
     );
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(spawns2.load(Ordering::SeqCst), 1, "still one spawn");
+
+    // Re-opening a closed session warms a fresh process.
+    h.manager.close_session(&id);
+    h.manager.open_session(&id).await.expect("open session");
+    assert!(
+        wait_for(|| spawns.load(Ordering::SeqCst) == 2).await,
+        "open_session must spawn pi immediately"
+    );
+}
+
+/// App-startup prewarm: the last-used session's agent comes up with the app,
+/// once, without switching the active session or emitting session events.
+#[tokio::test]
+async fn pi_prewarm_last_session_spawns_once() {
+    let (h, spawns) = harness_pi();
+    // Both sessions warm their own process immediately (eager spawn).
+    let a = h.manager.create_session("").await.expect("session a");
+    assert!(
+        wait_for(|| spawns.load(Ordering::SeqCst) == 1).await,
+        "create_session spawns pi"
+    );
+    let b = h.manager.create_session("").await.expect("session b");
+    assert_ne!(a, b);
+    assert!(
+        wait_for(|| spawns.load(Ordering::SeqCst) == 2).await,
+        "second session spawns pi"
+    );
+    h.manager.close_session(&a);
+    h.manager.close_session(&b);
+    assert!(
+        wait_for(|| h
+            .manager
+            .runtime_states()
+            .values()
+            .all(|s| !s.acp_running))
+        .await,
+        "no runtime left after closing both"
+    );
+
+    let warmed = h.manager.prewarm_last_session().await.expect("prewarm target");
+    assert_eq!(warmed, b, "prewarm picks the most recently updated session");
+    assert!(
+        wait_for(|| spawns.load(Ordering::SeqCst) == 3).await,
+        "prewarm spawns pi once"
+    );
+    assert!(
+        wait_for(|| h
+            .manager
+            .runtime_states()
+            .get(&warmed)
+            .is_some_and(|s| s.acp_running))
+        .await,
+        "prewarmed session marked running"
+    );
+    // Idempotent: a second prewarm is a no-op (runtime already live).
+    h.manager.prewarm_last_session().await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(spawns.load(Ordering::SeqCst), 3, "second prewarm must not respawn");
+    assert_eq!(h.manager.active_id(), "", "prewarm must not activate a session");
 }
 
 /// Background Pi that has finished a turn is dropped after K_IDLE_EVICT_MS;
@@ -1018,14 +1088,18 @@ async fn pi_idle_background_process_is_evicted_active_is_kept() {
     assert_ne!(a, b);
     assert_eq!(h.manager.active_id(), b);
     assert!(
+        wait_for(|| h.manager.runtime_states().get(&b).is_some_and(|s| s.acp_running)).await,
+        "b warms its own process immediately (every provider is eager now)"
+    );
+    assert!(
         wait_for(|| h.manager.runtime_states().get(&a).is_some_and(|s| !s.acp_running)).await,
         "background idle pi evicted"
     );
-    assert_eq!(spawns.load(Ordering::SeqCst), 1, "b must not spawn");
+    assert_eq!(spawns.load(Ordering::SeqCst), 2, "a + b warmed once each");
 
     h.manager.send_prompt(&a, "again", &[]).await.expect("send a again");
     assert!(
-        wait_for(|| spawns.load(Ordering::SeqCst) == 2).await,
+        wait_for(|| spawns.load(Ordering::SeqCst) == 3).await,
         "prompt after eviction respawns pi"
     );
     assert!(
