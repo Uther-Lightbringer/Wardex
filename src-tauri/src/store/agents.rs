@@ -77,6 +77,15 @@ pub struct Agent {
     pub provider: String,
     #[serde(rename = "updatedAt", deserialize_with = "de_ms_i64")]
     pub updated_at: i64,
+    /// Whether the model can take image input (vision). Only consulted for
+    /// provider "pi" with a custom baseUrl: pi's models.json models default
+    /// to text-only (`provider-composer.ts`: `definition.input ?? ["text"]`)
+    /// and a text-only model makes pi replace every image with a placeholder,
+    /// so the modality must be declared. Defaults to true — WarDex sends
+    /// images unconditionally, and silently dropping them is worse than a
+    /// visible 400 from a genuinely text-only endpoint.
+    #[serde(rename = "supportsImage", default = "default_true")]
+    pub supports_image: bool,
     /// Unknown keys survive a load/save round trip (cross-version safety).
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -115,6 +124,7 @@ impl Default for Agent {
             name: String::new(),
             provider: default_provider(),
             updated_at: 0,
+            supports_image: default_true(),
             extra: Map::new(),
         }
     }
@@ -136,6 +146,8 @@ pub struct AgentPatch {
     pub effort_options: Option<Vec<String>>,
     #[serde(rename = "maxContextK")]
     pub max_context_k: Option<u32>,
+    #[serde(rename = "supportsImage")]
+    pub supports_image: Option<bool>,
     #[serde(rename = "cliPath")]
     pub cli_path: Option<String>,
     #[serde(rename = "piDir")]
@@ -335,6 +347,9 @@ impl AgentStore {
         }
         if let Some(v) = patch.max_context_k {
             a.max_context_k = v;
+        }
+        if let Some(v) = patch.supports_image {
+            a.supports_image = v;
         }
         if let Some(v) = &patch.cli_path {
             a.cli_path = v.trim().to_string();

@@ -55,7 +55,11 @@ Pi 进程随 WarDex **一起拉起**，不再是「首条消息才 spawn」：
 
 ### 模型能力：models.json 的 `input` 必须声明 image
 
-`models.rs::render_pi_provider` 把 Agent 的 baseUrl/model/apiKey 渲染进 `~/.pi/agent/models.json`（自定义 provider `wardex-pi-<host>`）。**模型条目必须带 `input: ["text","image"]`**：pi 侧 `provider-composer.ts::modelFromJson` 对缺省字段默认 `["text"]`，而 text-only 模型会让 pi 丢掉所有图片——`transform-messages.ts` 把用户粘贴的截图换成 `(image omitted: model does not support images)`、`core/tools/read.ts` 把被读的图片换成 `[Current model does not support images…]`。`PiDriver::image_supported()` 恒为 true（前端不拦截），所以漏声明时表现为「截图明明贴上去了，我却看不到」而非报错。该文件每次 spawn 前都会重写，改完渲染代码重启 WarDex 即生效（不用手改磁盘）。
+`models.rs::render_pi_provider` 把 Agent 的 baseUrl/model/apiKey 渲染进 `~/.pi/agent/models.json`（自定义 provider `wardex-pi-<host>`）。**模型条目必须按能力声明 `input: ["text","image"]`**：pi 侧 `provider-composer.ts::modelFromJson` 对缺省字段默认 `["text"]`，而 text-only 模型会让 pi 丢掉所有图片——`transform-messages.ts` 把用户粘贴的截图换成 `(image omitted: model does not support images)`、`core/tools/read.ts` 把被读的图片换成 `[Current model does not support images…]`。`PiDriver::image_supported()` 恒为 true（前端不拦截）、prompt 也一直把附件编码成 image block 发过去，所以漏声明时表现为「截图明明贴上去了，模型却看不到」而非报错。该文件每次 spawn 前都会重写，改完渲染代码重启 WarDex 即生效（不用手改磁盘）。
+
+- pi **不探测**模型能力（自定义端点没有 `/models` 模态字段，也没有 400 兜底重试），全靠声明：内置 provider 编译期从 models.dev 固化，自定义端点只能由 `~/.pi/agent/models.json`（或扩展 `registerProvider`）声明。
+- 因此 Agent 配置页有「**多模态（视觉）**」勾选（`Agent.supports_image`，`serde(default)` 默认 true）：勾 → 声明 image；端点确实是纯文本模型时取消勾选，声明成 `["text"]` 让 pi 继续丢图，避免端点 400。
+- **音频 pi 现在不支持**：`Model.input` 的联合类型只有 `"text" | "image"`，全仓无 `"audio"` 分支；要做音频得改 `third_party/pi`（类型 + transform-messages + 各 provider content 组装 + read 工具解码），再走 subtree 回写与 `WARDEX_PI_REBUILD=1` 重编。
 
 ### 自带扩展与包
 

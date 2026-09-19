@@ -24,6 +24,10 @@ export interface AgentRecord {
   effortOptions: string[];
   /** 保存时写入 config.toml 模型声明的 max_context_size，单位 K；0 = 256K 兜底。 */
   maxContextK: number;
+  /** 模型是否支持图片输入（视觉/多模态）。仅对 provider "pi" 的自定义
+   * baseUrl 有意义：pi 的 models.json 模型条目缺省 input 为 ["text"]，
+   * 不声明 image 时 pi 会把所有图片换成占位符（截图/读图都失效）。 */
+  supportsImage: boolean;
   cliPath: string;
   /** provider "pi" 的插件目录；空 = 自动定位。 */
   piDir: string;
@@ -50,6 +54,7 @@ export type AgentPatch = Partial<
     | 'defaultEffort'
     | 'effortOptions'
     | 'maxContextK'
+    | 'supportsImage'
     | 'cliPath'
     | 'piDir'
     | 'apiKey'

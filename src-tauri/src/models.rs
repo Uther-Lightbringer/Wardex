@@ -407,6 +407,19 @@ pub fn render_pi_provider(agent: &Agent) -> String {
         "wardex-pi-{}",
         if slug.is_empty() { "local".to_string() } else { slug }
     );
+    // Declared input modalities. pi models.json models DEFAULT to text-only
+    // (coding-agent/src/core/provider-composer.ts modelFromJson:
+    // `definition.input ?? ["text"]`), and a text-only model makes pi strip
+    // every image — the read tool replaces the file with
+    // "[Current model does not support images…]" and transform-messages.ts
+    // swaps the user's pasted screenshot for "(image omitted…)". pi never
+    // auto-detects this, so the modality comes from the agent's
+    // supportsImage flag (Agent 配置页 → 「多模态（视觉）」), default true
+    // like PiDriver::image_supported().
+    let mut input = vec![Value::String("text".to_string())];
+    if agent.supports_image {
+        input.push(Value::String("image".to_string()));
+    }
     let mut provider = Map::new();
     provider.insert("baseUrl".to_string(), Value::String(api_root(base_url)));
     provider.insert("api".to_string(), Value::String("openai-completions".to_string()));
@@ -417,19 +430,7 @@ pub fn render_pi_provider(agent: &Agent) -> String {
         "models".to_string(),
         Value::Array(vec![Value::Object(Map::from_iter([
             ("id".to_string(), Value::String(model.to_string())),
-            // pi models.json models DEFAULT to text-only
-            // (coding-agent/src/core/provider-composer.ts modelFromJson:
-            // `definition.input ?? ["text"]`), and a text-only model makes pi
-            // strip every image — the read tool replaces the file with
-            // "[Current model does not support images…]" and
-            // transform-messages.ts swaps the user's pasted screenshot for
-            // "(image omitted…)". Wardex already sends images unconditionally
-            // (PiDriver::image_supported() == true), so the custom model must
-            // declare the image modality or pictures never reach the model.
-            (
-                "input".to_string(),
-                Value::Array(vec![Value::String("text".to_string()), Value::String("image".to_string())]),
-            ),
+            ("input".to_string(), Value::Array(input)),
             // pi exposes thinking levels only for reasoning-capable models
             // (ai/src/models.ts getSupportedThinkingLevels).
             ("reasoning".to_string(), Value::Bool(true)),
@@ -611,12 +612,25 @@ mod tests {
         let rendered = render_pi_provider(&agent);
         let v: Value = serde_json::from_str(&rendered).unwrap();
         let model = &v["providers"]["wardex-pi-api-stepfun-com"]["models"][0];
-        assert_eq!(
-            model["input"],
-            serde_json::json!(["text", "image"]),
-            "text-only is pi's default and drops every image"
-        );
+        assert_eq!(model["input"], serde_json::json!(["text", "image"]));
         assert_eq!(model["id"], "step-5-preview");
+    }
+
+    /// A text-only endpoint must be able to opt out (unchecking the Agent
+    /// config's 多模态 option) so pi keeps dropping images instead of the
+    /// endpoint 400ing on an image block.
+    #[test]
+    fn render_pi_provider_honors_supports_image_false() {
+        let agent = Agent {
+            id: "agent-1".to_string(),
+            model: "some-text-model".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            supports_image: false,
+            ..Default::default()
+        };
+        let rendered = render_pi_provider(&agent);
+        let v: Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(v["providers"]["wardex-pi-api-example-com"]["models"][0]["input"], serde_json::json!(["text"]));
     }
 
     #[test]

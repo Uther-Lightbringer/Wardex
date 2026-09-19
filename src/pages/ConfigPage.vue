@@ -55,6 +55,9 @@ const draft = reactive({
   effortOptions: [] as string[],
   /** 上下文长度（K），随思考强度声明写入 config.toml 的 max_context_size；0/空 = 256。 */
   maxContextK: 256,
+  /** 模型是否支持图片输入（视觉/多模态）；勾选 → pi models.json 声明
+   * input: ["text","image"]，否则只声明 text，pi 会丢掉所有图片。 */
+  supportsImage: true,
   cliPath: '',
   piDir: '',
   apiKey: '',
@@ -188,6 +191,7 @@ function loadAgent(a: AgentRecord): void {
   draft.baseUrl = a.baseUrl;
   draft.effortOptions = [...(a.effortOptions ?? [])];
   draft.maxContextK = a.maxContextK || 256;
+  draft.supportsImage = a.supportsImage !== false;
   draft.cliPath = a.cliPath;
   draft.piDir = a.piDir;
   draft.apiKey = maskKey(a.apiKey); // display surface: masked only (§9.5)
@@ -219,6 +223,7 @@ async function saveCurrent(): Promise<boolean> {
     baseUrl: draft.baseUrl,
     effortOptions: [...draft.effortOptions],
     maxContextK: clampContextK(draft.maxContextK),
+    supportsImage: draft.supportsImage,
     cliPath: draft.cliPath,
     piDir: draft.piDir,
     apiKey: draft.apiKey,
@@ -701,6 +706,19 @@ const pageKeysOn = computed(() => nav.page === 'config');
             </div>
             <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               勾选该 Agent 可用的思考强度档位；对话页强度下拉只显示这些（思考恒开启）。全不勾 = 全部档位可用；kimi 保存时写入 config.toml 的 support_efforts，opencode 生成模型 variants，pi 由驱动注入思考档位下拉
+            </div>
+
+            <div class="cfg__field">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">多模态（视觉）</span>
+              <div class="cfg__effort-list">
+                <label class="cfg__effort-item" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                  <input type="checkbox" :checked="draft.supportsImage" @change="draft.supportsImage = ($event.target as HTMLInputElement).checked; markDirty()" />
+                  该模型可以读图片（截图 / 读取图片文件）
+                </label>
+              </div>
+            </div>
+            <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              只对 Pi 生效：填写了自定义 Base URL 的模型会被写进 ~/.pi/agent/models.json，而 pi 不会自动探测模型能力，缺省按「纯文本」处理——所有图片（粘贴的截图、模型 read 的图片）都会被换成占位符。勾选=声明 input: ["text","image"]；端点确实是纯文本模型时请取消勾选，否则可能报 400
             </div>
 
             <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
