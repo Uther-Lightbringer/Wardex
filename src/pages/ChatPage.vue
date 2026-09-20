@@ -132,7 +132,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPageKey));
 
 // ---- title row: agent switcher dropdown (features/chat.md §6.1) ----
 // pi is an embedded agent (no ACP) but behaves identically in the switcher.
-const CHAT_PROVIDERS = ['pi', 'kimi', 'claude', 'codex', 'custom'];
+const CHAT_PROVIDERS = ['pi', 'devin', 'kimi', 'claude', 'codex', 'custom'];
 function agentUsable(enabled: boolean, provider: string): boolean {
   return enabled && CHAT_PROVIDERS.includes(provider.trim().toLowerCase());
 }
