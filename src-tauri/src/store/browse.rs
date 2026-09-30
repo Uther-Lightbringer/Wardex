@@ -17,6 +17,13 @@ pub struct FolderEntry {
 /// when the probe finds nothing (sandboxed/odd environments), so the dialog
 /// always has one dropdown entry.
 pub fn drives() -> Vec<String> {
+    if !cfg!(windows) {
+        let mut out = vec!["/".to_string()];
+        if let Some(home) = dirs::home_dir() {
+            out.push(home.to_string_lossy().into_owned());
+        }
+        return out;
+    }
     let mut out = Vec::new();
     for letter in b'A'..=b'Z' {
         let root = format!("{}:\\", letter as char);
@@ -34,6 +41,10 @@ pub fn drives() -> Vec<String> {
 /// slashes are normalized to native separators; a drive root "C:\" loses
 /// then regains its separator, so "C:" + "\" + name.
 pub fn join(dir: &str, name: &str) -> String {
+    if !cfg!(windows) {
+        let d = dir.trim().trim_end_matches('/');
+        return format!("{d}/{name}");
+    }
     let normalized = dir.trim().replace('/', "\\");
     let d = normalized.trim_end_matches('\\');
     format!("{}\\{}", d, name)
@@ -42,6 +53,16 @@ pub fn join(dir: &str, name: &str) -> String {
 /// Parent directory of `dir` ("C:\a\b" → "C:\a", "C:\a" → "C:\"); None when
 /// already at a drive root or the input is not drive-absolute.
 pub fn parent_of(dir: &str) -> Option<String> {
+    if !cfg!(windows) {
+        let d = dir.trim().trim_end_matches('/');
+        if d.is_empty() {
+            return None; // already at "/"
+        }
+        return Some(match d.rfind('/') {
+            None | Some(0) => "/".to_string(),
+            Some(i) => d[..i].to_string(),
+        });
+    }
     let d = dir.trim().trim_end_matches(['/', '\\']);
     let bytes = d.as_bytes();
     if bytes.len() < 3 || bytes[1] != b':' || !bytes[0].is_ascii_alphabetic() {
@@ -102,6 +123,7 @@ pub fn create_dir(dir: &str, name: &str) -> Result<FolderEntry, String> {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn join_handles_roots_and_trailing_separators() {
         assert_eq!(join("C:\\", "a"), "C:\\a");
@@ -109,6 +131,7 @@ mod tests {
         assert_eq!(join("C:/work/", "a"), "C:\\work\\a");
     }
 
+    #[cfg(windows)]
     #[test]
     fn parent_of_walks_up_to_the_root() {
         assert_eq!(parent_of("C:\\a\\b"), Some("C:\\a".to_string()));

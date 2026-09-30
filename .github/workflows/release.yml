@@ -1,0 +1,73 @@
+name: Release
+
+# Build Windows (NSIS) and macOS (DMG, arm64 + x64) bundles with the built-in
+# Pi binary, and attach them to the GitHub Release for the pushed `v*` tag.
+# `workflow_dispatch` builds the same artifacts as a draft release for
+# ad-hoc testing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - os: macos-13
+            target: x86_64-apple-darwin
+            bundles: dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Install vendored pi deps
+        run: npm install --ignore-scripts
+        working-directory: third_party/pi
+
+      - name: Bundle pi (offline full rebuild)
+        run: npm run bundle:pi
+        env:
+          WARDEX_PI_REBUILD: '1'
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('manual-{0}', github.run_number) }}
+          releaseName: ${{ github.ref_type == 'tag' && format('WarDex {0}', github.ref_name) || format('WarDex manual build #{0}', github.run_number) }}
+          releaseDraft: ${{ github.ref_type != 'tag' }}
+          prerelease: false
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
