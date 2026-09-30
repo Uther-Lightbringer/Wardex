@@ -947,17 +947,20 @@ const pageKeysOn = computed(() => nav.page === 'config');
             <!-- 后端凭据 (pi only): 一个 Agent 一条凭据路径 -->
             <div v-if="draft.provider === 'pi'" class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">后端凭据</span>
-              <div class="cfg__effort-list">
-                <label class="cfg__effort-item" :style="{ fontSize: prefs.fs(12) + 'px' }">
+              <div class="cfg__cred-list">
+                <label class="cfg__cred-item" :class="{ on: piCredSource === 'custom' }" :style="{ fontSize: prefs.fs(12) + 'px' }">
                   <input type="radio" name="pi-cred" :checked="piCredSource === 'custom'" @change="setPiCredSource('custom')" />
+                  <span class="cfg__cred-dot"></span>
                   自定义端点（Base URL + API Key）
                 </label>
-                <label class="cfg__effort-item" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                <label class="cfg__cred-item" :class="{ on: piCredSource === 'codex' }" :style="{ fontSize: prefs.fs(12) + 'px' }">
                   <input type="radio" name="pi-cred" :checked="piCredSource === 'codex'" @change="setPiCredSource('codex')" />
+                  <span class="cfg__cred-dot"></span>
                   ChatGPT 订阅（OpenAI Codex）
                 </label>
-                <label class="cfg__effort-item" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                <label class="cfg__cred-item" :class="{ on: piCredSource === 'none' }" :style="{ fontSize: prefs.fs(12) + 'px' }">
                   <input type="radio" name="pi-cred" :checked="piCredSource === 'none'" @change="setPiCredSource('none')" />
+                  <span class="cfg__cred-dot"></span>
                   不配置
                 </label>
               </div>
@@ -993,27 +996,40 @@ const pageKeysOn = computed(() => nav.page === 'config');
 
             <template v-if="draft.provider === 'pi' && piCredSource === 'codex'">
               <div class="cfg__field">
-                <div class="cfg__btn-row">
-                  <WarButton
-                    skin="dialog"
-                    :width="190"
-                    :art-aspect="5.34"
-                    :text="codexLoginBusy ? '发起中…' : agents.codexAuth.loggedIn ? '重新登录' : '登录 ChatGPT 订阅…'"
-                    :enabled="!codexLoginBusy"
-                    @activated="startCodexLogin"
-                  />
-                  <WarButton
-                    v-if="agents.codexAuth.loggedIn"
-                    skin="dialog"
-                    :width="130"
-                    :art-aspect="5.34"
-                    text="退出登录"
-                    @activated="codexLogout"
-                  />
-                </div>
-                <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
-                  {{ agents.codexAuth.loggedIn ? `✔ 已登录${agents.codexAuth.accountId ? ` · account ${agents.codexAuth.accountId}` : ''}` : '未登录' }}
-                  凭据存于 ~/.pi/agent/auth.json，所有 pi agent 全局共享；登录后聊天页模型下拉出现 openai-codex/*
+                <div class="cfg__codex-panel">
+                  <div class="cfg__codex-head">
+                    <span
+                      class="cfg__codex-badge"
+                      :class="{ on: agents.codexAuth.loggedIn }"
+                      :style="{ fontSize: prefs.fs(11) + 'px' }"
+                    >
+                      <span class="cfg__codex-badge-dot"></span>
+                      {{
+                        agents.codexAuth.loggedIn
+                          ? `已登录${agents.codexAuth.accountId ? ` · account ${agents.codexAuth.accountId}` : ''}`
+                          : '未登录'
+                      }}
+                    </span>
+                    <WarButton
+                      skin="dialog"
+                      :width="190"
+                      :art-aspect="5.34"
+                      :text="codexLoginBusy ? '发起中…' : agents.codexAuth.loggedIn ? '重新登录' : '登录 ChatGPT 订阅…'"
+                      :enabled="!codexLoginBusy"
+                      @activated="startCodexLogin"
+                    />
+                    <WarButton
+                      v-if="agents.codexAuth.loggedIn"
+                      skin="dialog"
+                      :width="120"
+                      :art-aspect="5.34"
+                      text="退出登录"
+                      @activated="codexLogout"
+                    />
+                  </div>
+                  <div class="cfg__codex-note" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                    凭据存于 ~/.pi/agent/auth.json，所有 pi agent 全局共享；登录后聊天页模型下拉出现 openai-codex/*
+                  </div>
                 </div>
               </div>
             </template>
@@ -1449,9 +1465,122 @@ const pageKeysOn = computed(() => nav.page === 'config');
   user-select: none;
 }
 
-.cfg__effort-item input[type='checkbox'],
-.cfg__effort-item input[type='radio'] {
+.cfg__effort-item input[type='checkbox'] {
   accent-color: var(--war-gold);
+}
+
+/* ---- 后端凭据 (pi): 卡片式单选 ---- */
+.cfg__cred-list {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cfg__cred-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 22%);
+  color: var(--war-text-dim);
+  font-family: SimSun, serif;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    color 0.15s;
+}
+
+.cfg__cred-item:hover {
+  border-color: var(--war-gold-input);
+  color: var(--war-text);
+}
+
+.cfg__cred-item.on {
+  border-color: var(--war-gold-dim);
+  box-shadow:
+    inset 0 0 0 1px var(--war-gold-dim),
+    0 0 8px rgb(169 136 47 / 22%);
+  color: var(--war-text);
+}
+
+.cfg__cred-item input[type='radio'] {
+  display: none;
+}
+
+.cfg__cred-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--war-gold-input);
+}
+
+.cfg__cred-item.on .cfg__cred-dot {
+  background: var(--war-gold-dim);
+  border-color: var(--war-gold-dim);
+  box-shadow: 0 0 6px var(--war-gold-dim);
+}
+
+/* ---- codex (ChatGPT 订阅) 分支面板 + 状态徽标 ---- */
+.cfg__codex-panel {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 22%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cfg__codex-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.cfg__codex-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 4px;
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  user-select: none;
+}
+
+.cfg__codex-badge.on {
+  border-color: var(--war-gold-dim);
+  color: var(--war-text);
+}
+
+.cfg__codex-badge-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--war-text-faint);
+}
+
+.cfg__codex-badge.on .cfg__codex-badge-dot {
+  background: var(--war-gold-dim);
+  box-shadow: 0 0 6px var(--war-gold-dim);
+}
+
+.cfg__codex-note {
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  line-height: 1.5;
 }
 
 /* ---- codex (ChatGPT 订阅) 登录弹窗 ---- */
