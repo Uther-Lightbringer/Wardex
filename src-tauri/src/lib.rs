@@ -34,6 +34,7 @@ pub mod db;
 pub mod inspect;
 pub mod mcp_reminder;
 pub mod models;
+pub mod pi_auth;
 pub mod plugins;
 pub mod probe;
 pub mod provider;
@@ -857,6 +858,38 @@ async fn probe_pi(preferred_path: String) -> Result<Value, String> {
     let plugin = crate::chat::pi::locate_plugin_dir(&preferred_path);
     let found = plugin.as_ref().is_ok_and(|d| d.join(bin).is_file());
     Ok(crate::chat::pi::probe_result(found, plugin))
+}
+
+// ---------------------------------------------------------------------------
+// Commands: OpenAI Codex (ChatGPT 订阅) device-code login → ~/.pi/agent/auth.json
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn pi_codex_login_start() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(pi_auth::login_start)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn pi_codex_login_poll(device_auth_id: String, user_code: String) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || pi_auth::login_poll(&device_auth_id, &user_code))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn pi_codex_auth_status() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(pi_auth::auth_status)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn pi_codex_logout() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(pi_auth::logout)
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1987,6 +2020,10 @@ pub fn run() {
             provider_specs,
             probe_cli,
             probe_pi,
+            pi_codex_login_start,
+            pi_codex_login_poll,
+            pi_codex_auth_status,
+            pi_codex_logout,
             test_agent,
             // projects / workspace / files
             list_projects,

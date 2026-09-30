@@ -465,7 +465,10 @@ pub fn write_pi_models(agent: &Agent) -> Result<Option<String>, String> {
         return Err("无法定位用户主目录".to_string());
     };
     let path = home.join(".pi").join("agent").join("models.json");
-    if rendered.is_empty() {
+    // Empty render (baseUrl/model cleared) still strips the wardex-pi-* keys —
+    // otherwise a stale custom provider lingers after the agent switches to a
+    // different credential source (e.g. the Codex subscription).
+    if rendered.is_empty() && !path.exists() {
         return Ok(None);
     }
     let mut root: Value = std::fs::read_to_string(&path)
@@ -488,22 +491,24 @@ pub fn write_pi_models(agent: &Agent) -> Result<Option<String>, String> {
     for k in old_keys {
         providers.remove(&k);
     }
-    let fresh: Value = serde_json::from_str(&rendered).map_err(|e| e.to_string())?;
-    let fresh_key = fresh["providers"]
-        .as_object()
-        .and_then(|o| o.keys().next())
-        .cloned()
-        .ok_or("渲染失败")?;
-    let fresh_providers = fresh["providers"].as_object().cloned().unwrap_or_default();
-    for (k, v) in fresh_providers {
-        providers.insert(k, v);
+    let mut fresh_key: Option<String> = None;
+    if !rendered.is_empty() {
+        let fresh: Value = serde_json::from_str(&rendered).map_err(|e| e.to_string())?;
+        fresh_key = fresh["providers"]
+            .as_object()
+            .and_then(|o| o.keys().next())
+            .cloned();
+        let fresh_providers = fresh["providers"].as_object().cloned().unwrap_or_default();
+        for (k, v) in fresh_providers {
+            providers.insert(k, v);
+        }
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(&path, serde_json::to_string_pretty(&root).unwrap_or_default())
         .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
-    Ok(Some(fresh_key))
+    Ok(fresh_key)
 }
 
 #[cfg(test)]

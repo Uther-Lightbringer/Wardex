@@ -199,6 +199,7 @@ function loadAgent(a: AgentRecord): void {
   draft.mcpServers = a.mcpServers;
   draft.avatarPath = a.avatarPath;
   dirty.value = false;
+  syncPiCredSource();
   // Bare CLI path → async auto-probe on load (§9.2 trigger #1).
   if (isBareCliPath(spec.value, draft.cliPath)) {
     void nextTick(() => void probe(true));
@@ -288,6 +289,7 @@ function onProviderChange(i: number): void {
   if (!s || s.id === draft.provider) return;
   draft.provider = s.id;
   markDirty();
+  syncPiCredSource();
   // Bare path for the NEW provider → auto-probe one tick later (§9.2).
   if (isBareCliPath(s, draft.cliPath)) {
     void nextTick(() => void probe(true));
@@ -482,6 +484,145 @@ async function pickAgentAvatar(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// 后端凭据 (provider "pi" only): 一个 Agent 声明一条凭据路径
+//   custom = 自定义端点（Base URL + API Key → ~/.pi/agent/models.json）
+//   codex  = ChatGPT 订阅（OpenAI Codex OAuth → ~/.pi/agent/auth.json）
+//   none   = 不配置（pi 用本机已有配置）
+// 不持久化：打开页面时按 baseUrl / auth.json 推导。auth.json 是全局凭据，
+// 所有 pi agent 共享同一份 codex 登录。
+// ---------------------------------------------------------------------------
+
+type PiCredSource = 'custom' | 'codex' | 'none';
+const piCredSource = ref<PiCredSource>('none');
+
+function syncPiCredSource(): void {
+  if (draft.provider !== 'pi') return;
+  if (draft.baseUrl.trim()) piCredSource.value = 'custom';
+  else piCredSource.value = agents.codexAuth.loggedIn ? 'codex' : 'none';
+}
+
+function setPiCredSource(v: PiCredSource): void {
+  if (piCredSource.value === v) return;
+  piCredSource.value = v;
+  // 离开自定义端点 → 清 baseUrl（保存后 models.json 不再写 wardex-pi-*）。
+  // apiKey 不动：没有 baseUrl 时它不进 models.json，切回端点模式还能用。
+  if (v !== 'custom' && draft.baseUrl.trim()) {
+    draft.baseUrl = '';
+    markDirty();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Codex (ChatGPT 订阅) 设备码登录：pi_codex_login_start 拿验证码 →
+// 弹窗展示 + 自动打开授权页 → 前端按 interval 轮询 pi_codex_login_poll，
+// done 时 Rust 侧已把 oauth 凭据写进 ~/.pi/agent/auth.json。
+// ---------------------------------------------------------------------------
+
+const codexLoginOpen = ref(false);
+const codexLoginBusy = ref(false);
+const codexUserCode = ref('');
+const codexVerifyUrl = ref('');
+const codexLoginState = ref<'waiting' | 'done' | 'error'>('waiting');
+const codexLoginError = ref('');
+const codexCopied = ref(false);
+let codexDeviceAuthId = '';
+let codexPollDelayMs = 5000;
+let codexDeadline = 0;
+let codexPollTimer: ReturnType<typeof setTimeout> | undefined;
+
+function stopCodexPolling(): void {
+  if (codexPollTimer !== undefined) {
+    clearTimeout(codexPollTimer);
+    codexPollTimer = undefined;
+  }
+}
+
+async function startCodexLogin(): Promise<void> {
+  if (codexLoginBusy.value) return;
+  codexLoginBusy.value = true;
+  codexLoginError.value = '';
+  codexCopied.value = false;
+  try {
+    const r = await agents.codexLoginStart();
+    codexDeviceAuthId = r.deviceAuthId;
+    codexUserCode.value = r.userCode;
+    codexVerifyUrl.value = r.verificationUrl;
+    codexPollDelayMs = Math.max(1, r.intervalSecs) * 1000;
+    codexDeadline = Date.now() + 15 * 60 * 1000; // 设备码 15 分钟有效（pi 侧常量）
+    codexLoginState.value = 'waiting';
+    codexLoginOpen.value = true;
+    void openUrl(r.verificationUrl); // 自动打开授权页，用户只需粘验证码
+    scheduleCodexPoll(codexPollDelayMs);
+  } catch (e) {
+    codexLoginState.value = 'error';
+    codexLoginError.value = String(e);
+    codexLoginOpen.value = true;
+  } finally {
+    codexLoginBusy.value = false;
+  }
+}
+
+function scheduleCodexPoll(delay: number): void {
+  stopCodexPolling();
+  codexPollTimer = setTimeout(() => void pollCodexOnce(), delay);
+}
+
+async function pollCodexOnce(): Promise<void> {
+  if (!codexLoginOpen.value || codexLoginState.value !== 'waiting') return;
+  if (Date.now() > codexDeadline) {
+    codexLoginState.value = 'error';
+    codexLoginError.value = '验证码已过期（15 分钟），请重新发起登录';
+    return;
+  }
+  try {
+    const r = await agents.codexLoginPoll(codexDeviceAuthId, codexUserCode.value);
+    if (r.status === 'pending') {
+      scheduleCodexPoll(codexPollDelayMs);
+    } else if (r.status === 'slow_down') {
+      codexPollDelayMs += 2000; // 服务端要求放慢：interval + 2s
+      scheduleCodexPoll(codexPollDelayMs);
+    } else {
+      codexLoginState.value = 'done';
+      await agents.loadCodexAuth();
+      setTimeout(() => {
+        codexLoginOpen.value = false;
+      }, 1200);
+    }
+  } catch (e) {
+    codexLoginState.value = 'error';
+    codexLoginError.value = String(e);
+  }
+}
+
+function closeCodexLogin(): void {
+  stopCodexPolling();
+  codexLoginOpen.value = false;
+}
+
+watch(codexLoginOpen, (v) => {
+  if (!v) stopCodexPolling();
+});
+onBeforeUnmount(stopCodexPolling);
+
+const codexDialogMsg = computed(() =>
+  codexLoginState.value === 'done'
+    ? '✔ 登录成功'
+    : codexLoginState.value === 'error'
+      ? codexLoginError.value
+      : '请在浏览器中完成授权，窗口会自动检测登录结果',
+);
+
+async function copyCodexCode(): Promise<void> {
+  codexCopied.value = await copyText(codexUserCode.value);
+  if (codexCopied.value) setTimeout(() => (codexCopied.value = false), 1500);
+}
+
+async function codexLogout(): Promise<void> {
+  const ok = await agents.codexLogout();
+  statusMsg.value = ok ? '已退出 ChatGPT 订阅登录' : agents.lastError || '退出登录失败';
+}
+
+// ---------------------------------------------------------------------------
 // tryBack: 未保存的更改 three-way dialog (§6)
 // ---------------------------------------------------------------------------
 
@@ -518,7 +659,7 @@ function onPageKey(e: KeyboardEvent): void {
 // ---------------------------------------------------------------------------
 
 async function initPage(): Promise<void> {
-  await Promise.all([agents.loadSpecs(), agents.refresh(), prefs.load(), loadInstallHelp()]);
+  await Promise.all([agents.loadSpecs(), agents.refresh(), prefs.load(), loadInstallHelp(), agents.loadCodexAuth()]);
   if (!selectedId.value && agents.agents.length > 0) {
     const def = agents.byId(agents.defaultAgentId) ?? agents.agents[0];
     loadAgent(def);
@@ -538,6 +679,7 @@ watch(
   () => nav.page,
   (p) => {
     if (p !== 'config') return;
+    void agents.loadCodexAuth();
     void agents.refresh().then(() => {
       const cur = agents.byId(selectedId.value);
       if (cur) {
@@ -721,10 +863,10 @@ const pageKeysOn = computed(() => nav.page === 'config');
               只对 Pi 生效：填写了自定义 Base URL 的模型会被写进 ~/.pi/agent/models.json，而 pi 不会自动探测模型能力，缺省按「纯文本」处理——所有图片（粘贴的截图、模型 read 的图片）都会被换成占位符。勾选=声明 input: ["text","image"]；端点确实是纯文本模型时请取消勾选，否则可能报 400
             </div>
 
-            <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            <div v-if="spec?.baseUrlHint && draft.provider !== 'pi'" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
               {{ spec.baseUrlHint }}
             </div>
-            <div class="cfg__field">
+            <div v-if="draft.provider !== 'pi'" class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Base URL（可选）</span>
               <div class="cfg__baseurl-row">
                 <input v-model="draft.baseUrl" class="war-input cfg__input" :style="{ fontSize: prefs.fs(13) + 'px' }" @input="markDirty" />
@@ -802,7 +944,100 @@ const pageKeysOn = computed(() => nav.page === 'config');
               {{ probeLine.text }}
             </div>
 
-            <div class="cfg__field">
+            <!-- 后端凭据 (pi only): 一个 Agent 一条凭据路径 -->
+            <div v-if="draft.provider === 'pi'" class="cfg__field">
+              <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">后端凭据</span>
+              <div class="cfg__cred-list">
+                <label class="cfg__cred-item" :class="{ on: piCredSource === 'custom' }" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                  <input type="radio" name="pi-cred" :checked="piCredSource === 'custom'" @change="setPiCredSource('custom')" />
+                  <span class="cfg__cred-dot"></span>
+                  自定义端点（Base URL + API Key）
+                </label>
+                <label class="cfg__cred-item" :class="{ on: piCredSource === 'codex' }" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                  <input type="radio" name="pi-cred" :checked="piCredSource === 'codex'" @change="setPiCredSource('codex')" />
+                  <span class="cfg__cred-dot"></span>
+                  ChatGPT 订阅（OpenAI Codex）
+                </label>
+                <label class="cfg__cred-item" :class="{ on: piCredSource === 'none' }" :style="{ fontSize: prefs.fs(12) + 'px' }">
+                  <input type="radio" name="pi-cred" :checked="piCredSource === 'none'" @change="setPiCredSource('none')" />
+                  <span class="cfg__cred-dot"></span>
+                  不配置
+                </label>
+              </div>
+            </div>
+
+            <template v-if="draft.provider === 'pi' && piCredSource === 'custom'">
+              <div v-if="spec?.baseUrlHint" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                {{ spec.baseUrlHint }}
+              </div>
+              <div class="cfg__field">
+                <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">Base URL（可选）</span>
+                <div class="cfg__baseurl-row">
+                  <input v-model="draft.baseUrl" class="war-input cfg__input" :style="{ fontSize: prefs.fs(13) + 'px' }" @input="markDirty" />
+                  <WarDropdown
+                    class="cfg__baseurl-presets"
+                    :options="baseUrlPresetNames"
+                    display-text="预置…"
+                    @activated="onBaseUrlPreset"
+                  />
+                </div>
+              </div>
+              <div class="cfg__field">
+                <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">API Key</span>
+                <input
+                  v-model="draft.apiKey"
+                  type="password"
+                  class="war-input cfg__input"
+                  :style="{ fontSize: prefs.fs(13) + 'px' }"
+                  @input="markDirty"
+                />
+              </div>
+            </template>
+
+            <template v-if="draft.provider === 'pi' && piCredSource === 'codex'">
+              <div class="cfg__field">
+                <div class="cfg__codex-panel">
+                  <div class="cfg__codex-head">
+                    <span
+                      class="cfg__codex-badge"
+                      :class="{ on: agents.codexAuth.loggedIn }"
+                      :style="{ fontSize: prefs.fs(11) + 'px' }"
+                    >
+                      <span class="cfg__codex-badge-dot"></span>
+                      {{
+                        agents.codexAuth.loggedIn
+                          ? `已登录${agents.codexAuth.accountId ? ` · account ${agents.codexAuth.accountId}` : ''}`
+                          : '未登录'
+                      }}
+                    </span>
+                    <WarButton
+                      skin="dialog"
+                      :width="190"
+                      :art-aspect="5.34"
+                      :text="codexLoginBusy ? '发起中…' : agents.codexAuth.loggedIn ? '重新登录' : '登录 ChatGPT 订阅…'"
+                      :enabled="!codexLoginBusy"
+                      @activated="startCodexLogin"
+                    />
+                    <WarButton
+                      v-if="agents.codexAuth.loggedIn"
+                      skin="dialog"
+                      :width="120"
+                      :art-aspect="5.34"
+                      text="退出登录"
+                      @activated="codexLogout"
+                    />
+                  </div>
+                  <div class="cfg__codex-note" :style="{ fontSize: prefs.fs(11) + 'px' }">
+                    凭据存于 ~/.pi/agent/auth.json，所有 pi agent 全局共享；登录后聊天页模型下拉出现 openai-codex/*
+                  </div>
+                </div>
+              </div>
+            </template>
+            <div v-if="draft.provider === 'pi' && piCredSource === 'none'" class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+              不写任何凭据；pi 使用 ~/.pi 本机已有配置（pi TUI /login 登录过的、或环境变量里的 key）。选「不配置」不会删除 auth.json 里的订阅凭据
+            </div>
+
+            <div v-if="draft.provider !== 'pi'" class="cfg__field">
               <span class="cfg__label" :style="{ fontSize: prefs.fs(13) + 'px' }">API Key</span>
               <input
                 v-model="draft.apiKey"
@@ -950,6 +1185,46 @@ const pageKeysOn = computed(() => nav.page === 'config');
         </div>
       </template>
       <WarButton skin="dialog" :width="150" :art-aspect="5.34" text="关闭" @activated="testDetailOpen = false" />
+    </WarDialog>
+
+    <!-- Codex (ChatGPT 订阅) 设备码登录 -->
+    <WarDialog
+      v-model:open="codexLoginOpen"
+      title-text="登录 OpenAI Codex（ChatGPT 订阅）"
+      :message-text="codexDialogMsg"
+      :dialog-width="560"
+    >
+      <template #plate>
+        <div v-if="codexLoginState === 'waiting'" class="cfg__codex">
+          <div class="cfg__codex-code" :style="{ fontSize: prefs.fs(26) + 'px' }">{{ codexUserCode }}</div>
+          <div class="cfg__hint" :style="{ fontSize: prefs.fs(11) + 'px' }">
+            在打开的授权页登录 ChatGPT 账号并输入以上验证码（15 分钟内有效）
+          </div>
+        </div>
+      </template>
+      <WarButton
+        v-if="codexLoginState === 'waiting'"
+        skin="dialog"
+        :width="150"
+        :art-aspect="5.34"
+        :text="codexCopied ? '已复制' : '复制验证码'"
+        @activated="copyCodexCode"
+      />
+      <WarButton
+        v-if="codexLoginState === 'waiting'"
+        skin="dialog"
+        :width="150"
+        :art-aspect="5.34"
+        text="打开授权页面"
+        @activated="openUrl(codexVerifyUrl)"
+      />
+      <WarButton
+        skin="dialog"
+        :width="150"
+        :art-aspect="5.34"
+        :text="codexLoginState === 'waiting' ? '取消' : '关闭'"
+        @activated="closeCodexLogin"
+      />
     </WarDialog>
   </PageShell>
 </template>
@@ -1192,6 +1467,138 @@ const pageKeysOn = computed(() => nav.page === 'config');
 
 .cfg__effort-item input[type='checkbox'] {
   accent-color: var(--war-gold);
+}
+
+/* ---- 后端凭据 (pi): 卡片式单选 ---- */
+.cfg__cred-list {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cfg__cred-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 22%);
+  color: var(--war-text-dim);
+  font-family: SimSun, serif;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s,
+    color 0.15s;
+}
+
+.cfg__cred-item:hover {
+  border-color: var(--war-gold-input);
+  color: var(--war-text);
+}
+
+.cfg__cred-item.on {
+  border-color: var(--war-gold-dim);
+  box-shadow:
+    inset 0 0 0 1px var(--war-gold-dim),
+    0 0 8px rgb(169 136 47 / 22%);
+  color: var(--war-text);
+}
+
+.cfg__cred-item input[type='radio'] {
+  display: none;
+}
+
+.cfg__cred-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1px solid var(--war-gold-input);
+}
+
+.cfg__cred-item.on .cfg__cred-dot {
+  background: var(--war-gold-dim);
+  border-color: var(--war-gold-dim);
+  box-shadow: 0 0 6px var(--war-gold-dim);
+}
+
+/* ---- codex (ChatGPT 订阅) 分支面板 + 状态徽标 ---- */
+.cfg__codex-panel {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 4px;
+  background: rgb(0 0 0 / 22%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cfg__codex-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.cfg__codex-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 9px;
+  border: 1px solid var(--war-glass-border);
+  border-radius: 4px;
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  user-select: none;
+}
+
+.cfg__codex-badge.on {
+  border-color: var(--war-gold-dim);
+  color: var(--war-text);
+}
+
+.cfg__codex-badge-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--war-text-faint);
+}
+
+.cfg__codex-badge.on .cfg__codex-badge-dot {
+  background: var(--war-gold-dim);
+  box-shadow: 0 0 6px var(--war-gold-dim);
+}
+
+.cfg__codex-note {
+  color: var(--war-text-muted);
+  font-family: SimSun, serif;
+  line-height: 1.5;
+}
+
+/* ---- codex (ChatGPT 订阅) 登录弹窗 ---- */
+.cfg__codex {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.cfg__codex-code {
+  font-family: ui-monospace, 'Cascadia Mono', Menlo, monospace;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--war-gold);
+  text-shadow: 0 0 10px rgb(0 0 0 / 60%);
+  user-select: all;
 }
 
 .cfg__avatar-row {
