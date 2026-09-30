@@ -157,6 +157,8 @@ export const useAgentsStore = defineStore('agents', {
     /** Non-fatal save warning (e.g. kimi config.toml effort sync failed). */
     lastWarning: '',
     loaded: false,
+    /** openai-codex oauth credential status (~/.pi/agent/auth.json). */
+    codexAuth: { loggedIn: false, accountId: null as string | null },
   }),
   getters: {
     specOf(): (id: string) => SpecView | undefined {
@@ -289,5 +291,53 @@ export const useAgentsStore = defineStore('agents', {
         return { found: false, pluginDir: '', pluginReady: false, message: String(e) };
       }
     },
+
+    /** Codex (ChatGPT 订阅) 登录态：读 ~/.pi/agent/auth.json 的 openai-codex
+     * oauth 条目。全局凭据，所有 pi agent 共享。 */
+    async loadCodexAuth(): Promise<void> {
+      if (!isTauri) return;
+      try {
+        const v = await cmd<{ loggedIn?: boolean; accountId?: string | null }>('pi_codex_auth_status');
+        this.codexAuth = { loggedIn: !!v.loggedIn, accountId: v.accountId ?? null };
+      } catch (e) {
+        console.warn('[agents] pi_codex_auth_status failed', e);
+      }
+    },
+
+    /** 设备码登录第一步：拿 user_code + 授权页地址 + 轮询句柄。 */
+    async codexLoginStart(): Promise<CodexLoginStart> {
+      return await cmd<CodexLoginStart>('pi_codex_login_start');
+    },
+
+    /** 设备码登录第二步：单次轮询（前端按 intervalSecs 重复调用）。 */
+    async codexLoginPoll(deviceAuthId: string, userCode: string): Promise<CodexPollResult> {
+      return await cmd<CodexPollResult>('pi_codex_login_poll', { deviceAuthId, userCode });
+    },
+
+    /** 退出登录：删 auth.json 的 openai-codex 条目（其它 provider 不动）。 */
+    async codexLogout(): Promise<boolean> {
+      try {
+        await cmd('pi_codex_logout');
+        await this.loadCodexAuth();
+        return true;
+      } catch (e) {
+        this.lastError = String(e);
+        return false;
+      }
+    },
   },
 });
+
+/** Codex 设备码登录起始响应（pi_codex_login_start）。 */
+export interface CodexLoginStart {
+  deviceAuthId: string;
+  userCode: string;
+  verificationUrl: string;
+  intervalSecs: number;
+}
+
+/** Codex 轮询响应（pi_codex_login_poll）：done 时凭据已写入 auth.json。 */
+export interface CodexPollResult {
+  status: 'pending' | 'slow_down' | 'done';
+  accountId?: string;
+}
