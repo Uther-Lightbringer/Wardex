@@ -9,7 +9,7 @@
 //          chat side dock (WarDock), plus optional tool entry.
 //
 // Built-ins: the repo-shipped pi-extensions (wardex-reminders.ts /
-// wardex-codegraph.ts / wardex-plugins manager) surface in the same registry
+// wardex-codegraph.ts / wardex-devin.ts / wardex-plugins manager) surface in the same registry
 // so the settings page manages one uniform list. Built-in files cannot be
 // deleted, only toggled.
 
@@ -193,6 +193,7 @@ pub fn scan(paths: &Paths) -> Vec<PluginInfo> {
         };
         push_builtin(&mut out, "wardex-reminders.ts", "reminders", "会话提醒");
         push_builtin(&mut out, "wardex-codegraph.ts", "codegraph", "Codegraph 代码索引");
+        push_builtin(&mut out, "wardex-devin.ts", "devin", "Devin 会话");
         push_builtin(&mut out, "wardex-plugins.ts", "plugins", "插件管理员");
     }
 

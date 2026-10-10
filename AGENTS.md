@@ -63,7 +63,7 @@ Pi 进程随 WarDex **一起拉起**，不再是「首条消息才 spawn」：
 
 ### 自带扩展与包
 
-- **`pi-extensions/*.ts`**（WarDex 仓库）：spawn Pi 时 `--extension` 注入（提醒 / codegraph 工具）。定位：`WARDEX_PI_EXTENSIONS_DIR` → `resources/pi-extensions` → 仓库根 `pi-extensions/`。spawn 注入 `WARDEX_SESSION_ID` / `WARDEX_TODOS_PATH` / `WARDEX_PROJECT_DIR`
+- **`pi-extensions/*.ts`**（WarDex 仓库）：spawn Pi 时 `--extension` 注入（提醒 / codegraph / Devin 会话工具）。定位：`WARDEX_PI_EXTENSIONS_DIR` → `resources/pi-extensions` → 仓库根 `pi-extensions/`。spawn 注入 `WARDEX_SESSION_ID` / `WARDEX_TODOS_PATH` / `WARDEX_PROJECT_DIR`。Devin 会话工具还需环境变量 `DEVIN_API_KEY`（Devin API key），企业部署可用 `WARDEX_DEVIN_API_BASE` 覆盖 API 域名
 - **`pi-packages/<pkg>/`**（如 pi-multiagent：agent_team 编排工具 + skill）：spawn 时挂 `<pkg>/extensions/*/index.ts` 为 `--extension`、skill 目录一并加载。**自带包优先于 pi 全局安装**：spawn 会把 `~/.pi/agent/settings.json` `packages` 里同名 `npm:` 条目摘除（`chat/pi.rs` `delist_bundled_packages_from_pi_settings`），否则两份扩展工具/flag 重名冲突，pi 直接 exit(1)（前端表现为「已中断」）
 
 ## 打包脚本
