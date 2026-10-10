@@ -1944,11 +1944,12 @@ impl Actor {
             // npm: entries from ~/.pi/agent/settings.json, else pi exits(1) on
             // tool/flag conflicts between the two copies.
             crate::chat::pi::delist_bundled_packages_from_pi_settings();
-            let (todos_path, project_dir) = {
+            let (todos_path, project_dir, sessions_dir) = {
                 let mut stores = lock_ok(&self.stores);
                 (
                     stores.paths.todos_path().to_string_lossy().into_owned(),
                     stores.sessions.workspace_path_for(&self.session_id),
+                    stores.paths.sessions_dir().to_string_lossy().into_owned(),
                 )
             };
             let plugins_dir = crate::plugins::plugins_root(&lock_ok(&self.stores).paths)
@@ -1957,6 +1958,8 @@ impl Actor {
             let mut env = vec![
                 ("WARDEX_SESSION_ID".to_string(), Some(self.session_id.clone())),
                 ("WARDEX_TODOS_PATH".to_string(), Some(todos_path)),
+                // Local session index for the session-search builtin extension.
+                ("WARDEX_SESSIONS_DIR".to_string(), Some(sessions_dir)),
             ];
             if !project_dir.is_empty() {
                 env.push(("WARDEX_PROJECT_DIR".to_string(), Some(project_dir)));
